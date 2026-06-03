@@ -1,0 +1,15 @@
+# Live database — binary, changes constantly, not version-controlled.
+# Back it up out-of-band; do not commit.
+memory.db
+memory.db-journal
+memory.db-wal
+memory.db-shm
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Editor / IDE
+.idea/
+.vscode/
