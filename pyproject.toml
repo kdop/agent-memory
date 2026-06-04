@@ -16,9 +16,11 @@ dependencies = []
 # The HTTP service (Ticket B). Client surface (CLI / urllib ApiStore) stays
 # stdlib-only — only this extra pulls deps, scoping rule #3 to the client.
 server = ["fastapi>=0.110", "uvicorn>=0.29"]
-# Test-only. Pulls [server] (the ApiDriver runs the app in-process) + httpx for
-# the TestClient. Never part of the shipped client surface.
-dev = ["pytest", "httpx", "agent-memory[server]"]
+# The MCP server (Ticket D). Optional, like [server] — keeps the client stdlib-only.
+mcp = ["mcp>=1.0"]
+# Test-only. Pulls [server]+[mcp] (ApiDriver/McpDriver run them in-process) + httpx
+# for the TestClient. Never part of the shipped client surface.
+dev = ["pytest", "httpx", "agent-memory[server]", "agent-memory[mcp]"]
 
 [project.urls]
 Homepage = "https://github.com/kdop/agent-memory"
@@ -28,6 +30,8 @@ Homepage = "https://github.com/kdop/agent-memory"
 # shim and the `memory` alias keep working for source checkouts.
 [project.scripts]
 memory-cli = "agent_memory.cli:main"
+# Convenience entry point for registering the MCP server (needs the [mcp] extra).
+agent-memory-mcp = "agent_memory.mcp_server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

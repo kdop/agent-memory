@@ -335,3 +335,108 @@ class ApiDriver:
 
     def stats(self):
         return self._get("/stats").json()
+
+
+class McpDriver:
+    """Drives the MCP server over a real in-process client session (no subprocess).
+
+    Same `MemoryDriver` contract, so the cross-surface suite runs against the MCP
+    tools too. Each call opens an in-memory MCP session to the FastMCP server
+    (built over a `SqliteStore` on the scratch DB) and parses the tool's single
+    JSON content block. Tool I/O is async; methods bridge via `asyncio.run`.
+    """
+
+    name = "mcp"
+
+    def __init__(self, db_path, agent="tester", extra_env=None):
+        # Imported lazily so cli/api-only runs never need the mcp SDK installed.
+        from agent_memory.mcp_server import create_mcp
+        from agent_memory.store import SqliteStore
+
+        self.db_path = Path(db_path)
+        self.agent = agent
+        self._mcp = create_mcp(store=SqliteStore(self.db_path))
+
+    def initialize(self):
+        # create_mcp() already ran store.initialize(); nothing to prime.
+        pass
+
+    # ---- plumbing --------------------------------------------------------
+    def _call(self, tool, **args):
+        import asyncio
+        import json
+
+        from mcp.shared.memory import create_connected_server_and_client_session as connect
+
+        clean = {k: v for k, v in args.items() if v is not None}
+
+        async def run():
+            async with connect(self._mcp) as session:
+                result = await session.call_tool(tool, clean)
+                text = result.content[0].text if result.content else None
+                return json.loads(text) if text else None
+
+        return asyncio.run(run())
+
+    @staticmethod
+    def _to_memory(d, snippet=False):
+        return Memory(
+            id=d["id"], agent=d.get("agent"), project=d.get("project"),
+            type=d.get("type"), tags=d.get("tags") or [],
+            content="" if snippet else (d.get("content") or ""),
+            snippet=d.get("snippet") if snippet else None,
+        )
+
+    # ---- semantic operations --------------------------------------------
+    def add(self, content, *, project=None, tags=None, type=None, agent=None):
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        return self._call("memory_add", content=content, agent=agent or self.agent,
+                          project=project, tags=tags or [], type=type)["id"]
+
+    def query(self, **filters):
+        data = self._call(
+            "memory_query",
+            today=filters.get("today"), yesterday=filters.get("yesterday"),
+            since=filters.get("since"), until=filters.get("until"),
+            project=filters.get("project"), agent=filters.get("agent"),
+            tag=filters.get("tag"), type=filters.get("type"),
+            limit=filters.get("limit"),
+        )
+        return [self._to_memory(d) for d in data["memories"]]
+
+    def search(self, text, **filters):
+        data = self._call(
+            "memory_search", q=text,
+            project=filters.get("project"), agent=filters.get("agent"),
+            since=filters.get("since"), tag=filters.get("tag"),
+            limit=filters.get("limit"),
+        )
+        return [self._to_memory(d, snippet=True) for d in data["memories"]]
+
+    def get(self, mid):
+        mem = self._call("memory_show", id=mid)["memory"]
+        return None if mem is None else self._to_memory(mem)
+
+    def update(self, mid, *, content=None, project=None, type=None,
+               set_tags=None, add_tags=None, remove_tags=None, stdin=None):
+        """Returns 'updated' | 'nochange' | None (not found)."""
+        data = self._call("memory_update", id=mid, content=content, project=project,
+                          type=type, set_tags=set_tags,
+                          add_tags=add_tags or None, remove_tags=remove_tags or None)
+        if not data["found"]:
+            return None
+        return "updated" if data["changes"] else "nochange"
+
+    def delete(self, *ids):
+        """Returns count removed."""
+        return self._call("memory_delete", ids=list(ids))["deleted"]
+
+    def tags(self):
+        return [(name, count) for name, count in self._call("memory_tags")["tags"]]
+
+    def projects(self):
+        return [(project, count) for project, count in self._call("memory_projects")["projects"]]
+
+    def stats(self):
+        return self._call("memory_stats")
