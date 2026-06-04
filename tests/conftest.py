@@ -1,25 +1,26 @@
 """Shared fixtures for the cross-surface test suite.
 
-`driver` is parametrized over every wired-up surface; today only `cli` exists,
-`api`/`mcp` join the dict as Tickets B/D land — and every behavioral test then
-runs against them for free.
+`driver` is parametrized over every wired-up surface (cli, api, mcp), so every
+behavioral test runs against each of them for free — the anti-drift guard.
 """
 
 import importlib.util
 
 import pytest
 
-from drivers import ApiDriver, CliDriver
+from drivers import ApiDriver, CliDriver, McpDriver
 
-# Surface name -> factory(db_path). Add "mcp" here in Ticket D.
+# Surface name -> factory(db_path).
 DRIVER_FACTORIES = {
     "cli": CliDriver,
 }
 
-# The API surface only joins the parametrization when FastAPI is installed (the
-# [server] extra). A cli-only checkout still runs the full cli suite.
+# Each extra surface joins the parametrization only when its deps are installed,
+# so a cli-only checkout still runs the full cli suite.
 if importlib.util.find_spec("fastapi") is not None:
     DRIVER_FACTORIES["api"] = ApiDriver
+if importlib.util.find_spec("mcp") is not None:
+    DRIVER_FACTORIES["mcp"] = McpDriver
 
 
 @pytest.fixture(params=list(DRIVER_FACTORIES))
