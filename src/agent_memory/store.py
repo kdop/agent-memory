@@ -1,17 +1,21 @@
 """Storage layer.
 
-Backend-agnostic memory operations behind a `MemoryStore` interface, with
-`SqliteStore` as the only backend today. `get_store()` is the seam where a remote
-`ApiStore` (cloud API) will slot in later (#6) without touching the CLI/server.
-All methods return plain data (ids, dicts, lists); presentation lives in the CLI.
+Backend-agnostic memory operations behind a `MemoryStore` interface. `SqliteStore`
+talks to SQLite directly; `ApiStore` talks to the FastAPI service over HTTP (#6).
+`get_store()` selects between them. All methods return plain data (ids, dicts,
+lists) in the same shapes regardless of backend; presentation lives in the CLI.
 """
 
 import json
+import os
 import sqlite3
+import urllib.error
+import urllib.parse
+import urllib.request
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .config import resolve_db_path
+from .config import load_config, resolve_db_path
 
 
 class MemoryStore(ABC):
@@ -442,7 +446,131 @@ class SqliteStore(MemoryStore):
         return d
 
 
+class ApiStore(MemoryStore):
+    """MemoryStore backed by the FastAPI service over HTTP (stdlib urllib only, so
+    the client surface stays dependency-free). Translates each operation to a route
+    and parses the JSON back into the exact shapes SqliteStore returns, so the CLI
+    presentation layer is identical whether it talks to SQLite or the service."""
+
+    # Remote: there is no local DB file to guard/create (see cli.ensure_db_or_confirm).
+    db_path = None
+
+    def __init__(self, base_url, token=None, timeout=30):
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.timeout = timeout
+
+    # ---- HTTP plumbing ---------------------------------------------------
+    def _call(self, method, path, *, params=None, body=None):
+        """Returns (status_code, parsed_json|None). Raises on transport errors and
+        unexpected HTTP statuses; 404 is returned to the caller to handle."""
+        url = self.base_url + path
+        if params:
+            clean = {k: v for k, v in params.items() if v is not None}
+            if clean:
+                url += "?" + urllib.parse.urlencode(clean, doseq=True)
+        headers = {}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return 404, None
+            detail = e.read().decode(errors="replace")
+            raise RuntimeError(f"{method} {path} -> HTTP {e.code}: {detail}") from e
+
+    # ---- operations ------------------------------------------------------
+    def initialize(self):
+        return []  # the server owns schema creation/migration.
+
+    def add(self, content, agent, project, tags, mtype):
+        _, data = self._call("POST", "/memories", body={
+            "content": content, "agent": agent, "project": project,
+            "tags": list(tags), "type": mtype,
+        })
+        return data["id"]
+
+    def query(self, *, today=False, yesterday=False, since=None, until=None,
+              project=None, agent=None, tag=None, mtype=None, limit=None):
+        params = {
+            "today": "true" if today else None,
+            "yesterday": "true" if yesterday else None,
+            "since": since, "until": until, "project": project,
+            "agent": agent, "tag": tag, "type": mtype, "limit": limit,
+        }
+        _, data = self._call("GET", "/memories", params=params)
+        return data or []
+
+    def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None):
+        params = {"q": text, "project": project, "agent": agent,
+                  "since": since, "tag": tag, "limit": limit}
+        _, data = self._call("GET", "/memories/search", params=params)
+        return data or []
+
+    def get(self, mid):
+        status, data = self._call("GET", f"/memories/{mid}")
+        return None if status == 404 else data
+
+    def update(self, mid, *, new_content=None, project=None, mtype=None,
+               set_tags=None, add_tags=None, remove_tags=None):
+        body = {}
+        if new_content is not None:
+            body["content"] = new_content
+        if project is not None:
+            body["project"] = project
+        if mtype is not None:
+            body["type"] = mtype
+        if set_tags is not None:
+            body["set_tags"] = set_tags
+        if add_tags is not None:
+            body["add_tags"] = add_tags
+        if remove_tags is not None:
+            body["remove_tags"] = remove_tags
+        status, data = self._call("PATCH", f"/memories/{mid}", body=body)
+        return None if status == 404 else data["changes"]
+
+    def get_many(self, ids):
+        # No bulk endpoint; fetch each (delete previews a handful of ids).
+        out = []
+        for i in ids:
+            row = self.get(i)
+            if row is not None:
+                out.append(row)
+        return out
+
+    def delete(self, ids):
+        self._call("DELETE", "/memories", params={"ids": list(ids)})
+
+    def list_tags(self):
+        _, data = self._call("GET", "/tags")
+        return [(t["name"], t["count"]) for t in (data or [])]
+
+    def list_projects(self):
+        _, data = self._call("GET", "/projects")
+        return [(p["project"], p["count"]) for p in (data or [])]
+
+    def stats(self):
+        _, data = self._call("GET", "/stats")
+        return data
+
+
 def get_store():
-    """Resolve the active MemoryStore backend. Today: SQLite at the resolved path.
-    The seam where a remote ApiStore (cloud API) will be selected from config later (#6)."""
+    """Resolve the active MemoryStore backend.
+
+    Precedence: AGENT_MEMORY_API (env, else config `api_url`) selects the remote
+    ApiStore; otherwise SQLite at the resolved path (AGENT_MEMORY_DB → config
+    `db_path` → XDG default). The API token comes from AGENT_MEMORY_API_TOKEN,
+    else config `api_token`."""
+    api = os.environ.get("AGENT_MEMORY_API") or load_config().get("api_url")
+    if api:
+        token = os.environ.get("AGENT_MEMORY_API_TOKEN") or load_config().get("api_token")
+        return ApiStore(api, token)
     return SqliteStore(resolve_db_path())
