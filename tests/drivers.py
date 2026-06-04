@@ -440,3 +440,100 @@ class McpDriver:
 
     def stats(self):
         return self._call("memory_stats")
+
+
+class StoreDriver:
+    """Adapts any `MemoryStore` directly to the `MemoryDriver` contract (no transport).
+
+    Lets the cross-surface behavior suite run against a store engine itself — used to
+    prove `PostgresStore` satisfies the same contract as `SqliteStore` (Ticket F).
+    """
+
+    name = "store"
+
+    def __init__(self, store, agent="tester"):
+        self.store = store
+        self.agent = agent
+
+    def initialize(self):
+        self.store.initialize()
+
+    @staticmethod
+    def _to_memory(d, snippet=False):
+        return Memory(
+            id=d["id"], agent=d.get("agent"), project=d.get("project"),
+            type=d.get("type"), tags=d.get("tags") or [],
+            content="" if snippet else (d.get("content") or ""),
+            snippet=d.get("snippet") if snippet else None,
+        )
+
+    def add(self, content, *, project=None, tags=None, type=None, agent=None):
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        return self.store.add(content, agent or self.agent, project, tags or [], type)
+
+    def query(self, **f):
+        rows = self.store.query(
+            today=f.get("today", False), yesterday=f.get("yesterday", False),
+            since=f.get("since"), until=f.get("until"), project=f.get("project"),
+            agent=f.get("agent"), tag=f.get("tag"), mtype=f.get("type"),
+            limit=f.get("limit"))
+        return [self._to_memory(d) for d in rows]
+
+    def search(self, text, **f):
+        rows = self.store.search(
+            text, project=f.get("project"), agent=f.get("agent"),
+            since=f.get("since"), tag=f.get("tag"), limit=f.get("limit"))
+        return [self._to_memory(d, snippet=True) for d in rows]
+
+    def get(self, mid):
+        d = self.store.get(mid)
+        return None if d is None else self._to_memory(d)
+
+    def update(self, mid, *, content=None, project=None, type=None,
+               set_tags=None, add_tags=None, remove_tags=None, stdin=None):
+        changes = self.store.update(
+            mid, new_content=content, project=project, mtype=type,
+            set_tags=set_tags, add_tags=add_tags, remove_tags=remove_tags)
+        if changes is None:
+            return None
+        return "updated" if changes else "nochange"
+
+    def delete(self, *ids):
+        count = len(self.store.get_many(list(ids)))
+        self.store.delete(list(ids))
+        return count
+
+    def tags(self):
+        return [(name, count) for name, count in self.store.list_tags()]
+
+    def projects(self):
+        return [(project, count) for project, count in self.store.list_projects()]
+
+    def stats(self):
+        return self.store.stats()
+
+
+class PgDriver(StoreDriver):
+    """StoreDriver over a fresh PostgresStore. Each instance truncates the schema
+    (RESTART IDENTITY) so per-test state is isolated and ids start at 1, matching the
+    other drivers' scratch-DB behavior. Requires AGENT_MEMORY_TEST_PG_DSN."""
+
+    name = "pg"
+
+    def __init__(self, db_path, agent="tester", extra_env=None):
+        import os
+
+        import psycopg
+
+        from agent_memory.pg_store import PostgresStore
+
+        dsn = os.environ["AGENT_MEMORY_TEST_PG_DSN"]
+        store = PostgresStore(dsn)
+        store.initialize()
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("TRUNCATE memories, tags, memory_tags RESTART IDENTITY CASCADE")
+        super().__init__(store, agent=agent)
+
+    def initialize(self):
+        pass  # already initialized + truncated in __init__

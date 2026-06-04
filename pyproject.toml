@@ -18,9 +18,12 @@ dependencies = []
 server = ["fastapi>=0.110", "uvicorn>=0.29"]
 # The MCP server (Ticket D). Optional, like [server] — keeps the client stdlib-only.
 mcp = ["mcp>=1.0"]
-# Test-only. Pulls [server]+[mcp] (ApiDriver/McpDriver run them in-process) + httpx
-# for the TestClient. Never part of the shipped client surface.
-dev = ["pytest", "httpx", "agent-memory[server]", "agent-memory[mcp]"]
+# The PostgreSQL backend (Ticket F). Optional; selected when the DB target is a
+# postgresql:// DSN. SQLite stays the default and needs no deps.
+postgres = ["psycopg[binary]>=3.1"]
+# Test-only. Pulls all surface extras (the drivers run them in-process) + httpx for
+# the TestClient. Never part of the shipped client surface.
+dev = ["pytest", "httpx", "agent-memory[server]", "agent-memory[mcp]", "agent-memory[postgres]"]
 
 [project.urls]
 Homepage = "https://github.com/kdop/agent-memory"

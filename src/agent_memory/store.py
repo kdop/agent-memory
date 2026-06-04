@@ -562,15 +562,25 @@ class ApiStore(MemoryStore):
         return data
 
 
+def _is_pg_dsn(value):
+    return isinstance(value, str) and value.startswith(("postgres://", "postgresql://"))
+
+
 def get_store():
     """Resolve the active MemoryStore backend.
 
     Precedence: AGENT_MEMORY_API (env, else config `api_url`) selects the remote
-    ApiStore; otherwise SQLite at the resolved path (AGENT_MEMORY_DB → config
-    `db_path` → XDG default). The API token comes from AGENT_MEMORY_API_TOKEN,
-    else config `api_token`."""
-    api = os.environ.get("AGENT_MEMORY_API") or load_config().get("api_url")
+    ApiStore; otherwise the DB target (AGENT_MEMORY_DB → config `db_path` → XDG
+    default) — a `postgresql://` DSN selects PostgresStore, anything else is a
+    SQLite file path. The API token comes from AGENT_MEMORY_API_TOKEN, else config
+    `api_token`."""
+    cfg = load_config()
+    api = os.environ.get("AGENT_MEMORY_API") or cfg.get("api_url")
     if api:
-        token = os.environ.get("AGENT_MEMORY_API_TOKEN") or load_config().get("api_token")
+        token = os.environ.get("AGENT_MEMORY_API_TOKEN") or cfg.get("api_token")
         return ApiStore(api, token)
+    target = os.environ.get("AGENT_MEMORY_DB") or cfg.get("db_path")
+    if _is_pg_dsn(target):
+        from .pg_store import PostgresStore  # lazy: only the [postgres] extra needs psycopg
+        return PostgresStore(target)
     return SqliteStore(resolve_db_path())
