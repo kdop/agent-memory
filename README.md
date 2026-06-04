@@ -24,6 +24,7 @@ reference: `memory --help`.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — schema, design decisions, programmatic access
 - **[CLAUDE.md](CLAUDE.md)** — instructions for an agent working *on this tool*
 
-The DB at `~/workspace/agent-memory/memory.db` (override with `AGENT_MEMORY_DB`) is
-**live and shared** across all agent sessions. It's git-ignored — data, not source —
-so back it up out-of-band.
+The DB location resolves, highest priority first: the `AGENT_MEMORY_DB` env var → a
+stored `db_path` setting (`memory-cli config set db_path <path>`) → the default
+`~/.local/share/agent-memory/memory.db`. It's **live and shared** across all agent
+sessions, git-ignored (data, not source) — back it up out-of-band.

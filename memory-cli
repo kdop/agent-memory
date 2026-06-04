@@ -15,8 +15,41 @@ import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-# DB location: override with AGENT_MEMORY_DB, else default to this repo.
-DB_PATH = Path(os.environ.get("AGENT_MEMORY_DB", Path.home() / "workspace" / "agent-memory" / "memory.db"))
+# ── Configuration & DB-path resolution ──────────────────────────────────────
+# Persistent settings live in a JSON file under the XDG config dir. The DB path
+# resolves highest-priority-first:
+#     AGENT_MEMORY_DB env  →  stored db_path setting  →  XDG data-dir default
+# The same config file will later hold the cloud backend selection (api_url/token, #6).
+
+def _xdg(env_var, home_subpath):
+    base = os.environ.get(env_var)
+    return Path(base) if base else Path.home() / home_subpath
+
+def config_path():
+    return _xdg("XDG_CONFIG_HOME", ".config") / "agent-memory" / "config.json"
+
+def load_config():
+    try:
+        return json.loads(config_path().read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_config(cfg):
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, indent=2) + "\n")
+
+def default_db_path():
+    return _xdg("XDG_DATA_HOME", ".local/share") / "agent-memory" / "memory.db"
+
+def resolve_db_path():
+    env = os.environ.get("AGENT_MEMORY_DB")
+    if env:
+        return Path(env)
+    stored = load_config().get("db_path")
+    if stored:
+        return Path(stored)
+    return default_db_path()
 
 # Box-drawing separators used in the rendered output.
 HBAR = "━" * 39
@@ -461,9 +494,9 @@ class SqliteStore(MemoryStore):
 
 
 def get_store():
-    """Resolve the active MemoryStore backend. Today: SQLite. The seam where a
-    remote ApiStore (cloud API) will be selected from config later (#6)."""
-    return SqliteStore(DB_PATH)
+    """Resolve the active MemoryStore backend. Today: SQLite at the resolved path.
+    The seam where a remote ApiStore (cloud API) will be selected from config later (#6)."""
+    return SqliteStore(resolve_db_path())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -620,6 +653,29 @@ def show_stats(args, store):
     print(f"Newest:            {s['newest'] or 'N/A'}")
 
 
+def config_command(args, parser):
+    """Get/set persistent settings (currently: db_path). No DB access."""
+    if args.config_action == "set":
+        cfg = load_config()
+        cfg[args.key] = args.value
+        save_config(cfg)
+        print(f"✓ Set {args.key} = {args.value}")
+    elif args.config_action == "get":
+        cfg = load_config()
+        if args.key:
+            print(cfg[args.key] if args.key in cfg else f"(unset) {args.key}")
+        elif not cfg:
+            print("No settings configured.")
+        else:
+            for k, v in cfg.items():
+                print(f"{k} = {v}")
+    elif args.config_action == "path":
+        print(config_path())
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Shared memory system for AI agents")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
@@ -692,15 +748,30 @@ def main():
     delete_parser.add_argument("--yes", "-y", action="store_true", help="Actually delete (without this, runs as dry-run)")
     delete_parser.set_defaults(func=delete_memory)
 
+    # Config command (persistent settings; e.g. the DB path)
+    config_parser = subparsers.add_parser("config", help="Get/set persistent settings (e.g. db_path)")
+    config_sub = config_parser.add_subparsers(dest="config_action")
+    cset = config_sub.add_parser("set", help="Set a setting, e.g. config set db_path /path/to/memory.db")
+    cset.add_argument("key")
+    cset.add_argument("value")
+    cget = config_sub.add_parser("get", help="Show all settings, or one key")
+    cget.add_argument("key", nargs="?")
+    config_sub.add_parser("path", help="Print the config file location")
+
     args = parser.parse_args()
 
-    store = get_store()
-    for msg in store.initialize():
-        print(msg)
+    # `config` manages settings and must not touch (or create) a database.
+    if args.command == "config":
+        config_command(args, config_parser)
+        return
 
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    store = get_store()
+    for msg in store.initialize():
+        print(msg)
 
     args.func(args, store)
 

@@ -11,8 +11,9 @@ changes here affect every other project (project-a, …) that logs to this DB.
 
 - `memory-cli` — single-file Python 3 CLI, **stdlib only** (`sqlite3`, `argparse`,
   `json`, `pathlib`). No deps, no venv.
-- `memory.db` — relational SQLite store at `~/workspace/agent-memory/memory.db`
-  (override with `AGENT_MEMORY_DB`). **Live and shared across all agents.** Git-ignored.
+- `memory.db` — relational SQLite store; path resolves `AGENT_MEMORY_DB` env → stored
+  `db_path` (`memory-cli config set db_path …`) → default `~/.local/share/agent-memory/memory.db`.
+  **Live and shared across all agents.** Git-ignored.
 - Docs: `MEMORY.md` (logging protocol — imported by other repos), `ARCHITECTURE.md`
   (schema + design). Command reference is `memory --help`, not markdown.
 
@@ -21,7 +22,8 @@ changes here affect every other project (project-a, …) that logs to this DB.
 1. **The DB is live and shared.** Back up `memory.db` before any schema change or
    destructive op; verify row counts before/after. Never experiment against it — point
    `AGENT_MEMORY_DB` at a scratch file.
-2. **Never hardcode the DB path.** It resolves `AGENT_MEMORY_DB` → default above.
+2. **Never hardcode the DB path.** It resolves `AGENT_MEMORY_DB` → stored `db_path` →
+   XDG default (see above). Keep that resolution order intact.
 3. **Stdlib only.** No third-party deps — portability is the point.
 4. **No CHANGELOG.** Log user-visible CLI changes to the DB itself
    (`--type=decision`, tagged). That *is* the history.
