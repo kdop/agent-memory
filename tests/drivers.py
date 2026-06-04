@@ -3,8 +3,8 @@
 One `MemoryDriver` contract, implemented per surface, so the same behavioral
 tests run against every surface and prove they don't drift (PLAN.md → Testing).
 
-- `CliDriver`  — subprocess against `memory-cli` (this ticket, A0).
-- `ApiDriver`  — httpx over the FastAPI service        (Ticket B).
+- `CliDriver`  — subprocess against `memory-cli`       (A0).
+- `ApiDriver`  — httpx TestClient over the FastAPI app  (Ticket B).
 - `McpDriver`  — MCP client                            (Ticket D).
 
 Drivers return plain structured data (`Memory`, lists, dicts) — never raw CLI
@@ -217,3 +217,121 @@ class CliDriver:
             content="" if snippet else text_body,
             snippet=text_body if snippet else None,
         )
+
+
+class ApiDriver:
+    """Drives the FastAPI service in-process via Starlette's httpx TestClient.
+
+    Same `MemoryDriver` contract as `CliDriver`, so the cross-surface suite runs
+    against the HTTP routes unchanged. A fixed bearer token is sent on every
+    request; the app is built over a `SqliteStore` on the scratch DB (rule #1).
+    Surface-only concerns (401, /health) live in `test_api_surface.py`.
+    """
+
+    name = "api"
+    TOKEN = "test-token"
+
+    def __init__(self, db_path, agent="tester", extra_env=None):
+        # Imported lazily so a cli-only test run never needs FastAPI installed.
+        from fastapi.testclient import TestClient
+
+        from agent_memory.server import create_app
+        from agent_memory.store import SqliteStore
+
+        self.db_path = Path(db_path)
+        self.agent = agent
+        self._client = TestClient(create_app(store=SqliteStore(self.db_path), token=self.TOKEN))
+        self._headers = {"Authorization": f"Bearer {self.TOKEN}"}
+
+    def initialize(self):
+        # create_app() already ran store.initialize(); nothing to prime.
+        pass
+
+    # ---- plumbing --------------------------------------------------------
+    def _get(self, path, **params):
+        clean = {k: v for k, v in params.items() if v is not None}
+        return self._client.get(path, params=clean, headers=self._headers)
+
+    @staticmethod
+    def _to_memory(d, snippet=False):
+        return Memory(
+            id=d["id"], agent=d.get("agent"), project=d.get("project"),
+            type=d.get("type"), tags=d.get("tags") or [],
+            content="" if snippet else (d.get("content") or ""),
+            snippet=d.get("snippet") if snippet else None,
+        )
+
+    # ---- semantic operations --------------------------------------------
+    def add(self, content, *, project=None, tags=None, type=None, agent=None):
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        body = {
+            "content": content, "project": project, "type": type,
+            "agent": agent or self.agent, "tags": tags or [],
+        }
+        resp = self._client.post("/memories", json=body, headers=self._headers)
+        return resp.json()["id"] if resp.status_code == 201 else None
+
+    def query(self, **filters):
+        resp = self._get(
+            "/memories",
+            today=filters.get("today"), yesterday=filters.get("yesterday"),
+            since=filters.get("since"), until=filters.get("until"),
+            project=filters.get("project"), agent=filters.get("agent"),
+            tag=filters.get("tag"), type=filters.get("type"),
+            limit=filters.get("limit"),
+        )
+        return [self._to_memory(d) for d in resp.json()]
+
+    def search(self, text, **filters):
+        resp = self._get(
+            "/memories/search", q=text,
+            project=filters.get("project"), agent=filters.get("agent"),
+            since=filters.get("since"), tag=filters.get("tag"),
+            limit=filters.get("limit"),
+        )
+        return [self._to_memory(d, snippet=True) for d in resp.json()]
+
+    def get(self, mid):
+        resp = self._get(f"/memories/{mid}")
+        if resp.status_code == 404:
+            return None
+        return self._to_memory(resp.json())
+
+    def update(self, mid, *, content=None, project=None, type=None,
+               set_tags=None, add_tags=None, remove_tags=None, stdin=None):
+        """Returns 'updated' | 'nochange' | None (not found)."""
+        body = {}
+        if content is not None:
+            body["content"] = content
+        if project is not None:
+            body["project"] = project
+        if type is not None:
+            body["type"] = type
+        if set_tags is not None:
+            body["set_tags"] = set_tags
+        if add_tags:
+            body["add_tags"] = add_tags
+        if remove_tags:
+            body["remove_tags"] = remove_tags
+        resp = self._client.patch(f"/memories/{mid}", json=body, headers=self._headers)
+        if resp.status_code == 404:
+            return None
+        return "updated" if resp.json()["changes"] else "nochange"
+
+    def delete(self, *ids):
+        """Returns count removed."""
+        resp = self._client.request(
+            "DELETE", "/memories",
+            params={"ids": list(ids)}, headers=self._headers,
+        )
+        return resp.json()["deleted"]
+
+    def tags(self):
+        return [(t["name"], t["count"]) for t in self._get("/tags").json()]
+
+    def projects(self):
+        return [(p["project"], p["count"]) for p in self._get("/projects").json()]
+
+    def stats(self):
+        return self._get("/stats").json()
