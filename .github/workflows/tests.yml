@@ -10,8 +10,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Stdlib only — exercise the full supported range (pyproject: requires-python >=3.8).
-        python-version: ["3.8", "3.11", "3.13"]
+        # Min, mid, latest of the supported range (pyproject: requires-python >=3.10).
+        # 3.8/3.9 dropped: EOL, and the Phase 2 server extra targets pydantic v2 (>=3.9)
+        # while the test harness uses PEP 604 unions evaluated at runtime (3.10+).
+        python-version: ["3.10", "3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
