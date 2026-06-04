@@ -175,7 +175,6 @@ class CliTestCase(unittest.TestCase):
         self.assertIn("✗ Memory #999 not found.", proc.stdout)
 
     # ---- update -----------------------------------------------------------
-    @unittest.skip("blocked by #10 — content updates intermittently corrupt the FTS index; re-enable when fixed")
     def test_update_content(self):
         self.run_cli("add", "old text")
         out = self.run_cli("update", "1", "--content", "new text").stdout
@@ -183,7 +182,6 @@ class CliTestCase(unittest.TestCase):
         self.assertIn("content", out)
         self.assertIn("new text", self.run_cli("show", "1").stdout)
 
-    @unittest.skip("blocked by #10 — content updates intermittently corrupt the FTS index; re-enable when fixed")
     def test_update_content_from_stdin(self):
         self.run_cli("add", "old")
         out = self.run_cli("update", "1", "--content", "-", stdin="piped in").stdout
@@ -230,6 +228,59 @@ class CliTestCase(unittest.TestCase):
     def test_delete_none_found_exits_1(self):
         proc = self.run_cli("delete", "999", expect_code=1)
         self.assertIn("No memories found with the given IDs.", proc.stdout)
+
+    # ---- FTS index consistency (regression for #10) -----------------------
+    def test_repeated_content_updates_keep_fts_searchable(self):
+        # External-content FTS5 must be kept in sync via the 'delete' command;
+        # the naive UPDATE-trigger pattern corrupts the index under repeated edits.
+        self.run_cli("add", "seed alpha beta gamma")
+        for i in range(30):
+            self.run_cli("update", "1", "--content",
+                         f"iteration {i} delta epsilon zeta {i}", expect_code=0)
+        self.assertIn("Found 1 matches", self.run_cli("search", "epsilon").stdout)
+
+    def test_update_reindexes_old_term_gone_new_term_found(self):
+        self.run_cli("add", "findme original orangutan")
+        self.run_cli("update", "1", "--content", "replaced penguin", expect_code=0)
+        self.assertIn("No memories found for: orangutan",
+                      self.run_cli("search", "orangutan").stdout)
+        self.assertIn("Found 1 matches", self.run_cli("search", "penguin").stdout)
+
+    def test_delete_removes_from_fts(self):
+        self.run_cli("add", "keepme aardvark")
+        self.run_cli("add", "deleteme aardvark")
+        self.run_cli("delete", "2", "--yes")
+        self.assertIn("Found 1 matches", self.run_cli("search", "aardvark").stdout)
+
+    def test_legacy_fts_triggers_are_upgraded_on_next_run(self):
+        # Simulate a pre-fix DB by reinstalling the old buggy triggers, then let the
+        # CLI upgrade them on its next invocation.
+        import sqlite3
+        conn = sqlite3.connect(self.db)
+        conn.executescript("""
+            DROP TRIGGER IF EXISTS memories_ad;
+            DROP TRIGGER IF EXISTS memories_au;
+            CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+                DELETE FROM memories_fts WHERE rowid = old.id;
+            END;
+            CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+                UPDATE memories_fts SET content = new.content WHERE rowid = new.id;
+            END;
+        """)
+        conn.commit()
+        conn.close()
+
+        out = self.run_cli("stats").stdout
+        self.assertIn("Upgraded FTS triggers", out)
+
+        conn = sqlite3.connect(self.db)
+        au = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='memories_au'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertIn("INSERT INTO memories_fts(memories_fts", au)
+        # idempotent: a second run does not re-report an upgrade
+        self.assertNotIn("Upgraded FTS triggers", self.run_cli("stats").stdout)
 
 
 if __name__ == "__main__":
