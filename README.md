@@ -1,8 +1,10 @@
 # agent-memory
 
-A shared, SQLite-backed **persistent memory system for AI agents** — a single-file
-Python 3 CLI (`memory-cli`, stdlib only) over a relational SQLite DB. Gives CLI agents
-continuity across sessions: what was done, decided, learned, instead of starting cold.
+A shared, SQLite-backed **persistent memory system for AI agents**. One storage core
+(`MemoryStore` over relational SQLite) reachable three ways — a `memory-cli` command, an
+HTTP API, and an MCP server — so agents keep continuity across sessions: what was done,
+decided, learned, instead of starting cold. The CLI client stays **stdlib-only**; the
+API and MCP server are opt-in extras (`pip install "agent-memory[server]"` / `[mcp]`).
 
 > **Golden rule:** if you don't log it, it's gone next session.
 
