@@ -12,8 +12,16 @@ license = { text = "MIT" }
 # Stdlib only — no runtime dependencies, by design (portability across agent hosts).
 dependencies = []
 
+[project.optional-dependencies]
+# Test-only — never part of the shipped client surface (keeps the stdlib-only rule
+# scoped to runtime). The cross-surface suite runs via plain parametrized pytest.
+dev = ["pytest"]
+
 [project.urls]
 Homepage = "https://github.com/kdop/agent-memory"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 # Ship `memory-cli` verbatim onto PATH — it stays a standalone, copy-and-run script.
 # No importable module / entry point (deliberate; see #2). setuptools is used instead of
