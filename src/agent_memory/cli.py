@@ -8,7 +8,7 @@ import argparse
 import sys
 
 from .config import get_agent_name, config_path, load_config, save_config
-from .store import get_store
+from .store import SqliteStore, get_store
 
 # Box-drawing separators used in the rendered output.
 HBAR = "━" * 39
@@ -300,7 +300,9 @@ def main():
         sys.exit(1)
 
     store = get_store()
-    ensure_db_or_confirm(store.db_path, args.assume_yes)
+    # The missing-DB guard is a local-file concern; a remote ApiStore has none.
+    if isinstance(store, SqliteStore):
+        ensure_db_or_confirm(store.db_path, args.assume_yes)
     for msg in store.initialize():
         print(msg)
 
