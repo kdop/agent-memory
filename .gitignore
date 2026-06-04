@@ -10,6 +10,10 @@ memory.db-shm
 __pycache__/
 *.pyc
 
+# Build artifacts (from `pip install` / packaging)
+build/
+*.egg-info/
+
 # Editor / IDE
 .idea/
 .vscode/
