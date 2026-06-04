@@ -4,7 +4,8 @@ A shared, SQLite-backed **persistent memory system for AI agents**. One storage 
 (`MemoryStore` over relational SQLite) reachable three ways — a `memory-cli` command, an
 HTTP API, and an MCP server — so agents keep continuity across sessions: what was done,
 decided, learned, instead of starting cold. The CLI client stays **stdlib-only**; the
-API and MCP server are opt-in extras (`pip install "agent-memory[server]"` / `[mcp]`).
+API, MCP server, and Postgres backend are opt-in extras
+(`pip install "agent-memory[server]"` / `[mcp]` / `[postgres]`).
 
 > **Golden rule:** if you don't log it, it's gone next session.
 
@@ -46,6 +47,17 @@ directly (e.g. for another MCP client): `python -m agent_memory.mcp_server` (std
 `python -m agent_memory.server` starts a FastAPI service mirroring the CLI (needs the
 `[server]` extra). Set `AGENT_MEMORY_API_TOKEN` for bearer auth; point clients at it
 with `AGENT_MEMORY_API=http://host:8000`.
+
+## PostgreSQL (optional)
+
+SQLite is the default. To use Postgres instead, install the `[postgres]` extra and point
+the DB target at a DSN — everything else is unchanged:
+
+```bash
+pip install -e ".[postgres]"
+export AGENT_MEMORY_DB="postgresql://user:pass@host:5432/agent_memory"
+memory-cli migrate-to-postgres "$AGENT_MEMORY_DB"   # one-time copy from your SQLite DB
+```
 
 The DB location resolves, highest priority first: the `AGENT_MEMORY_DB` env var → a
 stored `db_path` setting (`memory-cli config set db_path <path>`) → the default

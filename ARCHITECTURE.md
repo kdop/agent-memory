@@ -17,17 +17,19 @@ sessions — auto-timestamped, tagged, scoped by project and agent. The **client
 src/agent_memory/
   config.py            # config + DB-path / agent-name resolution
   store.py             # MemoryStore (ABC), SqliteStore, ApiStore, get_store()
+  pg_store.py          # PostgresStore + SQLite→Postgres migration — [postgres] extra
   cli.py               # memory-cli command (argparse); presentation only
   server/              # FastAPI service (app/auth/schemas/__main__) — [server] extra
   mcp_server.py        # FastMCP server wrapping get_store() — [mcp] extra
 memory-cli             # thin shim on PATH -> agent_memory.cli:main (rule #5)
 ```
 
-`get_store()` is the seam: it returns an `ApiStore` (HTTP) when `AGENT_MEMORY_API` is
-set, otherwise a `SqliteStore`. Precedence: `AGENT_MEMORY_API` (env, else config
-`api_url`) → SQLite at `AGENT_MEMORY_DB` → config `db_path` → XDG default. Every surface
-goes through the same store, so behavior can't drift — the cross-surface test suite
-asserts the CLI, API, and MCP all produce identical results.
+`get_store()` is the seam. Precedence: `AGENT_MEMORY_API` (env, else config `api_url`)
+→ `ApiStore` (HTTP); otherwise the DB target (`AGENT_MEMORY_DB` → config `db_path` → XDG
+default) — a `postgresql://` DSN → `PostgresStore`, anything else → `SqliteStore`. Every
+surface and engine goes through the same `MemoryStore` contract, so behavior can't drift:
+the cross-surface suite asserts the CLI, API, MCP, and Postgres all produce identical
+results.
 
 ## Design goals
 
@@ -153,8 +155,12 @@ Wrap multi-row writes in a single transaction; the FTS triggers handle search-in
   hierarchies, memory links, a `schema_version` table) — add when a real need shows up.
 - **Security:** plaintext file, user-only perms (`chmod 600`); use filesystem encryption
   for sensitive data. SQL injection is a non-issue — all queries are parameterized.
+- **Postgres engine:** set the DB target to a `postgresql://` DSN to use `PostgresStore`
+  (needs the `[postgres]` extra). It mirrors the schema with a generated `tsvector` column
+  + GIN index and `ts_headline` in place of FTS5 — kept behind the same `MemoryStore`, so
+  every surface works identically. Move an existing SQLite DB over with
+  `memory-cli migrate-to-postgres <dsn>` (preserves ids, idempotent).
 - **Limits:** no built-in sync (rsync/Syncthing with WAL), keyword not semantic search
-  (FTS5 is lexical — tag well). Postgres is a future engine behind the same `MemoryStore`
-  (#26); browse the raw DB with `sqlite-web`/Datasette.
+  (FTS is lexical — tag well). Browse the raw SQLite DB with `sqlite-web`/Datasette.
 - **Principles:** simple over complex, fast over fancy, queryable over readable,
   agent-first. Markdown for prose; Memory CLI for the operational timeline.
