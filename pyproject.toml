@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-memory"
+version = "0.1.0"
+description = "Shared, SQLite-backed persistent memory system for AI agents (single-file CLI)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+# Stdlib only — no runtime dependencies, by design (portability across agent hosts).
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/kdop/agent-memory"
+
+# Ship `memory-cli` verbatim onto PATH — it stays a standalone, copy-and-run script.
+# No importable module / entry point (deliberate; see #2). setuptools is used instead of
+# hatchling specifically because it can install a literal script file as-is.
+[tool.setuptools]
+script-files = ["memory-cli"]
+packages = []
+py-modules = []
