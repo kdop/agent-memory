@@ -1,13 +1,33 @@
-# Architecture — Memory CLI
+# Architecture — agent-memory
 
-How `memory-cli` and its SQLite store are built and why. For usage, see
+How the `agent_memory` package and its SQLite store are built and why. For usage, see
 [README.md](README.md); for the agent logging protocol, see [MEMORY.md](MEMORY.md).
 
 ## Overview
 
-A single-file Python 3 CLI over a relational SQLite database. It gives AI agents a
-persistent, queryable, full-text-searchable timeline across sessions — auto-timestamped,
-tagged, scoped by project and agent. Stdlib only; no third-party dependencies.
+A relational SQLite store behind a `MemoryStore` interface, exposed through three
+surfaces over one codebase: the `memory-cli` command, an HTTP API (FastAPI), and an MCP
+server. It gives AI agents a persistent, queryable, full-text-searchable timeline across
+sessions — auto-timestamped, tagged, scoped by project and agent. The **client surface**
+(CLI + the urllib `ApiStore`) is stdlib-only; the API and MCP servers are opt-in extras.
+
+## Package layout
+
+```
+src/agent_memory/
+  config.py            # config + DB-path / agent-name resolution
+  store.py             # MemoryStore (ABC), SqliteStore, ApiStore, get_store()
+  cli.py               # memory-cli command (argparse); presentation only
+  server/              # FastAPI service (app/auth/schemas/__main__) — [server] extra
+  mcp_server.py        # FastMCP server wrapping get_store() — [mcp] extra
+memory-cli             # thin shim on PATH -> agent_memory.cli:main (rule #5)
+```
+
+`get_store()` is the seam: it returns an `ApiStore` (HTTP) when `AGENT_MEMORY_API` is
+set, otherwise a `SqliteStore`. Precedence: `AGENT_MEMORY_API` (env, else config
+`api_url`) → SQLite at `AGENT_MEMORY_DB` → config `db_path` → XDG default. Every surface
+goes through the same store, so behavior can't drift — the cross-surface test suite
+asserts the CLI, API, and MCP all produce identical results.
 
 ## Design goals
 
@@ -24,10 +44,13 @@ tagged, scoped by project and agent. Stdlib only; no third-party dependencies.
 | **SQLite over files** | Structured queries, FTS5, ACID, single-file backup, zero deps | Markdown (not queryable), Postgres (needs a server), JSON (no index/FTS) |
 | **Relational tags** (3 tables: `memories`, `tags`, `memory_tags`) | Indexed tag queries, case-insensitive, global rename, analytics | JSON array (slow `LIKE`, case-sensitive), generated column (can't rename globally) |
 | **FTS5 for search** | Built-in, ranked, snippet highlighting, trigger-synced | `LIKE` (slow, no ranking), external engine (overkill) |
-| **Single Python script** | Copy one file, no `pip install`, runs on any Python 3.7+ | Library/package (heavier deploy; can evolve to one later) |
+| **`agent_memory` package** (Phase 2) | One store core behind CLI + API + MCP; reusable, testable across surfaces | Single-file script (the original — couldn't host the API/MCP surfaces; `memory-cli` is now a shim onto the package) |
+| **Reuse `SqliteStore`, no ORM** | FTS5 search is hand-SQL either way; keeps the client stdlib-only and the 41 characterization tests valid | SQLAlchemy (rewrite of working storage; an ORM buys nothing for the FTS query) |
 
-Tags started as a JSON column and were migrated to the relational schema; old DBs are
-auto-detected and migrated on first run, no user intervention.
+The single-file design (Phase 1) was deliberately reversed in Phase 2 (epic #8) to host
+the API and MCP surfaces; `memory-cli` stays on PATH as a shim so the command name and
+`memory` alias are unchanged. Tags started as a JSON column and were migrated to the
+relational schema; old DBs are auto-detected and migrated on first run, no intervention.
 
 ## Database schema
 
@@ -88,10 +111,19 @@ Run `VACUUM;` periodically on DBs with many deletes.
 
 ## Programmatic access
 
-The CLI is the supported interface, but the DB is a plain SQLite file you can read directly.
-The CLI resolves the path `AGENT_MEMORY_DB` → stored `db_path` (`memory-cli config set
-db_path …`) → default `~/.local/share/agent-memory/memory.db`. A simple reader that honors
-the env override and the default:
+Three supported entry points beyond the CLI:
+
+- **The package:** `from agent_memory.store import get_store` → a `MemoryStore` honoring
+  the same `AGENT_MEMORY_API`/`AGENT_MEMORY_DB`/config/XDG precedence as the CLI.
+- **The HTTP API:** `python -m agent_memory.server` (needs `[server]`); routes mirror the
+  store 1:1, bearer auth via `AGENT_MEMORY_API_TOKEN`, `GET /health` is unauthenticated.
+- **The MCP server:** `python -m agent_memory.mcp_server` (needs `[mcp]`); tools
+  `memory_add/query/search/show/update/delete/tags/projects/stats` over stdio.
+
+The DB is also a plain SQLite file you can read directly. The path resolves
+`AGENT_MEMORY_DB` → stored `db_path` (`memory-cli config set db_path …`) → default
+`~/.local/share/agent-memory/memory.db`. A simple reader that honors the env override and
+the default:
 
 ```python
 import os, sqlite3
@@ -122,6 +154,7 @@ Wrap multi-row writes in a single transaction; the FTS triggers handle search-in
 - **Security:** plaintext file, user-only perms (`chmod 600`); use filesystem encryption
   for sensitive data. SQL injection is a non-issue — all queries are parameterized.
 - **Limits:** no built-in sync (rsync/Syncthing with WAL), keyword not semantic search
-  (FTS5 is lexical — tag well), CLI only (browse with `sqlite-web`/Datasette).
+  (FTS5 is lexical — tag well). Postgres is a future engine behind the same `MemoryStore`
+  (#26); browse the raw DB with `sqlite-web`/Datasette.
 - **Principles:** simple over complex, fast over fancy, queryable over readable,
   agent-first. Markdown for prose; Memory CLI for the operational timeline.
