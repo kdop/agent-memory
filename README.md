@@ -24,29 +24,26 @@ reference: `memory --help`.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — schema, design decisions, programmatic access
 - **[CLAUDE.md](CLAUDE.md)** — instructions for an agent working *on this tool*
 
-## Claude Code skill
+## MCP server
 
-A Claude Code skill teaches agents when and how to drive `memory-cli`. The canonical
-source lives at **[`skills/memory/SKILL.md`](skills/memory/SKILL.md)**; this repo's
-`.claude/skills/memory/` symlinks to it, so it's active when working here.
-
-**To use it in your other projects, symlink it once at the user level** (available
-everywhere, no per-project setup):
+Agents reach the memory system over **MCP** (replacing the former Claude Code skill).
+Install the extra and register the stdio server once — it's then available in every
+session, exposing tools `memory_add/query/search/show/update/delete/tags/projects/stats`:
 
 ```bash
-mkdir -p ~/.claude/skills
-ln -sfn ~/workspace/agent-memory/skills/memory ~/.claude/skills/memory
+pip install -e ".[mcp]"               # installs the `agent-memory-mcp` entry point
+claude mcp add agent-memory -- agent-memory-mcp
 ```
 
-Or per-project, symlink into that repo's `.claude/skills/`:
+The server wraps the same `get_store()` selection as the CLI, so it talks to local
+SQLite by default, or to the HTTP service when `AGENT_MEMORY_API` is set. To run it
+directly (e.g. for another MCP client): `python -m agent_memory.mcp_server` (stdio).
 
-```bash
-mkdir -p .claude/skills
-ln -sfn ~/workspace/agent-memory/skills/memory .claude/skills/memory
-```
+## HTTP service
 
-Either way the single source of truth stays `skills/memory/SKILL.md` in this repo —
-edit it once, every project picks up the change.
+`python -m agent_memory.server` starts a FastAPI service mirroring the CLI (needs the
+`[server]` extra). Set `AGENT_MEMORY_API_TOKEN` for bearer auth; point clients at it
+with `AGENT_MEMORY_API=http://host:8000`.
 
 The DB location resolves, highest priority first: the `AGENT_MEMORY_DB` env var → a
 stored `db_path` setting (`memory-cli config set db_path <path>`) → the default
