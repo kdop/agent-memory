@@ -5,10 +5,11 @@ behavioral test runs against each of them for free — the anti-drift guard.
 """
 
 import importlib.util
+import os
 
 import pytest
 
-from drivers import ApiDriver, CliDriver, McpDriver
+from drivers import ApiDriver, CliDriver, McpDriver, PgDriver
 
 # Surface name -> factory(db_path).
 DRIVER_FACTORIES = {
@@ -21,6 +22,10 @@ if importlib.util.find_spec("fastapi") is not None:
     DRIVER_FACTORIES["api"] = ApiDriver
 if importlib.util.find_spec("mcp") is not None:
     DRIVER_FACTORIES["mcp"] = McpDriver
+# Postgres joins only when a test instance is configured (CI service / local podman);
+# proves PostgresStore satisfies the same behavior contract as SQLite.
+if importlib.util.find_spec("psycopg") is not None and os.environ.get("AGENT_MEMORY_TEST_PG_DSN"):
+    DRIVER_FACTORIES["pg"] = PgDriver
 
 
 @pytest.fixture(params=list(DRIVER_FACTORIES))

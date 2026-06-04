@@ -7,7 +7,7 @@ The storage and config layers it drives now live alongside it in the package.
 import argparse
 import sys
 
-from .config import get_agent_name, config_path, load_config, save_config
+from .config import get_agent_name, config_path, load_config, resolve_db_path, save_config
 from .store import SqliteStore, get_store
 
 # Box-drawing separators used in the rendered output.
@@ -188,6 +188,17 @@ def config_command(args, parser):
         sys.exit(1)
 
 
+def migrate_to_postgres_command(args):
+    """Copy the resolved (or --from) SQLite DB into a Postgres instance. Manages its
+    own stores; does not go through get_store()."""
+    from .pg_store import migrate_sqlite_to_postgres
+
+    src = args.from_db or str(resolve_db_path())
+    result = migrate_sqlite_to_postgres(src, args.dsn)
+    print(f"✓ Migrated {result['memories']} memories and {result['tags']} tags "
+          f"from {src} into Postgres.")
+
+
 def ensure_db_or_confirm(db_path, assume_yes):
     """Guard against silently creating a DB at a wrong/typo'd path. If the resolved
     path doesn't exist: with --yes, create it; on a TTY, ask; otherwise error (#4)."""
@@ -288,11 +299,24 @@ def main():
     cget.add_argument("key", nargs="?")
     config_sub.add_parser("path", help="Print the config file location")
 
+    # Migrate command (SQLite -> Postgres; needs the [postgres] extra)
+    migrate_parser = subparsers.add_parser(
+        "migrate-to-postgres",
+        help="Copy the SQLite DB into a Postgres instance (needs the [postgres] extra)")
+    migrate_parser.add_argument("dsn", help="Target postgresql:// DSN")
+    migrate_parser.add_argument("--from", dest="from_db",
+                                help="Source SQLite path (default: the resolved DB)")
+
     args = parser.parse_args()
 
     # `config` manages settings and must not touch (or create) a database.
     if args.command == "config":
         config_command(args, config_parser)
+        return
+
+    # `migrate-to-postgres` manages its own source/target stores.
+    if args.command == "migrate-to-postgres":
+        migrate_to_postgres_command(args)
         return
 
     if not args.command:
