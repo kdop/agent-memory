@@ -283,5 +283,64 @@ class CliTestCase(unittest.TestCase):
         self.assertNotIn("Upgraded FTS triggers", self.run_cli("stats").stdout)
 
 
+class ConfigTestCase(unittest.TestCase):
+    """DB-path resolution: AGENT_MEMORY_DB env > stored db_path > XDG data default."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.cfg_home = root / "config"
+        self.data_home = root / "data"
+        self.root = root
+        self.env = {k: v for k, v in os.environ.items() if k != "AGENT_MEMORY_DB"}
+        self.env.update({
+            "XDG_CONFIG_HOME": str(self.cfg_home),
+            "XDG_DATA_HOME": str(self.data_home),
+            "AGENT_NAME": "tester",
+        })
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_cli(self, *args, env=None):
+        return subprocess.run(
+            [sys.executable, str(MEMORY_CLI), *args],
+            env=env or self.env, capture_output=True, text=True,
+        )
+
+    def test_config_set_get_path(self):
+        out = self.run_cli("config", "set", "db_path", "/tmp/foo.db").stdout
+        self.assertIn("✓ Set db_path = /tmp/foo.db", out)
+        self.assertEqual(self.run_cli("config", "get", "db_path").stdout.strip(), "/tmp/foo.db")
+        self.assertIn("config.json", self.run_cli("config", "path").stdout)
+
+    def test_config_get_unset_key(self):
+        self.assertIn("(unset) nope", self.run_cli("config", "get", "nope").stdout)
+
+    def test_config_command_creates_no_db(self):
+        self.run_cli("config", "get")
+        self.assertFalse((self.data_home / "agent-memory" / "memory.db").exists())
+
+    def test_default_is_xdg_data_dir(self):
+        out = self.run_cli("stats").stdout
+        self.assertIn(str(self.data_home), out)
+        self.assertTrue((self.data_home / "agent-memory" / "memory.db").exists())
+
+    def test_stored_db_path_is_used(self):
+        target = self.root / "custom" / "m.db"
+        self.run_cli("config", "set", "db_path", str(target))
+        self.run_cli("add", "hello via config")
+        self.assertTrue(target.exists())
+        self.assertIn("hello via config", self.run_cli("query").stdout)
+
+    def test_env_overrides_stored(self):
+        stored = self.root / "stored.db"
+        envdb = self.root / "env.db"
+        self.run_cli("config", "set", "db_path", str(stored))
+        self.run_cli("add", "in env db", env={**self.env, "AGENT_MEMORY_DB": str(envdb)})
+        self.assertTrue(envdb.exists())
+        self.assertFalse(stored.exists())  # env won; stored path never created
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,8 +10,9 @@ don't log it, it's gone next session.** Scope everything with `--project=<name>`
 
 ## Usage
 
-Invoke as `memory` (alias) or `memory-cli`. DB path resolves from `AGENT_MEMORY_DB`
-(default `~/workspace/agent-memory/memory.db`). Attribute entries with `--agent=<you>`.
+Invoke as `memory` (alias) or `memory-cli`. DB path resolves: `AGENT_MEMORY_DB` env →
+stored `db_path` (`memory-cli config set db_path <path>`) → default
+`~/.local/share/agent-memory/memory.db`. Attribute entries with `--agent=<you>`.
 
     # Add — AS YOU WORK, not at session end
     memory add "Implemented auth" --agent=<you> --project=<name> --tags=auth,feature --type=code
