@@ -5,14 +5,21 @@
 runs against them for free.
 """
 
+import importlib.util
+
 import pytest
 
-from drivers import CliDriver
+from drivers import ApiDriver, CliDriver
 
-# Surface name -> factory(db_path). Add "api"/"mcp" here in later tickets.
+# Surface name -> factory(db_path). Add "mcp" here in Ticket D.
 DRIVER_FACTORIES = {
     "cli": CliDriver,
 }
+
+# The API surface only joins the parametrization when FastAPI is installed (the
+# [server] extra). A cli-only checkout still runs the full cli suite.
+if importlib.util.find_spec("fastapi") is not None:
+    DRIVER_FACTORIES["api"] = ApiDriver
 
 
 @pytest.fixture(params=list(DRIVER_FACTORIES))
