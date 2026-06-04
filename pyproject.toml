@@ -13,9 +13,12 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
-# Test-only — never part of the shipped client surface (keeps the stdlib-only rule
-# scoped to runtime). The cross-surface suite runs via plain parametrized pytest.
-dev = ["pytest"]
+# The HTTP service (Ticket B). Client surface (CLI / urllib ApiStore) stays
+# stdlib-only — only this extra pulls deps, scoping rule #3 to the client.
+server = ["fastapi>=0.110", "uvicorn>=0.29"]
+# Test-only. Pulls [server] (the ApiDriver runs the app in-process) + httpx for
+# the TestClient. Never part of the shipped client surface.
+dev = ["pytest", "httpx", "agent-memory[server]"]
 
 [project.urls]
 Homepage = "https://github.com/kdop/agent-memory"
@@ -28,6 +31,9 @@ memory-cli = "agent_memory.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Make the src-layout package importable in-process (ApiDriver builds the app)
+# without requiring an editable install first.
+pythonpath = ["src"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
