@@ -89,14 +89,16 @@ Run `VACUUM;` periodically on DBs with many deletes.
 ## Programmatic access
 
 The CLI is the supported interface, but the DB is a plain SQLite file you can read directly.
-Path resolves from `AGENT_MEMORY_DB`, default `~/workspace/agent-memory/memory.db`.
+The CLI resolves the path `AGENT_MEMORY_DB` → stored `db_path` (`memory-cli config set
+db_path …`) → default `~/.local/share/agent-memory/memory.db`. A simple reader that honors
+the env override and the default:
 
 ```python
 import os, sqlite3
 from pathlib import Path
 
 db = Path(os.environ.get("AGENT_MEMORY_DB",
-                         Path.home() / "workspace/agent-memory/memory.db"))
+                         Path.home() / ".local/share/agent-memory/memory.db"))
 conn = sqlite3.connect(db)
 conn.row_factory = sqlite3.Row
 
