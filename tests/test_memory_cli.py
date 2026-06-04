@@ -38,8 +38,9 @@ class CliTestCase(unittest.TestCase):
             "AGENT_NAME": "tester",
         }
         # Prime the DB so the one-time "Initialized..." banner doesn't bleed into
-        # the assertions of the command actually under test.
-        self.run_cli("stats")
+        # the assertions of the command actually under test. --yes auto-creates it
+        # (no TTY in a subprocess; see the create-confirmation guard, #4).
+        self.run_cli("--yes", "stats")
         self.assertTrue(self.db.exists(), "priming run should create the DB")
 
     def tearDown(self):
@@ -322,14 +323,14 @@ class ConfigTestCase(unittest.TestCase):
         self.assertFalse((self.data_home / "agent-memory" / "memory.db").exists())
 
     def test_default_is_xdg_data_dir(self):
-        out = self.run_cli("stats").stdout
+        out = self.run_cli("--yes", "stats").stdout
         self.assertIn(str(self.data_home), out)
         self.assertTrue((self.data_home / "agent-memory" / "memory.db").exists())
 
     def test_stored_db_path_is_used(self):
         target = self.root / "custom" / "m.db"
         self.run_cli("config", "set", "db_path", str(target))
-        self.run_cli("add", "hello via config")
+        self.run_cli("--yes", "add", "hello via config")
         self.assertTrue(target.exists())
         self.assertIn("hello via config", self.run_cli("query").stdout)
 
@@ -337,9 +338,26 @@ class ConfigTestCase(unittest.TestCase):
         stored = self.root / "stored.db"
         envdb = self.root / "env.db"
         self.run_cli("config", "set", "db_path", str(stored))
-        self.run_cli("add", "in env db", env={**self.env, "AGENT_MEMORY_DB": str(envdb)})
+        self.run_cli("--yes", "add", "in env db", env={**self.env, "AGENT_MEMORY_DB": str(envdb)})
         self.assertTrue(envdb.exists())
         self.assertFalse(stored.exists())  # env won; stored path never created
+
+    # ---- create-confirmation guard (#4) ----------------------------------
+    def test_missing_db_without_yes_errors_and_creates_nothing(self):
+        proc = self.run_cli("stats")  # no --yes, no TTY in subprocess
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("Pass --yes", proc.stderr)
+        self.assertFalse((self.data_home / "agent-memory" / "memory.db").exists())
+
+    def test_missing_db_with_yes_creates(self):
+        proc = self.run_cli("--yes", "stats")
+        self.assertEqual(proc.returncode, 0)
+        self.assertTrue((self.data_home / "agent-memory" / "memory.db").exists())
+
+    def test_existing_db_needs_no_yes(self):
+        self.run_cli("--yes", "stats")               # create it once
+        proc = self.run_cli("stats")                  # now exists -> no prompt, no error
+        self.assertEqual(proc.returncode, 0)
 
 
 if __name__ == "__main__":
