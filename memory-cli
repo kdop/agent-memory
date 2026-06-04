@@ -66,15 +66,18 @@ def init_db():
         END
     """)
     
+    # External-content FTS5 tables must be synced via the special 'delete'
+    # command — a naive DELETE/UPDATE on the FTS table corrupts the index (#10).
     conn.execute("""
         CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-            DELETE FROM memories_fts WHERE rowid = old.id;
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
         END
     """)
-    
+
     conn.execute("""
         CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-            UPDATE memories_fts SET content = new.content WHERE rowid = new.id;
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
+            INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
         END
     """)
     
@@ -143,6 +146,32 @@ def migrate_json_tags():
     conn.close()
     
     print(f"✓ Migrated {migrated} memories")
+    return True
+
+def migrate_fts_triggers(conn):
+    """Replace the legacy unsafe FTS sync triggers (direct DELETE/UPDATE on the
+    external-content FTS table) with the documented 'delete'-command pattern, and
+    rebuild the index in case it was already corrupted. Idempotent. See #10."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memories_au'"
+    ).fetchone()
+    if not row or not row[0]:
+        return False  # no FTS trigger yet (fresh DB gets the correct ones from init_db)
+    if "INSERT INTO memories_fts(memories_fts" in row[0]:
+        return False  # already on the corrected pattern
+    conn.executescript("""
+        DROP TRIGGER IF EXISTS memories_ad;
+        DROP TRIGGER IF EXISTS memories_au;
+        CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
+        END;
+        CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
+            INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
+    """)
+    conn.commit()
     return True
 
 def get_agent_name():
@@ -691,6 +720,12 @@ def main():
             migrated = migrate_json_tags()
             if migrated:
                 print("✓ Migration complete - now using relational schema")
+
+        # Upgrade legacy FTS triggers + rebuild the index if needed (#10)
+        conn = sqlite3.connect(DB_PATH)
+        if migrate_fts_triggers(conn):
+            print("✓ Upgraded FTS triggers and rebuilt search index")
+        conn.close()
     
     if not args.command:
         parser.print_help()
