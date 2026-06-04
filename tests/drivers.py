@@ -13,6 +13,10 @@ chrome. Surface-specific output/exit-code/format assertions live in
 `AGENT_MEMORY_DB` (rule #1: the live DB is never touched).
 """
 
+# Keep the PEP 604 (`str | None`) annotations below evaluable as strings so the
+# harness imports on every supported runtime, not just 3.10+.
+from __future__ import annotations
+
 import os
 import re
 import subprocess
