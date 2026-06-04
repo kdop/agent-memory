@@ -24,6 +24,30 @@ reference: `memory --help`.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — schema, design decisions, programmatic access
 - **[CLAUDE.md](CLAUDE.md)** — instructions for an agent working *on this tool*
 
+## Claude Code skill
+
+A Claude Code skill teaches agents when and how to drive `memory-cli`. The canonical
+source lives at **[`skills/memory/SKILL.md`](skills/memory/SKILL.md)**; this repo's
+`.claude/skills/memory/` symlinks to it, so it's active when working here.
+
+**To use it in your other projects, symlink it once at the user level** (available
+everywhere, no per-project setup):
+
+```bash
+mkdir -p ~/.claude/skills
+ln -sfn ~/workspace/agent-memory/skills/memory ~/.claude/skills/memory
+```
+
+Or per-project, symlink into that repo's `.claude/skills/`:
+
+```bash
+mkdir -p .claude/skills
+ln -sfn ~/workspace/agent-memory/skills/memory .claude/skills/memory
+```
+
+Either way the single source of truth stays `skills/memory/SKILL.md` in this repo —
+edit it once, every project picks up the change.
+
 The DB location resolves, highest priority first: the `AGENT_MEMORY_DB` env var → a
 stored `db_path` setting (`memory-cli config set db_path <path>`) → the default
 `~/.local/share/agent-memory/memory.db`. It's **live and shared** across all agent
