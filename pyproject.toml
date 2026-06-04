@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-memory"
 version = "0.1.0"
-description = "Shared, SQLite-backed persistent memory system for AI agents (single-file CLI)"
+description = "Shared, SQLite-backed persistent memory system for AI agents"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -20,13 +20,14 @@ dev = ["pytest"]
 [project.urls]
 Homepage = "https://github.com/kdop/agent-memory"
 
+# `memory-cli` command name preserved (rule #5) — now an entry point onto the
+# package instead of a verbatim script file (Ticket A). The repo-root `memory-cli`
+# shim and the `memory` alias keep working for source checkouts.
+[project.scripts]
+memory-cli = "agent_memory.cli:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-# Ship `memory-cli` verbatim onto PATH — it stays a standalone, copy-and-run script.
-# No importable module / entry point (deliberate; see #2). setuptools is used instead of
-# hatchling specifically because it can install a literal script file as-is.
-[tool.setuptools]
-script-files = ["memory-cli"]
-packages = []
-py-modules = []
+[tool.setuptools.packages.find]
+where = ["src"]
