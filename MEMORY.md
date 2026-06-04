@@ -1,7 +1,8 @@
 # MEMORY.md — agent memory protocol
 
-Canonical protocol for the persistent memory system (`memory-cli` + the shared SQLite
-DB). **Other repos import this file** instead of copying it:
+Canonical protocol for the persistent memory system (the `memory-cli` command over the
+shared SQLite DB; the same store is also reachable via the HTTP API and the MCP server —
+see [README.md](README.md)). **Other repos import this file** instead of copying it:
 
     @~/workspace/agent-memory/MEMORY.md
 

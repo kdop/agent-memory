@@ -1,53 +1,41 @@
 #!/bin/bash
-# Quick setup for memory-cli
+# Quick setup for agent-memory. Run from a clone of this repo.
+set -euo pipefail
 
-AGENTS_DIR="$HOME/workspace/agents"
-MEMORY_CLI="$AGENTS_DIR/memory-cli"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MEMORY_CLI="$REPO_DIR/memory-cli"
 
-echo "🔧 Memory CLI Setup"
+echo "🔧 agent-memory setup"
 echo ""
 
-# Check if memory-cli exists
 if [ ! -f "$MEMORY_CLI" ]; then
-    echo "❌ Error: memory-cli not found at $MEMORY_CLI"
+    echo "❌ memory-cli not found at $MEMORY_CLI"
     exit 1
 fi
-
-# Make executable
 chmod +x "$MEMORY_CLI"
-echo "✓ Made memory-cli executable"
 
-# Check if already in PATH
-if echo "$PATH" | grep -q "$AGENTS_DIR"; then
-    echo "✓ $AGENTS_DIR already in PATH"
-else
-    echo ""
-    echo "📝 To add memory-cli to your PATH, run:"
-    echo ""
-    echo "  echo 'export PATH=\"\$HOME/workspace/agents:\$PATH\"' >> ~/.bashrc"
-    echo "  source ~/.bashrc"
-    echo ""
-    echo "Then you can use 'memory' instead of 'memory-cli'"
-fi
-
-# Set AGENT_NAME for current shell
+# Two ways to get `memory-cli` on PATH — pick whichever you prefer.
+echo "Install options:"
 echo ""
-echo "📝 To set your agent name, add to your shell profile:"
+echo "  A) pip (recommended) — installs the memory-cli console script:"
+echo "       pip install -e \"$REPO_DIR\""
+echo "     Optional surfaces:  pip install -e \"$REPO_DIR\"[server]   # HTTP API"
+echo "                         pip install -e \"$REPO_DIR\"[mcp]      # MCP server"
 echo ""
-echo "  # For Clu (OpenClaw sessions)"
-echo "  export AGENT_NAME=clu"
+echo "  B) shim on PATH + alias (no install; client is stdlib-only):"
+echo "       export PATH=\"$REPO_DIR:\$PATH\""
+echo "       alias memory=\"$MEMORY_CLI\""
+echo "     Add those two lines to your shell profile to persist them."
 echo ""
-echo "  # For agent-a (Claude CLI sessions)"
-echo "  export AGENT_NAME=agent-a"
+echo "Set your agent name in your shell profile, e.g.:"
+echo "       export AGENT_NAME=agent-a        # or clu, etc."
 echo ""
 
-# Test the tool
-echo "🧪 Testing memory-cli..."
-"$MEMORY_CLI" stats
+# Smoke test against a throwaway DB so we never touch the live one.
+echo "🧪 Testing memory-cli (scratch DB)..."
+AGENT_MEMORY_DB="$(mktemp -d)/smoke.db" "$MEMORY_CLI" --yes stats >/dev/null && echo "✓ memory-cli works"
 
 echo ""
-echo "✅ Setup complete!"
-echo ""
-echo "📚 Documentation: ~/workspace/agents/README-memory.md"
-echo "🔍 Try: memory query --today"
-echo "🔍 Try: memory search \"topic\""
+echo "✅ Setup info printed."
+echo "📚 Docs: README.md (usage), MEMORY.md (logging protocol), ARCHITECTURE.md (design)"
+echo "🔍 Try:  memory query --today   |   memory search \"topic\""
