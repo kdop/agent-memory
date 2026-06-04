@@ -676,8 +676,26 @@ def config_command(args, parser):
         sys.exit(1)
 
 
+def ensure_db_or_confirm(db_path, assume_yes):
+    """Guard against silently creating a DB at a wrong/typo'd path. If the resolved
+    path doesn't exist: with --yes, create it; on a TTY, ask; otherwise error (#4)."""
+    if db_path.exists() or assume_yes:
+        return
+    if not sys.stdin.isatty():
+        print(f"No database at {db_path}.\n"
+              f"Pass --yes to create it, or set AGENT_MEMORY_DB / `config set db_path`.",
+              file=sys.stderr)
+        sys.exit(1)
+    answer = input(f"No DB at {db_path} — create it? [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("Aborted — no database created.")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Shared memory system for AI agents")
+    parser.add_argument("--yes", "-y", dest="assume_yes", action="store_true",
+                        help="Auto-create the database if missing; skip the confirmation prompt")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # Add command
@@ -770,6 +788,7 @@ def main():
         sys.exit(1)
 
     store = get_store()
+    ensure_db_or_confirm(store.db_path, args.assume_yes)
     for msg in store.initialize():
         print(msg)
 
