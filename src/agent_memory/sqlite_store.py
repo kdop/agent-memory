@@ -8,7 +8,6 @@ seam that only defines the contract, the remote `ApiStore`, and `get_store()`.
 Stdlib-only (rule #3): the client surface must stay dependency-free.
 """
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -85,67 +84,8 @@ class SqliteStore(MemoryStore):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag_id)")
         conn.commit()
 
-    def _migrate_json_tags(self):
-        """Migrate old JSON tags column to relational tables"""
-        conn = self._connect()
-        columns = [row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()]
-        if 'tags' not in columns:
-            conn.close()
-            return False  # Nothing to migrate
-
-        print("🔄 Migrating JSON tags to relational schema...")
-        rows = conn.execute("SELECT id, tags FROM memories WHERE tags IS NOT NULL").fetchall()
-        migrated = 0
-        for memory_id, tags_json in rows:
-            try:
-                for tag_name in json.loads(tags_json):
-                    conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,))
-                    tag_id = conn.execute(
-                        "SELECT id FROM tags WHERE name = ? COLLATE NOCASE", (tag_name,)
-                    ).fetchone()[0]
-                    conn.execute(
-                        "INSERT OR IGNORE INTO memory_tags (memory_id, tag_id) VALUES (?, ?)",
-                        (memory_id, tag_id)
-                    )
-                migrated += 1
-            except (json.JSONDecodeError, TypeError):
-                continue
-        conn.commit()
-        print("🗑️  Removing old JSON tags column...")
-        conn.execute("ALTER TABLE memories DROP COLUMN tags")
-        conn.commit()
-        conn.close()
-        print(f"✓ Migrated {migrated} memories")
-        return True
-
-    def _migrate_fts_triggers(self, conn):
-        """Replace the legacy unsafe FTS sync triggers (direct DELETE/UPDATE on the
-        external-content FTS table) with the documented 'delete'-command pattern, and
-        rebuild the index in case it was already corrupted. Idempotent. See #10."""
-        row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memories_au'"
-        ).fetchone()
-        if not row or not row[0]:
-            return False  # no FTS trigger yet (fresh DB gets the correct ones from init)
-        if "INSERT INTO memories_fts(memories_fts" in row[0]:
-            return False  # already on the corrected pattern
-        conn.executescript("""
-            DROP TRIGGER IF EXISTS memories_ad;
-            DROP TRIGGER IF EXISTS memories_au;
-            CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
-            END;
-            CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
-                INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
-            END;
-            INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
-        """)
-        conn.commit()
-        return True
-
     def initialize(self):
-        """Create/upgrade the DB as needed. Returns a list of status messages to show."""
+        """Create the DB and schema if missing. Returns a list of status messages."""
         msgs = []
         if not self.db_path.exists():
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,22 +94,14 @@ class SqliteStore(MemoryStore):
             conn.close()
             msgs.append(f"✓ Initialized memory database at {self.db_path}")
         else:
+            # Existing file with no schema yet (edge case) still gets the tables;
+            # _init_schema is idempotent (all CREATE ... IF NOT EXISTS).
             conn = self._connect()
             has_tags_table = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='tags'"
             ).fetchone() is not None
-            conn.close()
-
             if not has_tags_table:
-                conn = self._connect()
                 self._init_schema(conn)
-                conn.close()
-                if self._migrate_json_tags():
-                    msgs.append("✓ Migration complete - now using relational schema")
-
-            conn = self._connect()
-            if self._migrate_fts_triggers(conn):
-                msgs.append("✓ Upgraded FTS triggers and rebuilt search index")
             conn.close()
         return msgs
 
