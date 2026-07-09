@@ -11,7 +11,7 @@ Stdlib-only (rule #3): the client surface must stay dependency-free.
 import sqlite3
 from pathlib import Path
 
-from .store import MemoryStore
+from .store import MemoryStore, since_days_window
 
 
 class SqliteStore(MemoryStore):
@@ -137,19 +137,16 @@ class SqliteStore(MemoryStore):
         conn.close()
         return mid
 
-    def query(self, *, today=False, yesterday=False, since=None, until=None,
+    def query(self, *, since_days=None, since=None, until=None,
               project=None, agent=None, tag=None, mtype=None, limit=None):
         conn = self._connect()
         conn.row_factory = sqlite3.Row
         where, params, joins = [], [], []
 
-        if today:
-            where.append("DATE(m.timestamp, 'localtime') = DATE('now', 'localtime')")
-        elif yesterday:
-            where.append("DATE(m.timestamp, 'localtime') = DATE('now', '-1 day', 'localtime')")
-        elif since:
+        if since_days is not None:
+            since, until = since_days_window(since_days)  # overrides any user since/until
+        if since:
             where.append("m.timestamp >= ?"); params.append(since)
-
         if until:
             where.append("m.timestamp <= ?"); params.append(until)
         if project:

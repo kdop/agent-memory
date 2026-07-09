@@ -38,14 +38,14 @@ def create_mcp(store=None) -> FastMCP:
         return {"id": mid}
 
     @mcp.tool()
-    def memory_query(today: bool = False, yesterday: bool = False,
+    def memory_query(since_days: Optional[int] = None,
                      since: Optional[str] = None, until: Optional[str] = None,
                      project: Optional[str] = None, agent: Optional[str] = None,
                      tag: Optional[str] = None, type: Optional[str] = None,
                      limit: Optional[int] = None) -> dict:
         """Query memories by time/project/agent/tag/type. Returns {"memories": [...]}."""
         return {"memories": resolved.query(
-            today=today, yesterday=yesterday, since=since, until=until,
+            since_days=since_days, since=since, until=until,
             project=project, agent=agent, tag=tag, mtype=type, limit=limit)}
 
     @mcp.tool()
