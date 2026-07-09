@@ -16,7 +16,7 @@ import sqlite3
 import psycopg
 from psycopg.rows import dict_row
 
-from .store import MemoryStore
+from .store import MemoryStore, since_days_window
 
 # Highlight markers match SqliteStore.search() so output is identical across engines.
 _HEADLIGHT = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
@@ -108,14 +108,12 @@ class PostgresStore(MemoryStore):
                 )
         return mid
 
-    def query(self, *, today=False, yesterday=False, since=None, until=None,
+    def query(self, *, since_days=None, since=None, until=None,
               project=None, agent=None, tag=None, mtype=None, limit=None):
         where, params, joins = [], [], []
-        if today:
-            where.append("m.timestamp::date = current_date")
-        elif yesterday:
-            where.append("m.timestamp::date = current_date - 1")
-        elif since:
+        if since_days is not None:
+            since, until = since_days_window(since_days)  # overrides any user since/until
+        if since:
             where.append("m.timestamp >= %s"); params.append(since)
         if until:
             where.append("m.timestamp <= %s"); params.append(until)

@@ -100,9 +100,8 @@ class CliDriver:
 
     def query(self, **filters):
         args = ["query"]
-        for flag in ("today", "yesterday"):
-            if filters.get(flag):
-                args.append(f"--{flag}")
+        if filters.get("since_days") is not None:
+            args += ["--since-days", str(filters["since_days"])]
         for flag in ("since", "until", "project", "agent", "tag", "type"):
             if filters.get(flag):
                 args += [f"--{flag}", str(filters[flag])]
@@ -289,7 +288,7 @@ class ApiDriver:
     def query(self, **filters):
         resp = self._get(
             "/memories",
-            today=filters.get("today"), yesterday=filters.get("yesterday"),
+            since_days=filters.get("since_days"),
             since=filters.get("since"), until=filters.get("until"),
             project=filters.get("project"), agent=filters.get("agent"),
             tag=filters.get("tag"), type=filters.get("type"),
@@ -411,7 +410,7 @@ class McpDriver:
     def query(self, **filters):
         data = self._call(
             "memory_query",
-            today=filters.get("today"), yesterday=filters.get("yesterday"),
+            since_days=filters.get("since_days"),
             since=filters.get("since"), until=filters.get("until"),
             project=filters.get("project"), agent=filters.get("agent"),
             tag=filters.get("tag"), type=filters.get("type"),
@@ -488,7 +487,7 @@ class StoreDriver:
 
     def query(self, **f):
         rows = self.store.query(
-            today=f.get("today", False), yesterday=f.get("yesterday", False),
+            since_days=f.get("since_days"),
             since=f.get("since"), until=f.get("until"), project=f.get("project"),
             agent=f.get("agent"), tag=f.get("tag"), mtype=f.get("type"),
             limit=f.get("limit"))

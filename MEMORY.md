@@ -20,7 +20,7 @@ stored `db_path` (`memory-cli config set db_path <path>`) → default
 
     # Query — filtered timeline
     memory query --project=<name> --limit=10
-    memory query --project=<name> --today           # also --yesterday, --since=, --until=
+    memory query --project=<name> --since-days 0    # 0=today, 1=yesterday; also --since=, --until=
     memory query --project=<name> --tag=bugfix --type=decision
 
     # Search — full text

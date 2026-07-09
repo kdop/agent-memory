@@ -65,6 +65,16 @@ def test_query_type_filter(driver):
     assert len(driver.query(type="decision")) == 1
 
 
+def test_query_since_days_today(driver):
+    driver.add("today entry")
+    assert len(driver.query(since_days=0)) == 1
+
+
+def test_query_since_days_excludes_other_days(driver):
+    driver.add("today entry")
+    assert driver.query(since_days=7) == []
+
+
 # ---- search ---------------------------------------------------------------
 def test_search_match(driver):
     driver.add("the quick brown fox")
