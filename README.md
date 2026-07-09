@@ -1,5 +1,8 @@
 # agent-memory
 
+![tests](https://github.com/kdop/agent-memory/actions/workflows/tests.yml/badge.svg)
+![coverage](./coverage.svg)
+
 A shared, SQLite-backed **persistent memory system for AI agents**. One storage core
 (`MemoryStore` over relational SQLite) reachable three ways — a `memory-cli` command, an
 HTTP API, and an MCP server — so agents keep continuity across sessions: what was done,
