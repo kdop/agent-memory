@@ -31,9 +31,11 @@ def create_mcp(store=None) -> FastMCP:
 
     @mcp.tool()
     def memory_add(content: str, agent: Optional[str] = None,
-                   project: Optional[str] = None, tags: Optional[list[str]] = None,
+                   project: Optional[str] = None, tags: Optional[list[dict]] = None,
                    type: Optional[str] = None) -> dict:
-        """Add a memory. Returns {"id": <new id>}."""
+        """Add a memory. `tags` is a list of {"name": str, "description": str (optional)}
+        — a brand-new tag with no description auto-defaults to its own name. Returns
+        {"id": <new id>}."""
         mid = resolved.add(content, agent or get_agent_name(), project, tags or [], type)
         return {"id": mid}
 
@@ -63,9 +65,11 @@ def create_mcp(store=None) -> FastMCP:
 
     @mcp.tool()
     def memory_update(id: int, content: Optional[str] = None, project: Optional[str] = None,
-                      type: Optional[str] = None, set_tags: Optional[str] = None,
-                      add_tags: Optional[str] = None, remove_tags: Optional[str] = None) -> dict:
-        """Update fields of a memory. Returns {"found": bool, "changes": [...]}."""
+                      type: Optional[str] = None, set_tags: Optional[list[dict]] = None,
+                      add_tags: Optional[list[dict]] = None, remove_tags: Optional[list[str]] = None) -> dict:
+        """Update fields of a memory. `set_tags`/`add_tags` are lists of
+        {"name": str, "description": str (optional)}; `remove_tags` is a list of names.
+        Returns {"found": bool, "changes": [...]}."""
         changes = resolved.update(
             id, new_content=content, project=project, mtype=type,
             set_tags=set_tags, add_tags=add_tags, remove_tags=remove_tags)
@@ -84,8 +88,8 @@ def create_mcp(store=None) -> FastMCP:
 
     @mcp.tool()
     def memory_tags() -> dict:
-        """List tags with counts. Returns {"tags": [[name, count], ...]}."""
-        return {"tags": [[name, count] for name, count in resolved.list_tags()]}
+        """List tags with counts + descriptions. Returns {"tags": [[name, count, description], ...]}."""
+        return {"tags": [[r[0], r[1], r[2]] for r in resolved.list_tags()]}
 
     @mcp.tool()
     def memory_projects() -> dict:

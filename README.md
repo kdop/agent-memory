@@ -17,7 +17,7 @@ export PATH="$HOME/workspace/agent-memory:$PATH"
 alias memory="$HOME/workspace/agent-memory/memory-cli"
 
 memory add "Chose SQLite over flat files" \
-  --agent=agent-a --project=agent-memory --tags=design --type=decision
+  --agent=agent-a --project=agent-memory --tags='[{"name":"design","description":"architecture choices"}]' --type=decision
 memory query --project=agent-memory --since-days 0
 memory search "database" --project=agent-memory
 ```

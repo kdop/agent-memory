@@ -50,9 +50,19 @@ class PostgresStore(MemoryStore):
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tags (
                     id BIGSERIAL PRIMARY KEY,
-                    name TEXT NOT NULL
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT ''
                 )
             """)
+            # Pre-existing tags table without the required descriptor: add + backfill
+            # each tag's own name as a placeholder descriptor (mirrors SqliteStore).
+            has_desc = cur.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'tags' AND column_name = 'description'
+            """).fetchone() is not None
+            if not has_desc:
+                cur.execute("ALTER TABLE tags ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+                cur.execute("UPDATE tags SET description = name WHERE description = ''")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS memory_tags (
                     memory_id BIGINT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -71,11 +81,28 @@ class PostgresStore(MemoryStore):
         return []
 
     # ---- helpers ---------------------------------------------------------
-    def _get_or_create_tag(self, cur, name):
-        row = cur.execute("SELECT id FROM tags WHERE lower(name) = lower(%s)", (name,)).fetchone()
+    def _get_or_create_tag(self, cur, name, description=None):
+        """Resolve a tag id. An existing tag is reused (descriptor updated only if a
+        new non-empty one is given); a brand-new tag with no descriptor auto-defaults
+        to its own name. Mirrors SqliteStore."""
+        row = cur.execute(
+            "SELECT id, description FROM tags WHERE lower(name) = lower(%s)", (name,)
+        ).fetchone()
         if row:
-            return row[0]
-        return cur.execute("INSERT INTO tags (name) VALUES (%s) RETURNING id", (name,)).fetchone()[0]
+            tag_id, existing = row
+            if description and description != existing:
+                cur.execute("UPDATE tags SET description = %s WHERE id = %s", (description, tag_id))
+            return tag_id
+        return cur.execute(
+            "INSERT INTO tags (name, description) VALUES (%s, %s) RETURNING id",
+            (name, description or name),
+        ).fetchone()[0]
+
+    @staticmethod
+    def _tag_fields(item):
+        if isinstance(item, dict):
+            return item.get("name", "").strip(), (item.get("description") or None)
+        return str(item).strip(), None
 
     def _tags_for(self, cur, memory_id):
         return [r[0] for r in cur.execute("""
@@ -100,8 +127,11 @@ class PostgresStore(MemoryStore):
                 "INSERT INTO memories (agent, project, content, type) VALUES (%s,%s,%s,%s) RETURNING id",
                 (agent, project, content, mtype),
             ).fetchone()[0]
-            for name in tags:
-                tag_id = self._get_or_create_tag(cur, name)
+            for item in tags:
+                name, description = self._tag_fields(item)
+                if not name:
+                    continue
+                tag_id = self._get_or_create_tag(cur, name, description)
                 cur.execute(
                     "INSERT INTO memory_tags (memory_id, tag_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
                     (mid, tag_id),
@@ -216,22 +246,30 @@ class PostgresStore(MemoryStore):
                 changes.append(f"type → {val}")
             if set_tags is not None:
                 cur.execute("DELETE FROM memory_tags WHERE memory_id = %s", (mid,))
-                new_tags = [t.strip() for t in set_tags.split(",") if t.strip()]
-                for name in new_tags:
-                    tag_id = self._get_or_create_tag(cur, name)
-                    cur.execute("INSERT INTO memory_tags (memory_id, tag_id) VALUES (%s,%s)", (mid, tag_id))
-                changes.append(f"tags set to: {', '.join(new_tags) if new_tags else '(none)'}")
+                new_names = []
+                for item in set_tags:
+                    name, description = self._tag_fields(item)
+                    if not name:
+                        continue
+                    tag_id = self._get_or_create_tag(cur, name, description)
+                    cur.execute("INSERT INTO memory_tags (memory_id, tag_id) VALUES (%s,%s) ON CONFLICT DO NOTHING", (mid, tag_id))
+                    new_names.append(name)
+                changes.append(f"tags set to: {', '.join(new_names) if new_names else '(none)'}")
             if add_tags:
-                added = [t.strip() for t in add_tags.split(",") if t.strip()]
-                for name in added:
-                    tag_id = self._get_or_create_tag(cur, name)
+                added = []
+                for item in add_tags:
+                    name, description = self._tag_fields(item)
+                    if not name:
+                        continue
+                    tag_id = self._get_or_create_tag(cur, name, description)
                     cur.execute(
                         "INSERT INTO memory_tags (memory_id, tag_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
                         (mid, tag_id),
                     )
+                    added.append(name)
                 changes.append(f"+tags: {', '.join(added)}")
             if remove_tags:
-                removed = [t.strip() for t in remove_tags.split(",") if t.strip()]
+                removed = [str(t).strip() for t in remove_tags if str(t).strip()]
                 for name in removed:
                     cur.execute("""
                         DELETE FROM memory_tags
@@ -257,9 +295,9 @@ class PostgresStore(MemoryStore):
     def list_tags(self):
         with self._connect() as conn, conn.cursor() as cur:
             return cur.execute("""
-                SELECT t.name, COUNT(mt.memory_id) AS count
+                SELECT t.name, COUNT(mt.memory_id) AS count, t.description
                 FROM tags t LEFT JOIN memory_tags mt ON t.id = mt.tag_id
-                GROUP BY t.id, t.name
+                GROUP BY t.id, t.name, t.description
                 ORDER BY count DESC, t.name
             """).fetchall()
 
@@ -297,7 +335,12 @@ def migrate_sqlite_to_postgres(sqlite_path, dsn):
     mems = src.execute(
         "SELECT id, timestamp, agent, project, content, type FROM memories ORDER BY id"
     ).fetchall()
-    tags = src.execute("SELECT id, name FROM tags").fetchall()
+    # Older source DBs may predate the required tag descriptor; fall back to the name.
+    tag_cols = [r[1] for r in src.execute("PRAGMA table_info(tags)").fetchall()]
+    if "description" in tag_cols:
+        tags = src.execute("SELECT id, name, description FROM tags").fetchall()
+    else:
+        tags = src.execute("SELECT id, name, name AS description FROM tags").fetchall()
     links = src.execute("SELECT memory_id, tag_id FROM memory_tags").fetchall()
     src.close()
 
@@ -311,8 +354,8 @@ def migrate_sqlite_to_postgres(sqlite_path, dsn):
             )
         for t in tags:
             cur.execute(
-                "INSERT INTO tags (id, name) VALUES (%s,%s) ON CONFLICT (id) DO NOTHING",
-                (t["id"], t["name"]),
+                "INSERT INTO tags (id, name, description) VALUES (%s,%s,%s) ON CONFLICT (id) DO NOTHING",
+                (t["id"], t["name"], t["description"]),
             )
         for link in links:
             cur.execute(
