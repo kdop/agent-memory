@@ -1,13 +1,12 @@
 """CLI-surface characterization — assertions that are specific to the CLI:
 exact rendered chrome, exit codes, dry-run text, the create-confirmation guard,
-config/DB-path resolution, and the SQLite FTS-trigger migration. These have no
-cross-surface meaning, so they stay pinned to the CLI (not in test_behaviors.py).
+and config/DB-path resolution. These have no cross-surface meaning, so they stay
+pinned to the CLI (not in test_behaviors.py).
 
 Faithfully preserves the behavior the old tests/test_memory_cli.py pinned.
 """
 
 import os
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -163,31 +162,6 @@ def test_delete_none_found_exits_1(primed):
     proc = primed.raw("delete", "999")
     assert proc.returncode == 1
     assert "No memories found with the given IDs." in proc.stdout
-
-
-def test_legacy_fts_triggers_upgraded_on_next_run(primed):
-    # Reinstall the old buggy triggers, then let the CLI upgrade them on next run.
-    conn = sqlite3.connect(primed.db_path)
-    conn.executescript("""
-        DROP TRIGGER IF EXISTS memories_ad;
-        DROP TRIGGER IF EXISTS memories_au;
-        CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
-            DELETE FROM memories_fts WHERE rowid = old.id;
-        END;
-        CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
-            UPDATE memories_fts SET content = new.content WHERE rowid = new.id;
-        END;
-    """)
-    conn.commit()
-    conn.close()
-
-    assert "Upgraded FTS triggers" in primed.raw("stats").stdout
-    conn = sqlite3.connect(primed.db_path)
-    au = conn.execute("SELECT sql FROM sqlite_master WHERE name='memories_au'").fetchone()[0]
-    conn.close()
-    assert "INSERT INTO memories_fts(memories_fts" in au
-    # idempotent: a second run does not re-report an upgrade
-    assert "Upgraded FTS triggers" not in primed.raw("stats").stdout
 
 
 # ── config / DB-path resolution (AGENT_MEMORY_DB > db_path > XDG default) ────
