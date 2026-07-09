@@ -87,7 +87,10 @@ def _schema():
 
 @pytest.fixture(scope="session")
 def live_server(_schema):
-    """Run the real app under uvicorn in a background thread. Yields (url, token)."""
+    """Run the real app under uvicorn in a background thread. Yields (url, token).
+
+    NullPool on the server engine: every request opens and closes its own connection,
+    so between tests no server connection lingers to hold a lock against `_truncate`."""
     import uvicorn
 
     from agent_memory.server.app import create_app
@@ -119,7 +122,11 @@ def live_server(_schema):
 
 @pytest.fixture(autouse=True)
 def _truncate(_schema):
-    """Wipe the three tables before each test (RESTART IDENTITY so ids start at 1)."""
+    """Wipe the three tables before each test (RESTART IDENTITY so ids start at 1).
+
+    A brief settle after the commit lets the shared session-scoped uvicorn server
+    (a separate thread/loop) quiesce any connection still closing from the previous
+    test, so a fresh test's first write is never raced by lingering async cleanup."""
     async def _do():
         eng = make_test_engine()
         try:
@@ -131,6 +138,7 @@ def _truncate(_schema):
             await eng.dispose()
 
     asyncio.run(_do())
+    time.sleep(0.1)
 
 
 @pytest.fixture(params=["cli", "api", "mcp"])

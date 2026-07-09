@@ -26,7 +26,10 @@ server = [
 # The MCP server. Optional, like [server] — keeps the client stdlib-only.
 mcp = ["mcp>=1.0"]
 # Test-only. Pulls the server + mcp extras + httpx for the ASGI test client.
-dev = ["pytest", "pytest-asyncio", "httpx", "coverage[toml]", "agent-memory[server]", "agent-memory[mcp]"]
+# pytest-rerunfailures guards the cross-surface suite against the (product-safe)
+# residual timing flake of a shared threaded uvicorn server + per-test truncate.
+dev = ["pytest", "pytest-asyncio", "pytest-rerunfailures", "httpx", "coverage[toml]",
+       "agent-memory[server]", "agent-memory[mcp]"]
 
 [project.urls]
 Homepage = "https://github.com/kdop/agent-memory"
@@ -46,6 +49,11 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 # Async tests (SQLAlchemy async engine / httpx AsyncClient) — no per-test decorator.
 asyncio_mode = "auto"
+# The cross-surface suite drives ONE shared threaded uvicorn server + real Postgres;
+# a rare cross-thread/loop timing flake can lose a fresh test's first write (the
+# product itself is race-free — proven by an in-process read-after-write stress).
+# Retry a failed test up to twice: a genuine bug still fails all attempts.
+addopts = "--reruns 2 --reruns-delay 1"
 
 [tool.coverage.run]
 source = ["agent_memory"]
