@@ -1,11 +1,11 @@
 """Cross-surface test drivers.
 
 One `MemoryDriver` contract, implemented per surface, so the same behavioral
-tests run against every surface and prove they don't drift (PLAN.md → Testing).
+tests run against every surface and prove they don't drift.
 
-- `CliDriver`  — subprocess against `memory-cli`       (A0).
-- `ApiDriver`  — httpx TestClient over the FastAPI app  (Ticket B).
-- `McpDriver`  — MCP client                            (Ticket D).
+- `CliDriver`  — subprocess against `memory-cli`.
+- `ApiDriver`  — httpx TestClient over the FastAPI app.
+- `McpDriver`  — MCP client.
 
 Drivers return plain structured data (`Memory`, lists, dicts) — never raw CLI
 chrome. Surface-specific output/exit-code/format assertions live in
