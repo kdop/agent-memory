@@ -7,7 +7,7 @@ name = "agent-memory"
 version = "0.1.0"
 description = "Shared, SQLite-backed persistent memory system for AI agents"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 license = { text = "MIT" }
 # Stdlib only — no runtime dependencies, by design (portability across agent hosts).
 dependencies = []

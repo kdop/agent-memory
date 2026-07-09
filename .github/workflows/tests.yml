@@ -22,19 +22,13 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-    strategy:
-      fail-fast: false
-      matrix:
-        # Min, mid, latest of the supported range (pyproject: requires-python >=3.10).
-        # 3.8/3.9 dropped: EOL, and the Phase 2 server extra targets pydantic v2 (>=3.9)
-        # while the test harness uses PEP 604 unions evaluated at runtime (3.10+).
-        python-version: ["3.10", "3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          # Single version — the tool targets one supported Python (pyproject: >=3.14).
+          python-version: "3.14"
       - name: Install test deps
         run: python -m pip install -e ".[dev]"
       - name: Run tests
@@ -62,11 +56,11 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       - name: Install test deps
         run: python -m pip install -e ".[dev]"
       - name: Measure coverage (CLI subprocess + Postgres included)
