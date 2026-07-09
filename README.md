@@ -3,66 +3,103 @@
 ![tests](https://github.com/kdop/agent-memory/actions/workflows/tests.yml/badge.svg)
 ![coverage](./coverage.svg)
 
-A shared, SQLite-backed **persistent memory system for AI agents**. One storage core
-(`MemoryStore` over relational SQLite) reachable three ways — a `memory-cli` command, an
-HTTP API, and an MCP server — so agents keep continuity across sessions: what was done,
-decided, learned, instead of starting cold. The CLI client stays **stdlib-only**; the
-API, MCP server, and Postgres backend are opt-in extras
-(`pip install "agent-memory[server]"` / `[mcp]` / `[postgres]`).
+A shared, **Postgres-backed persistent memory service for AI agents** — API-first. A
+single async FastAPI service owns the database; agents reach it three ways — the
+`memory-cli` command, the same HTTP API directly, and an MCP server — so they keep
+continuity across sessions: what was done, decided, learned, instead of starting cold.
+The **CLI and MCP are thin HTTP clients** (`ApiClient`, stdlib `urllib` only); only the
+server touches Postgres, via SQLAlchemy 2.0 async (`pip install "agent-memory[server]"`
+/ `[mcp]`).
 
 > **Golden rule:** if you don't log it, it's gone next session.
+
+## Architecture in one line
+
+**Client (CLI / MCP) → HTTP → FastAPI service → Postgres.** The client never opens a
+database; it resolves an endpoint and a bearer token and makes requests. The server is
+the only thing with a `postgresql://` DSN.
+
+## Quickstart
+
+**1. Run Postgres** and create a database (any Postgres 14+ reachable by DSN).
+
+**2. Install the server extra and create the schema** (Alembic owns it):
+
+```bash
+pip install -e ".[server]"
+export AGENT_MEMORY_DB="postgresql://user:pass@localhost:5432/agent_memory"
+alembic upgrade head
+```
+
+**3. Start the API** (needs a bearer token — the server fails closed without one):
+
+```bash
+AGENT_MEMORY_DB="$AGENT_MEMORY_DB" \
+AGENT_MEMORY_API_TOKEN="$(openssl rand -hex 16)" \
+AGENT_MEMORY_PORT=8099 \
+python -m agent_memory.server           # binds 127.0.0.1:8099
+```
+
+**4. Point the CLI at it** and log a memory:
 
 ```bash
 export PATH="$HOME/workspace/agent-memory:$PATH"
 alias memory="$HOME/workspace/agent-memory/memory-cli"
+export AGENT_MEMORY_API="http://127.0.0.1:8099"     # this is also the built-in default
+export AGENT_MEMORY_API_TOKEN="…"                   # same token the server was started with
 
-memory add "Chose SQLite over flat files" \
-  --agent=agent-a --project=agent-memory --tags='[{"name":"design","description":"architecture choices"}]' --type=decision
+memory add "Chose Postgres over SQLite" \
+  --agent=agent-a --project=agent-memory --type=decision \
+  --tags='[{"name":"design","description":"architecture choices"},{"name":"db"}]'
 memory query --project=agent-memory --since-days 0
 memory search "database" --project=agent-memory
 ```
 
 Memories are attributed per agent (`--agent`), scoped by `--project`, classified by
-`--type` (`code | decision | lesson | note`), and tagged for retrieval. Full command
-reference: `memory --help`.
+`--type` (`code | decision | lesson | note`), and tagged for retrieval. Tags are
+structured objects — `--tags` takes a **JSON array** of `{"name", "description"}`, and a
+new tag with no description defaults to its own name. Full command reference:
+`memory --help`.
 
 - **[MEMORY.md](MEMORY.md)** — the logging protocol (imported by other repos)
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — schema, design decisions, programmatic access
 - **[CLAUDE.md](CLAUDE.md)** — instructions for an agent working *on this tool*
 
+## The three surfaces
+
+| Surface | What it is | Extra |
+|---|---|---|
+| **API service** | Async FastAPI + SQLAlchemy 2.0 (asyncpg); the only thing that touches Postgres. `python -m agent_memory.server`. | `[server]` |
+| **CLI client** | `memory-cli` — a presentation layer over `ApiClient`. Stdlib-only, never opens a DB. | none |
+| **MCP client** | Same `ApiClient`, exposed as MCP tools over stdio. | `[mcp]` |
+
+### Endpoint & auth resolution (clients)
+
+- **Endpoint:** `AGENT_MEMORY_API` env → config `api_url` (`memory config set api_url …`)
+  → local default `http://127.0.0.1:8099`.
+- **Token:** `AGENT_MEMORY_API_TOKEN` env → config `api_token`. Sent as
+  `Authorization: Bearer …`. The server requires a token and fails closed without one;
+  `GET /health` is the only unauthenticated route.
+
 ## MCP server
 
-Agents reach the memory system over **MCP** (replacing the former Claude Code skill).
-Install the extra and register the stdio server once — it's then available in every
-session, exposing tools `memory_add/query/search/show/update/delete/tags/projects/stats`:
+Agents can reach the memory system over **MCP**. Install the extra and register the
+stdio server once — it's then available in every session, exposing tools
+`memory_add/query/search/show/update/delete/tags/projects/stats`:
 
 ```bash
 pip install -e ".[mcp]"               # installs the `agent-memory-mcp` entry point
 claude mcp add agent-memory -- agent-memory-mcp
 ```
 
-The server wraps the same `get_store()` selection as the CLI, so it talks to local
-SQLite by default, or to the HTTP service when `AGENT_MEMORY_API` is set. To run it
-directly (e.g. for another MCP client): `python -m agent_memory.mcp_server` (stdio).
+Like the CLI, the MCP server is an `ApiClient` — it talks HTTP to the running FastAPI
+service (`AGENT_MEMORY_API` / `api_url`), never a database. Run it directly for another
+MCP client with `python -m agent_memory.mcp_server` (stdio).
 
-## HTTP service
+## PostgreSQL
 
-`python -m agent_memory.server` starts a FastAPI service mirroring the CLI (needs the
-`[server]` extra). Set `AGENT_MEMORY_API_TOKEN` for bearer auth; point clients at it
-with `AGENT_MEMORY_API=http://host:8000`.
-
-## PostgreSQL (optional)
-
-SQLite is the default. To use Postgres instead, install the `[postgres]` extra and point
-the DB target at a DSN — everything else is unchanged:
-
-```bash
-pip install -e ".[postgres]"
-export AGENT_MEMORY_DB="postgresql://user:pass@host:5432/agent_memory"
-memory-cli migrate-to-postgres "$AGENT_MEMORY_DB"   # one-time copy from your SQLite DB
-```
-
-The DB location resolves, highest priority first: the `AGENT_MEMORY_DB` env var → a
-stored `db_path` setting (`memory-cli config set db_path <path>`) → the default
-`~/.local/share/agent-memory/memory.db`. It's **live and shared** across all agent
-sessions, git-ignored (data, not source) — back it up out-of-band.
+Postgres is the only backend. The server reads its DSN from `AGENT_MEMORY_DB`
+(`postgresql://…`, normalized to the asyncpg driver internally); the schema is owned by
+**Alembic** (`alembic upgrade head`) with the SQLAlchemy models as the source of truth.
+The database is **live and shared** across all agent sessions — back it up out-of-band.
+Clients never see the DSN; they only ever talk to the API.
