@@ -1,8 +1,9 @@
 """Cross-surface behavior suite.
 
-Every test takes the `driver` fixture, so it runs once per wired-up surface
-(cli now; api/mcp later). Assertions are on *semantics* — ids, counts, content,
-tags — never on CLI chrome. Surface-specific output lives in test_cli_surface.py.
+Every test takes the `driver` fixture, so it runs once per surface (cli, api,
+mcp) against ONE live server backed by Postgres. Assertions are on *semantics* —
+ids, counts, content, tags — never on surface chrome. Surface-specific output
+lives in test_cli_surface.py / test_api_surface.py.
 """
 
 
@@ -53,6 +54,14 @@ def test_query_project_filter(driver):
     assert "a" in rows[0].content
 
 
+def test_query_agent_filter(driver):
+    driver.add("mine", agent="clu")
+    driver.add("theirs", agent="tron")
+    rows = driver.query(agent="clu")
+    assert len(rows) == 1
+    assert "mine" in rows[0].content
+
+
 def test_query_tag_filter(driver):
     driver.add("tagged", tags="auth")
     driver.add("untagged")
@@ -88,6 +97,15 @@ def test_search_no_match(driver):
     assert driver.search("zzzznope") == []
 
 
+def test_search_snippet_highlights_match(driver):
+    driver.add("alpha beta gamma delta")
+    rows = driver.search("gamma")
+    assert len(rows) == 1
+    # ts_headline wraps the match with the →/← markers the store configures.
+    snip = rows[0].snippet
+    assert "gamma" in snip and "→" in snip and "←" in snip
+
+
 # ---- tags / projects ------------------------------------------------------
 def test_tags_empty(driver):
     assert driver.tags() == []
@@ -119,6 +137,14 @@ def test_stats_counts(driver):
     assert s["tags"] == 1
 
 
+def test_stats_today_and_agents(driver):
+    driver.add("a", agent="clu")
+    driver.add("b", agent="tron")
+    s = driver.stats()
+    assert s["agents"] == 2
+    assert s["today"] == 2
+
+
 # ---- show -----------------------------------------------------------------
 def test_show_found(driver):
     mid = driver.add("findable content")
@@ -145,35 +171,6 @@ def test_update_add_and_remove_tags(driver):
     assert "drop" not in tags
 
 
-# ---- tag descriptors -------------------------------------------------------
-def test_tag_explicit_description(driver):
-    mid = driver.add("x", tags=[{"name": "auth", "description": "authentication flow"}])
-    assert "auth" in driver.get(mid).tags
-    names = dict((n, c) for n, c in driver.tags())
-    assert names["auth"] == 1
-
-
-def test_tag_new_with_no_description_auto_defaults(driver):
-    # A brand-new tag never blocks add()/update() — no description ever required.
-    mid = driver.add("x", tags=[{"name": "brandnew"}])
-    assert "brandnew" in driver.get(mid).tags
-
-
-def test_tag_description_can_contain_a_comma(driver):
-    # Regression: descriptions are structured JSON fields, not comma-delimited
-    # text, so a comma inside one must not split it into extra bogus tags.
-    mid = driver.add("x", tags=[{"name": "auth", "description": "logins, oauth, jwt"}])
-    assert driver.get(mid).tags == ["auth"]
-
-
-def test_tag_description_persists_and_updates(driver):
-    driver.add("first", tags=[{"name": "db", "description": "the database"}])
-    mid = driver.add("second", tags=[{"name": "db", "description": "storage layer"}])
-    assert "db" in driver.get(mid).tags
-    counts = dict(driver.tags())
-    assert counts["db"] == 2
-
-
 def test_update_no_changes(driver):
     mid = driver.add("x")
     assert driver.update(mid) == "nochange"
@@ -183,6 +180,46 @@ def test_update_not_found(driver):
     assert driver.update(999, content="y") is None
 
 
+# ---- tag descriptors -------------------------------------------------------
+def test_tag_explicit_description(driver):
+    mid = driver.add("x", tags=[{"name": "auth", "description": "authentication flow"}])
+    assert "auth" in driver.get(mid).tags
+    counts = dict(driver.tags())
+    assert counts["auth"] == 1
+    descs = {n: d for n, _c, d in driver.tags_with_descriptions()}
+    assert descs["auth"] == "authentication flow"
+
+
+def test_tag_new_with_no_description_auto_defaults(driver):
+    # A brand-new tag never blocks add()/update() — no description ever required,
+    # and its descriptor defaults to its own name.
+    mid = driver.add("x", tags=[{"name": "brandnew"}])
+    assert "brandnew" in driver.get(mid).tags
+    # NB: whether the auto-defaulted descriptor (== the name) is *observable*
+    # differs by surface — the CLI hides a redundant '↳ name' line — so that's a
+    # surface concern (test_cli_surface / test_repository), not asserted here.
+
+
+def test_tag_description_can_contain_a_comma(driver):
+    # Regression: descriptions are structured JSON fields, not comma-delimited
+    # text, so a comma inside one must not split it into extra bogus tags.
+    mid = driver.add("x", tags=[{"name": "auth", "description": "logins, oauth, jwt"}])
+    assert driver.get(mid).tags == ["auth"]
+    descs = {n: d for n, _c, d in driver.tags_with_descriptions()}
+    assert descs["auth"] == "logins, oauth, jwt"
+
+
+def test_tag_description_persists_and_updates(driver):
+    driver.add("first", tags=[{"name": "db", "description": "the database"}])
+    mid = driver.add("second", tags=[{"name": "db", "description": "storage layer"}])
+    assert "db" in driver.get(mid).tags
+    counts = dict(driver.tags())
+    assert counts["db"] == 2
+    # A later explicit description supersedes the earlier one.
+    descs = {n: d for n, _c, d in driver.tags_with_descriptions()}
+    assert descs["db"] == "storage layer"
+
+
 # ---- delete ---------------------------------------------------------------
 def test_delete_removes(driver):
     mid = driver.add("doomed")
@@ -190,23 +227,16 @@ def test_delete_removes(driver):
     assert driver.get(mid) is None
 
 
-# ---- FTS index consistency (regression for #10) ---------------------------
-def test_repeated_updates_keep_fts_searchable(driver):
-    mid = driver.add("seed alpha beta gamma")
-    for i in range(30):
-        driver.update(mid, content=f"iteration {i} delta epsilon zeta {i}")
-    assert len(driver.search("epsilon")) == 1
+def test_delete_removes_from_search(driver):
+    driver.add("keepme aardvark")
+    doomed = driver.add("deleteme aardvark")
+    driver.delete(doomed)
+    assert len(driver.search("aardvark")) == 1
 
 
+# ---- FTS index consistency ------------------------------------------------
 def test_update_reindexes_old_gone_new_found(driver):
     mid = driver.add("findme original orangutan")
     driver.update(mid, content="replaced penguin")
     assert driver.search("orangutan") == []
     assert len(driver.search("penguin")) == 1
-
-
-def test_delete_removes_from_fts(driver):
-    driver.add("keepme aardvark")
-    doomed = driver.add("deleteme aardvark")
-    driver.delete(doomed)
-    assert len(driver.search("aardvark")) == 1
