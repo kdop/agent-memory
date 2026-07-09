@@ -30,6 +30,18 @@ export const useMemoriesStore = defineStore('memories', () => {
     offset.value = Math.max(0, (n - 1) * limit.value)
   }
 
+  /**
+   * Optimistically patch a single loaded row in place (D6 in-place edit).
+   * Deliberately does NOT re-filter: an edit that no longer matches the active
+   * query stays visible until the next fetch() (eventual consistency).
+   * @param {number} id
+   * @param {object} fields  partial MemoryOut fields to merge onto the row
+   */
+  function patchRow(id, fields) {
+    const row = results.value.find((r) => r.id === id)
+    if (row) Object.assign(row, fields)
+  }
+
   /** Fetch the current view-state from the API and populate results + total. */
   async function fetch() {
     loading.value = true
@@ -59,6 +71,6 @@ export const useMemoriesStore = defineStore('memories', () => {
     // results
     results, total, loading, error,
     // derived + helpers
-    page, pageCount, setPage, fetch,
+    page, pageCount, setPage, patchRow, fetch,
   }
 })
