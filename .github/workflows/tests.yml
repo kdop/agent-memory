@@ -77,6 +77,21 @@ jobs:
             coverage report
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fail if the PR lowers coverage
+        if: github.event_name == 'pull_request'
+        run: |
+          pr=$(printf '%.0f' "$(coverage report --format=total)")
+          # Baseline = the coverage % committed in the badge on the target branch.
+          # Missing badge (first coverage PR) -> baseline 0, so nothing is ever blocked.
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          base=$(git show "origin/${{ github.base_ref }}:coverage.svg" 2>/dev/null \
+                 | grep -oE 'coverage: [0-9]+%' | grep -oE '[0-9]+' || echo 0)
+          echo "### Coverage gate: base ${base}% → PR ${pr}%" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$pr" -lt "$base" ]; then
+            echo "::error::Coverage dropped from ${base}% to ${pr}% — merge blocked by the coverage gate."
+            exit 1
+          fi
+          echo "Coverage gate OK (${pr}% ≥ ${base}%)."
       - name: Update badge on main
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
