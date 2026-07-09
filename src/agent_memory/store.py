@@ -9,6 +9,12 @@ regardless of backend; presentation lives in the CLI.
 
 `SqliteStore` is re-exported from this module (bottom of file) so existing
 `from agent_memory.store import SqliteStore` imports keep working.
+
+Tags are structured, not delimited strings: every surface passes tags as a list of
+`{"name": str, "description": str (optional)}` objects. A tag's descriptor is
+required in the schema (`tags.description NOT NULL`), but a caller never has to
+supply one — a brand-new tag with no description auto-defaults to its own name;
+an existing tag's description is left alone unless a new one is given.
 """
 
 import json
@@ -32,7 +38,11 @@ def since_days_window(n):
 class MemoryStore(ABC):
     """Backend-agnostic memory operations. Methods return plain data (ids, dicts,
     lists); all presentation lives in the CLI layer. SqliteStore implements this
-    today; a remote ApiStore will implement the same contract later (#6)."""
+    today; a remote ApiStore will implement the same contract later (#6).
+
+    `tags` / `set_tags` / `add_tags` are each a list of `{"name": str,
+    "description": str (optional)}` entries (a plain string is also accepted, as a
+    name with no descriptor). `remove_tags` is a plain list of tag names."""
 
     @abstractmethod
     def initialize(self): ...
@@ -164,7 +174,7 @@ class ApiStore(MemoryStore):
 
     def list_tags(self):
         _, data = self._call("GET", "/tags")
-        return [(t["name"], t["count"]) for t in (data or [])]
+        return [(t["name"], t["count"], t.get("description", "")) for t in (data or [])]
 
     def list_projects(self):
         _, data = self._call("GET", "/projects")

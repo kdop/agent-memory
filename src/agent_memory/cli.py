@@ -5,6 +5,7 @@ The storage and config layers it drives now live alongside it in the package.
 """
 
 import argparse
+import json
 import sys
 
 from .config import get_agent_name, config_path, load_config, resolve_db_path, save_config
@@ -13,6 +14,25 @@ from .store import SqliteStore, get_store
 # Box-drawing separators used in the rendered output.
 HBAR = "━" * 39
 FOOT = "─" * 50
+
+
+def _parse_tags_json(raw, flag):
+    """Parse a --tags/--set-tags/--add-tags value: a JSON array of tag objects,
+    e.g. '[{"name":"auth","description":"authentication flow"},{"name":"db"}]'.
+    A tag's "description" is optional — a brand-new tag with none auto-defaults to
+    its own name. Exits with a clear error on malformed input rather than raising."""
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"✗ {flag} must be a JSON array of tag objects, "
+              f"e.g. '[{{\"name\":\"auth\",\"description\":\"authentication flow\"}}]' ({e})")
+        sys.exit(1)
+    if not isinstance(parsed, list) or not all(isinstance(t, dict) and t.get("name") for t in parsed):
+        print(f"✗ {flag} must be a JSON array of objects with at least a \"name\" field")
+        sys.exit(1)
+    return parsed
 
 
 def _print_meta(row):
@@ -30,7 +50,7 @@ def _print_meta(row):
 
 def add_memory(args, store):
     agent = args.agent or get_agent_name()
-    tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
+    tags = _parse_tags_json(args.tags, "--tags") or []
     mid = store.add(args.content, agent, args.project, tags, args.type)
     print(f"✓ Memory #{mid} added ({agent})")
 
@@ -71,8 +91,10 @@ def list_tags(args, store):
         print("No tags found.")
         return
     print("🏷️  Tags:\n")
-    for name, count in rows:
+    for name, count, description in rows:
         print(f"  {name:<20} ({count})")
+        if description and description != name:
+            print(f"       ↳ {description}")
 
 
 def list_projects(args, store):
@@ -110,9 +132,13 @@ def update_memory(args, store):
     elif args.content is not None:
         new_content = args.content
 
+    set_tags = _parse_tags_json(args.set_tags, "--set-tags")
+    add_tags = _parse_tags_json(args.add_tags, "--add-tags")
+    remove_tags = [t.strip() for t in args.remove_tags.split(",") if t.strip()] if args.remove_tags else None
+
     changes = store.update(args.id, new_content=new_content, project=args.project,
-                           mtype=args.type, set_tags=args.set_tags,
-                           add_tags=args.add_tags, remove_tags=args.remove_tags)
+                           mtype=args.type, set_tags=set_tags,
+                           add_tags=add_tags, remove_tags=remove_tags)
     if not changes:
         print(f"No changes specified for memory #{args.id}. Use --help for options.")
         return
@@ -226,7 +252,10 @@ def main():
     add_parser.add_argument("content", help="Memory content")
     add_parser.add_argument("--project", help="Project name")
     add_parser.add_argument("--agent", help="Agent name (auto-detected if not specified)")
-    add_parser.add_argument("--tags", help="Comma-separated tags")
+    add_parser.add_argument(
+        "--tags",
+        help='JSON array of tag objects, e.g. \'[{"name":"auth","description":"authentication flow"},{"name":"db"}]\'. '
+             "description is optional (a new tag with none defaults to its own name).")
     add_parser.add_argument("--type", help="Memory type (decision, code, lesson, note)")
     add_parser.set_defaults(func=add_memory)
 
@@ -277,9 +306,9 @@ def main():
     content_group.add_argument("--content-file", help="Read new content from file")
     update_parser.add_argument("--project", help="Set project (empty string clears)")
     update_parser.add_argument("--type", help="Set type (empty string clears)")
-    update_parser.add_argument("--set-tags", help="Replace all tags (comma-separated; empty string removes all)")
-    update_parser.add_argument("--add-tags", help="Add tags (comma-separated; idempotent)")
-    update_parser.add_argument("--remove-tags", help="Remove tags (comma-separated)")
+    update_parser.add_argument("--set-tags", help='Replace all tags: JSON array of tag objects, e.g. \'[{"name":"auth"}]\' ("[]" removes all)')
+    update_parser.add_argument("--add-tags", help='Add tags (idempotent): JSON array of tag objects, e.g. \'[{"name":"db","description":"the database"}]\'')
+    update_parser.add_argument("--remove-tags", help="Remove tags by name (comma-separated)")
     update_parser.set_defaults(func=update_memory)
 
     # Delete command
