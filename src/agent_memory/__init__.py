@@ -1,9 +1,9 @@
-"""agent_memory — shared, SQLite-backed persistent memory for AI agents.
+"""agent_memory — a shared, Postgres-backed persistent memory service for AI agents.
 
-Extracted from the former single-file `memory-cli` script (Ticket A) so the same
-storage/config layer can back the CLI, a FastAPI service (Ticket B), and an MCP
-server (Ticket D). The `memory-cli` command + `memory` alias are preserved; the
-file at the repo root is now a thin shim onto `agent_memory.cli:main`.
+The CLI and MCP surfaces are thin HTTP clients (``ApiClient``) over the FastAPI
+service (``agent_memory.server``); only the server touches the database, via
+SQLAlchemy 2.0 async. The ``memory-cli`` command + ``memory`` alias are preserved
+by a thin shim at the repo root onto ``agent_memory.cli:main``.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
