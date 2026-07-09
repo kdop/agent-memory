@@ -36,7 +36,7 @@ def add_memory(args, store):
 
 
 def query_memories(args, store):
-    rows = store.query(today=args.today, yesterday=args.yesterday, since=args.since,
+    rows = store.query(since_days=args.since_days, since=args.since,
                        until=args.until, project=args.project, agent=args.agent,
                        tag=args.tag, mtype=args.type, limit=args.limit)
     if not rows:
@@ -232,8 +232,7 @@ def main():
 
     # Query command
     query_parser = subparsers.add_parser("query", help="Query memories")
-    query_parser.add_argument("--today", action="store_true", help="Today's memories")
-    query_parser.add_argument("--yesterday", action="store_true", help="Yesterday's memories")
+    query_parser.add_argument("--since-days", type=int, help="Memories from a single day N days ago (0=today, 1=yesterday)")
     query_parser.add_argument("--since", help="Since date (YYYY-MM-DD)")
     query_parser.add_argument("--until", help="Until date (YYYY-MM-DD)")
     query_parser.add_argument("--project", help="Filter by project")

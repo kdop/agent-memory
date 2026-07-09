@@ -51,8 +51,7 @@ def create_app(store: Optional[MemoryStore] = None, token: Optional[str] = None)
     @app.get("/memories", response_model=List[MemoryOut], dependencies=guard)
     def query_memories(
         request: Request,
-        today: bool = False,
-        yesterday: bool = False,
+        since_days: Optional[int] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
         project: Optional[str] = None,
@@ -62,7 +61,7 @@ def create_app(store: Optional[MemoryStore] = None, token: Optional[str] = None)
         limit: Optional[int] = None,
     ):
         return request.app.state.store.query(
-            today=today, yesterday=yesterday, since=since, until=until,
+            since_days=since_days, since=since, until=until,
             project=project, agent=agent, tag=tag, mtype=type, limit=limit,
         )
 

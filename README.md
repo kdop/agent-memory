@@ -18,7 +18,7 @@ alias memory="$HOME/workspace/agent-memory/memory-cli"
 
 memory add "Chose SQLite over flat files" \
   --agent=agent-a --project=agent-memory --tags=design --type=decision
-memory query --project=agent-memory --today
+memory query --project=agent-memory --since-days 0
 memory search "database" --project=agent-memory
 ```
 
