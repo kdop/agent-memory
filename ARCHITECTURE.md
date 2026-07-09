@@ -46,17 +46,16 @@ results.
 | **SQLite over files** | Structured queries, FTS5, ACID, single-file backup, zero deps | Markdown (not queryable), Postgres (needs a server), JSON (no index/FTS) |
 | **Relational tags** (3 tables: `memories`, `tags`, `memory_tags`) | Indexed tag queries, case-insensitive, global rename, analytics | JSON array (slow `LIKE`, case-sensitive), generated column (can't rename globally) |
 | **FTS5 for search** | Built-in, ranked, snippet highlighting, trigger-synced | `LIKE` (slow, no ranking), external engine (overkill) |
-| **`agent_memory` package** (Phase 2) | One store core behind CLI + API + MCP; reusable, testable across surfaces | Single-file script (the original — couldn't host the API/MCP surfaces; `memory-cli` is now a shim onto the package) |
-| **Reuse `SqliteStore`, no ORM** | FTS5 search is hand-SQL either way; keeps the client stdlib-only and the 41 characterization tests valid | SQLAlchemy (rewrite of working storage; an ORM buys nothing for the FTS query) |
+| **`agent_memory` package** | One store core behind CLI + API + MCP; reusable, testable across surfaces | Single-file script (couldn't host the API/MCP surfaces; `memory-cli` is now a shim onto the package) |
+| **Reuse `SqliteStore`, no ORM** | FTS5 search is hand-SQL either way; keeps the client stdlib-only and the characterization tests valid | SQLAlchemy (rewrite of working storage; an ORM buys nothing for the FTS query) |
 
-The single-file design (Phase 1) was deliberately reversed in Phase 2 (epic #8) to host
-the API and MCP surfaces; `memory-cli` stays on PATH as a shim so the command name and
-`memory` alias are unchanged. Tags started as a JSON column and were migrated to the
-relational schema; old DBs are auto-detected and migrated on first run, no intervention.
+`memory-cli` stays on PATH as a thin shim so the command name and `memory` alias are
+unchanged despite the package split. Old DBs that still store tags as a JSON column are
+auto-detected and migrated to the relational schema on first run, no intervention needed.
 
 ## Database schema
 
-```sql
+```sqlite
 -- Main memories table
 CREATE TABLE memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
