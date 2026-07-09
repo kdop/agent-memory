@@ -1,8 +1,9 @@
 # MEMORY.md — agent memory protocol
 
-Canonical protocol for the persistent memory system (the `memory-cli` command over the
-shared SQLite DB; the same store is also reachable via the HTTP API and the MCP server —
-see [README.md](README.md)). **Other repos import this file** instead of copying it:
+Canonical protocol for the persistent memory system. `memory-cli` is a thin HTTP client
+for the shared **memory API service** (Postgres-backed); the same service is reachable
+via the HTTP API directly and the MCP server — see [README.md](README.md). **Other repos
+import this file** instead of copying it:
 
     @~/workspace/agent-memory/MEMORY.md
 
@@ -11,9 +12,13 @@ don't log it, it's gone next session.** Scope everything with `--project=<name>`
 
 ## Usage
 
-Invoke as `memory` (alias) or `memory-cli`. DB path resolves: `AGENT_MEMORY_DB` env →
-stored `db_path` (`memory-cli config set db_path <path>`) → default
-`~/.local/share/agent-memory/memory.db`. Attribute entries with `--agent=<you>`.
+Invoke as `memory` (alias) or `memory-cli`. It talks to a running API server — it never
+opens a database. The endpoint resolves `AGENT_MEMORY_API` env → stored `api_url`
+(`memory config set api_url <url>`) → local default `http://127.0.0.1:8099`; the bearer
+token resolves `AGENT_MEMORY_API_TOKEN` env → stored `api_token`. **A reachable server is
+required** — if none is running the CLI prints how to start one
+(`python -m agent_memory.server`) rather than a traceback. Attribute entries with
+`--agent=<you>`.
 
     # Add — AS YOU WORK, not at session end
     # --tags is a JSON array of {"name":..., "description":...}; description is
