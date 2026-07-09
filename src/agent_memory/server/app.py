@@ -12,7 +12,8 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .. import __version__
@@ -26,6 +27,9 @@ from .schemas import (
     MemoryOut,
     ProjectCount,
     TagCount,
+    TagDetachIn,
+    TagMergeIn,
+    TagPatch,
     UpdateIn,
     UpdateResult,
 )
@@ -77,18 +81,26 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
 
     @app.get("/memories", response_model=list[MemoryOut], dependencies=guard)
     async def query_memories(
+        response: Response,
         session: AsyncSession = Depends(get_session),
+        q: str | None = None,
+        tag: list[str] = Query(default=[]),   # repeatable; AND across all listed tags
         since_days: int | None = None,
         since: str | None = None,
         until: str | None = None,
         project: str | None = None,
         agent: str | None = None,
-        tag: str | None = None,
         type: str | None = None,
-        limit: int | None = None,
+        order: str = "date_desc",
+        limit: int = 100,
+        offset: int = 0,
     ):
-        return await repo.query(session, since_days=since_days, since=since, until=until,
-                                project=project, agent=agent, tag=tag, mtype=type, limit=limit)
+        items, total = await repo.list_memories(
+            session, q=q, tags=tag, project=project, agent=agent, mtype=type,
+            since_days=since_days, since=since, until=until,
+            order=order, limit=limit, offset=offset)
+        response.headers["X-Total-Count"] = str(total)
+        return items
 
     # `/memories/bulk` and `/memories/search` are declared before `/memories/{mid}`
     # so the literal paths win the match.
@@ -146,6 +158,35 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
     async def list_tags(session: AsyncSession = Depends(get_session)):
         return await repo.list_tags(session)
 
+    @app.patch("/tags/{name}", dependencies=guard)
+    async def patch_tag(name: str, body: TagPatch, session: AsyncSession = Depends(get_session)):
+        sent = body.model_fields_set
+        result = await repo.patch_tag(
+            session, name,
+            new_name=body.name if "name" in sent else None,
+            description=body.description if "description" in sent else None)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Tag '{name}' not found")
+        return result
+
+    @app.delete("/tags/{name}", dependencies=guard)
+    async def delete_tag(name: str, session: AsyncSession = Depends(get_session)):
+        result = await repo.delete_tag(session, name)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Tag '{name}' not found")
+        return result
+
+    @app.post("/tags/merge", dependencies=guard)
+    async def merge_tags(body: TagMergeIn, session: AsyncSession = Depends(get_session)):
+        return await repo.merge_tags(session, body.sources, body.target, body.description)
+
+    @app.post("/tags/{name}/detach", dependencies=guard)
+    async def detach_tag(name: str, body: TagDetachIn, session: AsyncSession = Depends(get_session)):
+        result = await repo.detach_tag(session, name, body.memory_ids)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Tag '{name}' not found")
+        return result
+
     @app.get("/projects", response_model=list[ProjectCount], dependencies=guard)
     async def list_projects(session: AsyncSession = Depends(get_session)):
         return await repo.list_projects(session)
@@ -153,5 +194,11 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
     @app.get("/stats", dependencies=guard)
     async def stats(session: AsyncSession = Depends(get_session)):
         return await repo.stats(session)
+
+    # The built dashboard SPA, if present, is served (unauthenticated static assets;
+    # its JS carries the bearer token to the API). Mounted last so API routes win.
+    static_dir = os.environ.get("AGENT_MEMORY_STATIC_DIR")
+    if static_dir and os.path.isdir(static_dir):
+        app.mount("/", StaticFiles(directory=static_dir, html=True), name="dashboard")
 
     return app

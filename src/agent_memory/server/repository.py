@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Memory, Tag
+from .models import Memory, MemoryTag, Tag
 
 # ts_headline markers match the old snippet() output so clients render identically.
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
@@ -238,3 +238,129 @@ async def stats(session) -> dict:
 async def _ts(session, agg):
     val = (await session.execute(select(agg))).scalar()
     return val.isoformat(sep=" ", timespec="seconds") if val else None
+
+
+# ---- dashboard: unified list + tag management (D1) ------------------------
+async def list_memories(session, *, q=None, tags=(), project=None, agent=None, mtype=None,
+                        since_days=None, since=None, until=None, order="date_desc",
+                        limit=100, offset=0) -> tuple[list[dict], int]:
+    """The dashboard's one list endpoint: full-text (`q`) + AND multi-tag + filters +
+    order + pagination. Returns (items, total) where total ignores limit/offset."""
+    if since_days is not None:
+        since, until = _since_days_window(since_days)
+
+    conds = []
+    if since:
+        conds.append(Memory.timestamp >= _as_dt(since))
+    if until:
+        conds.append(Memory.timestamp <= _as_dt(until))
+    if project:
+        conds.append(Memory.project == project)
+    if agent:
+        conds.append(Memory.agent == agent)
+    if mtype:
+        conds.append(Memory.type == mtype)
+    for t in tags:  # AND: the memory must carry every listed tag
+        conds.append(Memory.tags.any(func.lower(Tag.name) == func.lower(t)))
+    tsquery = func.plainto_tsquery("english", q) if q else None
+    if tsquery is not None:
+        conds.append(Memory.content_tsv.op("@@")(tsquery))
+
+    total = (await session.execute(select(func.count()).select_from(Memory).where(*conds))).scalar()
+
+    base = select(Memory).options(selectinload(Memory.tags)).where(*conds)
+    if tsquery is not None:
+        snippet = func.ts_headline("english", Memory.content, tsquery, _HEADLINE)
+        stmt = (select(Memory, snippet.label("snippet"))
+                .options(selectinload(Memory.tags)).where(*conds)
+                .order_by(func.ts_rank(Memory.content_tsv, tsquery).desc(), Memory.id.desc())
+                .limit(limit).offset(offset))
+        rows = (await session.execute(stmt)).all()
+        items = [_dump(m, snippet=s) for m, s in rows]
+    else:
+        col = Memory.timestamp.asc() if order == "date_asc" else Memory.timestamp.desc()
+        stmt = base.order_by(col, Memory.id.desc()).limit(limit).offset(offset)
+        items = [_dump(m) for m in (await session.execute(stmt)).scalars().all()]
+    return items, total
+
+
+async def _find_tag(session, name):
+    return (await session.execute(
+        select(Tag).where(func.lower(Tag.name) == func.lower(name)))).scalar_one_or_none()
+
+
+async def _tag_count(session, tag_id) -> int:
+    return (await session.execute(
+        select(func.count()).select_from(MemoryTag).where(MemoryTag.tag_id == tag_id))).scalar()
+
+
+async def _reassign(session, sources, target, description=None) -> int:
+    """Move every memory link from each source tag to `target`, delete the sources.
+    Returns the number of (memory, source) links reassigned."""
+    if description:
+        target.description = description
+    affected = 0
+    for src in sources:
+        mids = (await session.execute(
+            select(MemoryTag.memory_id).where(MemoryTag.tag_id == src.id))).scalars().all()
+        for mid in mids:
+            exists = (await session.execute(select(MemoryTag).where(
+                MemoryTag.memory_id == mid, MemoryTag.tag_id == target.id))).scalar_one_or_none()
+            if exists is None:
+                session.add(MemoryTag(memory_id=mid, tag_id=target.id))
+            affected += 1
+        await session.delete(src)  # cascade drops the source's links
+    await session.flush()
+    return affected
+
+
+async def patch_tag(session, name, *, new_name=None, description=None) -> dict | None:
+    tag = await _find_tag(session, name)
+    if tag is None:
+        return None
+    if new_name and new_name.lower() != tag.name.lower():
+        collision = await _find_tag(session, new_name)
+        if collision is not None:  # rename onto an existing tag = merge into it
+            await _reassign(session, [tag], collision, description)
+            return {"name": collision.name, "description": collision.description,
+                    "count": await _tag_count(session, collision.id)}
+        tag.name = new_name
+    if description is not None:
+        tag.description = description or tag.name
+    await session.flush()
+    return {"name": tag.name, "description": tag.description, "count": await _tag_count(session, tag.id)}
+
+
+async def delete_tag(session, name) -> dict | None:
+    tag = await _find_tag(session, name)
+    if tag is None:
+        return None
+    affected = await _tag_count(session, tag.id)
+    await session.delete(tag)  # cascade removes its links
+    return {"removed": tag.name, "memories_affected": affected}
+
+
+async def merge_tags(session, sources, target, description=None) -> dict:
+    tgt = await _find_tag(session, target)
+    if tgt is None:
+        tgt = Tag(name=target, description=description or target)
+        session.add(tgt)
+        await session.flush()
+    src_tags = []
+    for s in sources:
+        t = await _find_tag(session, s)
+        if t is not None and t.id != tgt.id:
+            src_tags.append(t)
+    affected = await _reassign(session, src_tags, tgt, description)
+    return {"target": tgt.name, "memories_affected": affected, "removed": [t.name for t in src_tags]}
+
+
+async def detach_tag(session, name, memory_ids=None) -> dict | None:
+    tag = await _find_tag(session, name)
+    if tag is None:
+        return None
+    stmt = sql_delete(MemoryTag).where(MemoryTag.tag_id == tag.id)
+    if memory_ids:
+        stmt = stmt.where(MemoryTag.memory_id.in_(list(memory_ids)))
+    res = await session.execute(stmt)
+    return {"detached": res.rowcount}
