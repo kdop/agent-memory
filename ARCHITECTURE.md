@@ -65,10 +65,11 @@ CREATE TABLE memories (
     type TEXT
 );
 
--- Canonical tag names (case-insensitive unique)
+-- Canonical tag names (case-insensitive unique) + a required descriptor
 CREATE TABLE tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL COLLATE NOCASE
+    name TEXT UNIQUE NOT NULL COLLATE NOCASE,
+    description TEXT NOT NULL
 );
 
 -- Many-to-many junction
@@ -91,7 +92,10 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(
 
 ## Data flow
 
-**Add** — insert into `memories` → for each tag `INSERT OR IGNORE` into `tags`, link in
+**Add** — insert into `memories` → for each tag entry (`{"name": ..., "description":
+...}`; description optional) resolve/create the tag — reusing an existing one
+(updating its descriptor only if a new one is given), or creating a brand-new one
+(auto-defaulting its descriptor to its own name if none is given) — link in
 `memory_tags` → FTS trigger fires automatically. **Query** — build a `WHERE` clause from
 filters, JOIN `memory_tags`/`tags` when a tag filter is present, `ORDER BY timestamp DESC`.
 **Search** — `MATCH` against `memories_fts`, JOIN back to `memories`, apply extra filters,

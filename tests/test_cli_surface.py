@@ -7,6 +7,7 @@ Faithfully preserves the behavior the old tests/test_memory_cli.py pinned.
 """
 
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -43,7 +44,7 @@ def test_query_empty_chrome(primed):
 
 def test_query_block_and_footer_chrome(primed):
     primed.raw("add", "remember the milk", "--project", "home",
-               "--tags", "shopping,food", "--type", "note")
+               "--tags", '[{"name":"shopping"},{"name":"food"}]', "--type", "note")
     out = primed.raw("query").stdout
     assert "#1" in out
     assert "👤 tester @ home [note]" in out
@@ -70,13 +71,67 @@ def test_tags_empty_chrome(primed):
 
 
 def test_tags_listing_chrome(primed):
-    primed.raw("add", "a", "--tags", "auth")
-    primed.raw("add", "b", "--tags", "auth,db")
+    primed.raw("add", "a", "--tags", '[{"name":"auth"}]')
+    primed.raw("add", "b", "--tags", '[{"name":"auth"},{"name":"db"}]')
     out = primed.raw("tags").stdout
     assert "🏷️" in out
     assert "auth" in out
     assert "(2)" in out
     assert "(1)" in out
+
+
+# ── tag descriptor (structured JSON, required in schema but optional to supply) ──
+def test_tags_malformed_json_errors(primed):
+    proc = primed.raw("add", "x", "--tags", "not-json-and-not-comma-either")
+    assert proc.returncode != 0
+    assert "JSON array" in proc.stdout
+    assert "No memories found." in primed.raw("query").stdout  # nothing was stored
+
+
+def test_tags_missing_name_field_errors(primed):
+    proc = primed.raw("add", "x", "--tags", '[{"description":"no name given"}]')
+    assert proc.returncode != 0
+    assert "name" in proc.stdout.lower()
+
+
+def test_tag_descriptor_shown_in_listing(primed):
+    primed.raw("add", "x", "--tags", '[{"name":"auth","description":"authentication flow"}]')
+    assert "authentication flow" in primed.raw("tags").stdout
+
+
+def test_tag_auto_default_description_not_shown_redundantly(primed):
+    # A new tag with no description defaults to its own name; the listing skips the
+    # '↳ description' line in that case rather than echoing the name back.
+    primed.raw("add", "x", "--tags", '[{"name":"plain"}]')
+    out = primed.raw("tags").stdout
+    assert "plain" in out
+    assert "↳" not in out
+
+
+def test_tag_description_migrated_and_backfilled(tmp_path):
+    # A pre-descriptor DB (tags table without the description column) is upgraded
+    # in place on initialize, seeding each existing tag's name as its descriptor.
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME, agent TEXT, project TEXT, content TEXT, type TEXT);
+        CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL COLLATE NOCASE);
+        INSERT INTO tags (name) VALUES ('legacytag');
+    """)
+    conn.commit()
+    conn.close()
+
+    from agent_memory.sqlite_store import SqliteStore
+    SqliteStore(db).initialize()
+
+    conn = sqlite3.connect(db)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tags)")]
+    desc = conn.execute("SELECT description FROM tags WHERE name = 'legacytag'").fetchone()[0]
+    conn.close()
+    assert "description" in cols
+    assert desc == "legacytag"  # backfilled with the tag name
 
 
 def test_projects_empty_chrome(primed):
@@ -93,7 +148,7 @@ def test_projects_listing_chrome(primed):
 
 
 def test_stats_chrome(primed):
-    primed.raw("add", "a", "--project", "p", "--tags", "t")
+    primed.raw("add", "a", "--project", "p", "--tags", '[{"name":"t"}]')
     out = primed.raw("stats").stdout
     assert "📊 Memory Statistics" in out
     assert "Total memories:    1" in out

@@ -62,7 +62,7 @@ def test_server_with_no_token_configured_fails_closed(tmp_path):
 def test_add_then_read_round_trips_over_http(client):
     mid = client.post(
         "/memories",
-        json={"content": "over the wire", "tags": ["net"], "agent": "tester"},
+        json={"content": "over the wire", "tags": [{"name": "net"}], "agent": "tester"},
         headers=_auth(),
     ).json()["id"]
     got = client.get(f"/memories/{mid}", headers=_auth()).json()

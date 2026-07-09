@@ -39,7 +39,8 @@ class SqliteStore(MemoryStore):
         conn.execute("""
             CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL COLLATE NOCASE
+                name TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                description TEXT NOT NULL
             )
         """)
         conn.execute("""
@@ -84,8 +85,20 @@ class SqliteStore(MemoryStore):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag_id)")
         conn.commit()
 
+    def _migrate_tag_description(self, conn):
+        """Add the required `tags.description` column to a pre-existing DB and backfill
+        it. Existing tags have no descriptor, so they are seeded with their own name (a
+        non-empty, deterministic placeholder the user can re-describe later). Idempotent."""
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(tags)").fetchall()]
+        if "description" in cols:
+            return False
+        conn.execute("ALTER TABLE tags ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE tags SET description = name WHERE description = ''")
+        conn.commit()
+        return True
+
     def initialize(self):
-        """Create the DB and schema if missing. Returns a list of status messages."""
+        """Create/upgrade the DB as needed. Returns a list of status messages."""
         msgs = []
         if not self.db_path.exists():
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,17 +115,36 @@ class SqliteStore(MemoryStore):
             ).fetchone() is not None
             if not has_tags_table:
                 self._init_schema(conn)
+            if self._migrate_tag_description(conn):
+                msgs.append("✓ Added required tag descriptions (existing tags seeded with their name)")
             conn.close()
         return msgs
 
     # ---- internal helpers -----------------------------------------------
-    def _get_or_create_tag(self, conn, tag_name):
+    def _get_or_create_tag(self, conn, name, description=None):
+        """Resolve a tag id. An existing tag is reused (its descriptor updated only if
+        a new non-empty one is given); a brand-new tag with no descriptor auto-defaults
+        to its own name — describing a tag is always optional, never blocks tagging."""
         row = conn.execute(
-            "SELECT id FROM tags WHERE name = ? COLLATE NOCASE", (tag_name,)
+            "SELECT id, description FROM tags WHERE name = ? COLLATE NOCASE", (name,)
         ).fetchone()
         if row:
-            return row[0]
-        return conn.execute("INSERT INTO tags (name) VALUES (?)", (tag_name,)).lastrowid
+            tag_id, existing = row
+            if description and description != existing:
+                conn.execute("UPDATE tags SET description = ? WHERE id = ?", (description, tag_id))
+            return tag_id
+        return conn.execute(
+            "INSERT INTO tags (name, description) VALUES (?, ?)",
+            (name, description or name),
+        ).lastrowid
+
+    @staticmethod
+    def _tag_fields(item):
+        """A tag entry is `{"name": ..., "description": ...}` (description optional);
+        a plain string is accepted too, as a name with no descriptor."""
+        if isinstance(item, dict):
+            return item.get("name", "").strip(), (item.get("description") or None)
+        return str(item).strip(), None
 
     def _tags_for(self, conn, memory_id):
         return [r[0] for r in conn.execute("""
@@ -130,9 +162,12 @@ class SqliteStore(MemoryStore):
             "INSERT INTO memories (agent, project, content, type) VALUES (?, ?, ?, ?)",
             (agent, project, content, mtype)
         ).lastrowid
-        for tag_name in tags:
-            tag_id = self._get_or_create_tag(conn, tag_name)
-            conn.execute("INSERT INTO memory_tags (memory_id, tag_id) VALUES (?, ?)", (mid, tag_id))
+        for item in tags:
+            name, description = self._tag_fields(item)
+            if not name:
+                continue
+            tag_id = self._get_or_create_tag(conn, name, description)
+            conn.execute("INSERT OR IGNORE INTO memory_tags (memory_id, tag_id) VALUES (?, ?)", (mid, tag_id))
         conn.commit()
         conn.close()
         return mid
@@ -250,25 +285,33 @@ class SqliteStore(MemoryStore):
             changes.append(f"type → {type_val}")
         if set_tags is not None:
             conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (mid,))
-            new_tags = [t.strip() for t in set_tags.split(",") if t.strip()]
-            for tag_name in new_tags:
-                tag_id = self._get_or_create_tag(conn, tag_name)
-                conn.execute("INSERT INTO memory_tags (memory_id, tag_id) VALUES (?, ?)", (mid, tag_id))
-            changes.append(f"tags set to: {', '.join(new_tags) if new_tags else '(none)'}")
-        if add_tags:
-            added = [t.strip() for t in add_tags.split(",") if t.strip()]
-            for tag_name in added:
-                tag_id = self._get_or_create_tag(conn, tag_name)
+            new_names = []
+            for item in set_tags:
+                name, description = self._tag_fields(item)
+                if not name:
+                    continue
+                tag_id = self._get_or_create_tag(conn, name, description)
                 conn.execute("INSERT OR IGNORE INTO memory_tags (memory_id, tag_id) VALUES (?, ?)", (mid, tag_id))
+                new_names.append(name)
+            changes.append(f"tags set to: {', '.join(new_names) if new_names else '(none)'}")
+        if add_tags:
+            added = []
+            for item in add_tags:
+                name, description = self._tag_fields(item)
+                if not name:
+                    continue
+                tag_id = self._get_or_create_tag(conn, name, description)
+                conn.execute("INSERT OR IGNORE INTO memory_tags (memory_id, tag_id) VALUES (?, ?)", (mid, tag_id))
+                added.append(name)
             changes.append(f"+tags: {', '.join(added)}")
         if remove_tags:
-            removed = [t.strip() for t in remove_tags.split(",") if t.strip()]
-            for tag_name in removed:
+            removed = [str(t).strip() for t in remove_tags if str(t).strip()]
+            for name in removed:
                 conn.execute("""
                     DELETE FROM memory_tags
                     WHERE memory_id = ?
                       AND tag_id IN (SELECT id FROM tags WHERE name = ? COLLATE NOCASE)
-                """, (mid, tag_name))
+                """, (mid, name))
             changes.append(f"-tags: {', '.join(removed)}")
 
         if changes:
@@ -299,10 +342,10 @@ class SqliteStore(MemoryStore):
     def list_tags(self):
         conn = self._connect()
         rows = conn.execute("""
-            SELECT t.name, COUNT(mt.memory_id) as count
+            SELECT t.name, COUNT(mt.memory_id) as count, t.description
             FROM tags t
             LEFT JOIN memory_tags mt ON t.id = mt.tag_id
-            GROUP BY t.id, t.name
+            GROUP BY t.id, t.name, t.description
             ORDER BY count DESC, t.name
         """).fetchall()
         conn.close()

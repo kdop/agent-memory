@@ -145,6 +145,35 @@ def test_update_add_and_remove_tags(driver):
     assert "drop" not in tags
 
 
+# ---- tag descriptors -------------------------------------------------------
+def test_tag_explicit_description(driver):
+    mid = driver.add("x", tags=[{"name": "auth", "description": "authentication flow"}])
+    assert "auth" in driver.get(mid).tags
+    names = dict((n, c) for n, c in driver.tags())
+    assert names["auth"] == 1
+
+
+def test_tag_new_with_no_description_auto_defaults(driver):
+    # A brand-new tag never blocks add()/update() — no description ever required.
+    mid = driver.add("x", tags=[{"name": "brandnew"}])
+    assert "brandnew" in driver.get(mid).tags
+
+
+def test_tag_description_can_contain_a_comma(driver):
+    # Regression: descriptions are structured JSON fields, not comma-delimited
+    # text, so a comma inside one must not split it into extra bogus tags.
+    mid = driver.add("x", tags=[{"name": "auth", "description": "logins, oauth, jwt"}])
+    assert driver.get(mid).tags == ["auth"]
+
+
+def test_tag_description_persists_and_updates(driver):
+    driver.add("first", tags=[{"name": "db", "description": "the database"}])
+    mid = driver.add("second", tags=[{"name": "db", "description": "storage layer"}])
+    assert "db" in driver.get(mid).tags
+    counts = dict(driver.tags())
+    assert counts["db"] == 2
+
+
 def test_update_no_changes(driver):
     mid = driver.add("x")
     assert driver.update(mid) == "nochange"

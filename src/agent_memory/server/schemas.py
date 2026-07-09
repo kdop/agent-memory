@@ -9,11 +9,18 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 
+class TagIn(BaseModel):
+    """A tag reference: name required, description optional. A brand-new tag with
+    no description auto-defaults to its own name (see MemoryStore)."""
+    name: str
+    description: Optional[str] = None
+
+
 class MemoryIn(BaseModel):
     content: str
     project: Optional[str] = None
     agent: Optional[str] = None
-    tags: List[str] = []
+    tags: List[TagIn] = []
     type: Optional[str] = None
 
 
@@ -29,14 +36,14 @@ class MemoryOut(BaseModel):
 
 
 class UpdateIn(BaseModel):
-    # Same shapes the store.update() seam expects: project/type "" clears, tag
-    # fields are comma-separated strings. Only fields actually sent are applied.
+    # Same shapes the store.update() seam expects: project/type "" clears. Only
+    # fields actually sent are applied.
     content: Optional[str] = None
     project: Optional[str] = None
     type: Optional[str] = None
-    set_tags: Optional[str] = None
-    add_tags: Optional[str] = None
-    remove_tags: Optional[str] = None
+    set_tags: Optional[List[TagIn]] = None
+    add_tags: Optional[List[TagIn]] = None
+    remove_tags: Optional[List[str]] = None
 
 
 class AddResult(BaseModel):
@@ -55,6 +62,7 @@ class DeleteResult(BaseModel):
 class TagCount(BaseModel):
     name: str
     count: int
+    description: str = ""
 
 
 class ProjectCount(BaseModel):
