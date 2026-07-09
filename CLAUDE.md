@@ -6,35 +6,55 @@ memories from the DB, not from md files — `memory query --project=agent-a --ag
 (your standing working rules) and `memory query --project=agent-memory --limit=10` (recent
 work here).
 
-This repo **is the memory system** — the `memory-cli` tool plus the live SQLite DB
-that gives every agent session continuity. You're the maintainer *and* a user, so
-changes here affect every other project (project-a, …) that logs to this DB.
+This repo **is the memory system** — the `memory-cli` client, the FastAPI service that
+owns the data, and the shared Postgres DB behind it that gives every agent session
+continuity. You're the maintainer *and* a user, so changes here affect every other
+project (project-a, …) that logs to this system.
+
+> **Migration in flight (issue #51):** the architecture is now API-first + Postgres, but
+> the **live agent data has NOT been migrated yet** — it still lives in the old SQLite DB
+> at `~/.local/share/agent-memory/memory.db`. Rules below flagged *(until #51)* describe
+> that live SQLite DB and change once the data lands in Postgres. Don't treat the move as
+> done.
 
 ## The tool
 
-- `agent_memory` — Python package (`src/`) with one store core behind three surfaces:
-  the `memory-cli` command (`cli.py`), an HTTP API (`server/`, `[server]` extra), and an
-  MCP server (`mcp_server.py`, `[mcp]` extra). `memory-cli` on PATH is a thin shim onto
-  `agent_memory.cli:main`. **Client surface (CLI + urllib `ApiStore`) is stdlib-only.**
-- `store.py` is the seam: `get_store()` returns `ApiStore` when `AGENT_MEMORY_API` is set,
-  else `SqliteStore`. The store contract is identical across surfaces (anti-drift).
-- `memory.db` — relational SQLite store; path resolves `AGENT_MEMORY_DB` env → stored
-  `db_path` (`memory-cli config set db_path …`) → default `~/.local/share/agent-memory/memory.db`.
-  **Live and shared across all agents.** Git-ignored.
+- `agent_memory` — Python package (`src/`). **API-first, Postgres-only.** One async
+  FastAPI service (`server/`, `[server]` extra) is the only thing that touches the DB;
+  the `memory-cli` command (`cli.py`) and the MCP server (`mcp_server.py`, `[mcp]` extra)
+  are thin HTTP clients over `ApiClient` (`client.py`). `memory-cli` on PATH is a shim
+  onto `agent_memory.cli:main`. **Client surface (CLI + MCP + urllib `ApiClient`) is
+  stdlib-only.**
+- `client.py`/`config.py` are the client seam: they resolve an **endpoint + token**
+  (`AGENT_MEMORY_API` env → config `api_url` → `http://127.0.0.1:8099`;
+  `AGENT_MEMORY_API_TOKEN` env → config `api_token`) — never a DB. The server resolves the
+  DSN from `AGENT_MEMORY_DB` (a `postgresql://` URL). The Pydantic contract is identical
+  across CLI, API, and MCP (anti-drift).
+- **Server stack:** SQLAlchemy 2.0 async + asyncpg; `server/models.py` is the schema
+  source of truth; **Alembic** owns DDL (`alembic upgrade head`). FTS is a generated
+  `content_tsv` tsvector + GIN index.
+- Run the server: `AGENT_MEMORY_DB=postgresql://… AGENT_MEMORY_API_TOKEN=… python -m
+  agent_memory.server` (fails closed without a token; host/port via
+  `AGENT_MEMORY_HOST`/`AGENT_MEMORY_PORT`).
 - Docs: `MEMORY.md` (logging protocol — imported by other repos), `ARCHITECTURE.md`
   (layout + schema + design). Command reference is `memory --help`, not markdown.
 
 ## Rules
 
-1. **The DB is live and shared.** Back up `memory.db` before any schema change or
-   destructive op; verify row counts before/after. Never experiment against it — point
-   `AGENT_MEMORY_DB` at a scratch file.
-2. **Never hardcode the DB path.** It resolves `AGENT_MEMORY_DB` → stored `db_path` →
-   XDG default (see above). Keep that resolution order intact.
-3. **Client stays stdlib-only.** `config.py`/`store.py`/`cli.py` use no third-party
-   deps — portability is the point. Server/MCP deps are confined to the `[server]`/`[mcp]`
-   extras (Phase 2 scoped the old "single-file, stdlib-only" rule to the client).
-4. **No CHANGELOG.** Log user-visible changes to the DB itself
+1. **The DB is live and shared.** Back up before any schema change or destructive op;
+   verify row counts before/after. Never experiment against it — point at a scratch
+   database. *(until #51: the live data is still the SQLite file at
+   `~/.local/share/agent-memory/memory.db` — back up that file; once migrated it's a
+   Postgres DB and you back it up with `pg_dump`.)*
+2. **Never hardcode the DB target.** The **server** resolves it from `AGENT_MEMORY_DB`
+   (a `postgresql://` DSN, normalized to asyncpg); the **client** never sees a DB — it
+   resolves `AGENT_MEMORY_API` → config `api_url` → local default. Keep those resolution
+   orders intact.
+3. **Client stays stdlib-only.** `config.py`/`client.py`/`cli.py`/`mcp_server.py` (the
+   client half of it) use no third-party deps — portability + fast CLI cold-start is the
+   point. Server deps (FastAPI, SQLAlchemy, asyncpg, Alembic) live only in the `[server]`
+   extra; MCP in `[mcp]`.
+4. **No CHANGELOG.** Log user-visible changes to the memory system itself
    (`--type=decision`, tagged). That *is* the history.
 5. **Don't rename or relocate `memory-cli` or its `memory` alias** — other repos
    reference it by path. It stays a shim onto `agent_memory.cli:main`.
@@ -48,5 +68,6 @@ changes here affect every other project (project-a, …) that logs to this DB.
 Log your work here as it happens, under `--project=agent-memory --agent=agent-a`.
 Full protocol in `MEMORY.md`.
 
-    memory add "Repointed DB_PATH to AGENT_MEMORY_DB-overridable" \
-      --agent=agent-a --project=agent-memory --tags=cli,migration --type=decision
+    memory add "Rewrote the store to an API-first, Postgres-only architecture" \
+      --agent=agent-a --project=agent-memory --type=decision \
+      --tags='[{"name":"architecture","description":"system design changes"},{"name":"migration"}]'
