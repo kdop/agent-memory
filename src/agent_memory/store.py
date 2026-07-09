@@ -17,8 +17,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
+from datetime import date, timedelta
 
 from .config import load_config, resolve_db_path
+
+
+def since_days_window(n):
+    """Translate a since_days offset (0=today, 1=yesterday, N=N days ago) into the
+    concrete (since, until) bounds of that single calendar day."""
+    day = date.today() - timedelta(days=int(n))
+    return day.isoformat(), day.isoformat() + " 23:59:59"
 
 
 class MemoryStore(ABC):
@@ -31,7 +39,7 @@ class MemoryStore(ABC):
     @abstractmethod
     def add(self, content, agent, project, tags, mtype): ...
     @abstractmethod
-    def query(self, *, today=False, yesterday=False, since=None, until=None,
+    def query(self, *, since_days=None, since=None, until=None,
               project=None, agent=None, tag=None, mtype=None, limit=None): ...
     @abstractmethod
     def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None): ...
@@ -104,11 +112,10 @@ class ApiStore(MemoryStore):
         })
         return data["id"]
 
-    def query(self, *, today=False, yesterday=False, since=None, until=None,
+    def query(self, *, since_days=None, since=None, until=None,
               project=None, agent=None, tag=None, mtype=None, limit=None):
         params = {
-            "today": "true" if today else None,
-            "yesterday": "true" if yesterday else None,
+            "since_days": since_days,
             "since": since, "until": until, "project": project,
             "agent": agent, "tag": tag, "type": mtype, "limit": limit,
         }
