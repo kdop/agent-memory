@@ -50,8 +50,7 @@ results.
 | **Reuse `SqliteStore`, no ORM** | FTS5 search is hand-SQL either way; keeps the client stdlib-only and the characterization tests valid | SQLAlchemy (rewrite of working storage; an ORM buys nothing for the FTS query) |
 
 `memory-cli` stays on PATH as a thin shim so the command name and `memory` alias are
-unchanged despite the package split. Old DBs that still store tags as a JSON column are
-auto-detected and migrated to the relational schema on first run, no intervention needed.
+unchanged despite the package split.
 
 ## Database schema
 
