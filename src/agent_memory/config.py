@@ -1,16 +1,25 @@
-"""Configuration, DB-path resolution, and agent-name detection.
+"""Configuration, endpoint resolution, and agent-name detection.
 
-Persistent settings live in a JSON file under the XDG config dir. The DB path
-resolves highest-priority-first:
+Persistent settings live in a JSON file under the XDG config dir.
 
-    AGENT_MEMORY_DB env  →  stored db_path setting  →  XDG data-dir default
+Client endpoint (CLI + MCP talk to the API, never a DB directly):
 
-The same config file will later hold the cloud backend selection (api_url/token, #6).
+    AGENT_MEMORY_API env        →  stored `api_url`    →  local default (127.0.0.1:PORT)
+    AGENT_MEMORY_API_TOKEN env  →  stored `api_token`
+
+Server DB target (only the API server reads this):
+
+    AGENT_MEMORY_DB env         →  a postgresql:// DSN (Postgres-only)
 """
 
 import json
 import os
 from pathlib import Path
+
+# The local API the CLI/MCP talk to by default when nothing else is configured.
+DEFAULT_API_HOST = "127.0.0.1"
+DEFAULT_API_PORT = 8099
+DEFAULT_API_URL = f"http://{DEFAULT_API_HOST}:{DEFAULT_API_PORT}"
 
 
 def _xdg(env_var, home_subpath):
@@ -35,20 +44,25 @@ def save_config(cfg):
     p.write_text(json.dumps(cfg, indent=2) + "\n")
 
 
-def default_db_path():
-    return _xdg("XDG_DATA_HOME", ".local/share") / "agent-memory" / "memory.db"
+def resolve_api_url():
+    """The API endpoint the client (CLI/MCP) talks to. Always resolves to a URL —
+    a local server is the default, so clients never fall back to a direct DB."""
+    return os.environ.get("AGENT_MEMORY_API") or load_config().get("api_url") or DEFAULT_API_URL
 
 
-def resolve_db_path():
-    env = os.environ.get("AGENT_MEMORY_DB")
-    if env:
-        return Path(env)
-    stored = load_config().get("db_path")
-    if stored:
-        return Path(stored)
-    return default_db_path()
+def resolve_api_token():
+    """Bearer token for the API, if configured (None when the server is open)."""
+    return os.environ.get("AGENT_MEMORY_API_TOKEN") or load_config().get("api_token")
+
+
+def resolve_server_bind():
+    """(host, port) the API server binds to. Env overrides config overrides defaults."""
+    cfg = load_config()
+    host = os.environ.get("AGENT_MEMORY_HOST") or cfg.get("server_host") or DEFAULT_API_HOST
+    port = os.environ.get("AGENT_MEMORY_PORT") or cfg.get("server_port") or DEFAULT_API_PORT
+    return host, int(port)
 
 
 def get_agent_name():
-    """Detect agent name from environment or default"""
+    """Detect agent name from environment or default."""
     return os.environ.get("AGENT_NAME", "unknown")

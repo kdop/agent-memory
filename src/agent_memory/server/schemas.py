@@ -1,49 +1,65 @@
-"""Request/response models for the HTTP API.
+"""Pydantic v2 request/response models — the HTTP contract.
 
-These mirror the plain dicts/tuples the store already returns; they exist to give
-FastAPI validation + OpenAPI docs, not to reshape the data.
+Tags are structured objects (`{"name", "description"}`), never delimited strings, so
+descriptions may contain any character. Validation lives here, once: a tag name is
+required and non-blank; a blank description collapses to None (the repo then defaults
+a new tag's descriptor to its own name).
 """
 
-from typing import List, Optional
+from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class TagIn(BaseModel):
-    """A tag reference: name required, description optional. A brand-new tag with
-    no description auto-defaults to its own name (see MemoryStore)."""
-    name: str
-    description: Optional[str] = None
+    name: str = Field(min_length=1)
+    description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_nonblank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("tag name must not be blank")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def _desc_blank_to_none(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
 
 
 class MemoryIn(BaseModel):
     content: str
-    project: Optional[str] = None
-    agent: Optional[str] = None
-    tags: List[TagIn] = []
-    type: Optional[str] = None
+    project: str | None = None
+    agent: str | None = None
+    tags: list[TagIn] = []
+    type: str | None = None
 
 
 class MemoryOut(BaseModel):
     id: int
-    timestamp: Optional[str] = None
-    agent: Optional[str] = None
-    project: Optional[str] = None
+    timestamp: str | None = None
+    agent: str | None = None
+    project: str | None = None
     content: str = ""
-    type: Optional[str] = None
-    tags: List[str] = []
-    snippet: Optional[str] = None
+    type: str | None = None
+    tags: list[str] = []
+    snippet: str | None = None
 
 
 class UpdateIn(BaseModel):
-    # Same shapes the store.update() seam expects: project/type "" clears. Only
-    # fields actually sent are applied.
-    content: Optional[str] = None
-    project: Optional[str] = None
-    type: Optional[str] = None
-    set_tags: Optional[List[TagIn]] = None
-    add_tags: Optional[List[TagIn]] = None
-    remove_tags: Optional[List[str]] = None
+    # Only fields actually sent are applied. project/type == "" clears the column;
+    # set_tags == [] removes all tags.
+    content: str | None = None
+    project: str | None = None
+    type: str | None = None
+    set_tags: list[TagIn] | None = None
+    add_tags: list[TagIn] | None = None
+    remove_tags: list[str] | None = None
 
 
 class AddResult(BaseModel):
@@ -51,12 +67,12 @@ class AddResult(BaseModel):
 
 
 class UpdateResult(BaseModel):
-    changes: List[str]
+    changes: list[str]
 
 
 class DeleteResult(BaseModel):
     deleted: int
-    missing: List[int] = []
+    missing: list[int] = []
 
 
 class TagCount(BaseModel):
@@ -68,3 +84,29 @@ class TagCount(BaseModel):
 class ProjectCount(BaseModel):
     project: str
     count: int
+
+
+# ---- tag management (dashboard, D1) ---------------------------------------
+class TagPatch(BaseModel):
+    name: str | None = None          # rename (collision → merge into the existing tag)
+    description: str | None = None   # re-describe
+
+    @field_validator("name")
+    @classmethod
+    def _name_nonblank(cls, v):
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("tag name must not be blank")
+        return v
+
+
+class TagMergeIn(BaseModel):
+    sources: list[str] = Field(min_length=1)
+    target: str = Field(min_length=1)
+    description: str | None = None
+
+
+class TagDetachIn(BaseModel):
+    memory_ids: list[int] | None = None   # omit / empty = detach from all memories

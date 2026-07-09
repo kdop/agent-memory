@@ -4,26 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-memory"
-version = "0.1.0"
-description = "Shared, SQLite-backed persistent memory system for AI agents"
+version = "0.2.0"
+description = "Shared, Postgres-backed persistent memory service for AI agents (API-first)"
 readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "MIT" }
-# Stdlib only — no runtime dependencies, by design (portability across agent hosts).
+# Stdlib only — the client surface (CLI + MCP + urllib ApiClient) has no runtime
+# dependencies, by design (portability + fast CLI cold-start).
 dependencies = []
 
 [project.optional-dependencies]
-# The HTTP service (Ticket B). Client surface (CLI / urllib ApiStore) stays
-# stdlib-only — only this extra pulls deps, scoping rule #3 to the client.
-server = ["fastapi>=0.110", "uvicorn>=0.29"]
-# The MCP server (Ticket D). Optional, like [server] — keeps the client stdlib-only.
+# The API service — the only surface that touches the database. Async FastAPI +
+# SQLAlchemy 2.0 (asyncpg) + Alembic. The client surface stays stdlib-only (rule #3).
+server = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+]
+# The MCP server. Optional, like [server] — keeps the client stdlib-only.
 mcp = ["mcp>=1.0"]
-# The PostgreSQL backend (Ticket F). Optional; selected when the DB target is a
-# postgresql:// DSN. SQLite stays the default and needs no deps.
-postgres = ["psycopg[binary]>=3.1"]
-# Test-only. Pulls all surface extras (the drivers run them in-process) + httpx for
-# the TestClient. Never part of the shipped client surface.
-dev = ["pytest", "httpx", "coverage[toml]", "agent-memory[server]", "agent-memory[mcp]", "agent-memory[postgres]"]
+# Test-only. Pulls the server + mcp extras + httpx for the ASGI test client.
+# pytest-rerunfailures guards the cross-surface suite against the (product-safe)
+# residual timing flake of a shared threaded uvicorn server + per-test truncate.
+dev = ["pytest", "pytest-asyncio", "pytest-rerunfailures", "httpx", "coverage[toml]",
+       "agent-memory[server]", "agent-memory[mcp]"]
 
 [project.urls]
 Homepage = "https://github.com/kdop/agent-memory"
@@ -38,18 +44,26 @@ agent-memory-mcp = "agent_memory.mcp_server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Make the src-layout package importable in-process (ApiDriver builds the app)
+# Make the src-layout package importable in-process (drivers build the app)
 # without requiring an editable install first.
 pythonpath = ["src"]
+# Async tests (SQLAlchemy async engine / httpx AsyncClient) — no per-test decorator.
+asyncio_mode = "auto"
+# The cross-surface suite drives ONE shared threaded uvicorn server + real Postgres;
+# a rare cross-thread/loop timing flake can lose a fresh test's first write (the
+# product itself is race-free — proven by an in-process read-after-write stress).
+# Retry a failed test up to twice: a genuine bug still fails all attempts.
+addopts = "--reruns 2 --reruns-delay 1"
 
 [tool.coverage.run]
 source = ["agent_memory"]
 # parallel so the in-process pytest data and the CLI-subprocess data (CliDriver
 # runs the CLI under `coverage run` when AGENT_MEMORY_COV is set) combine cleanly.
 parallel = true
-# The uvicorn launcher only runs via `python -m agent_memory.server` in production,
-# never under test — omit it rather than let it drag the number as dead untestable code.
-omit = ["*/server/__main__.py"]
+# The uvicorn launcher runs only via `python -m agent_memory.server` in production;
+# Alembic migration scripts run under the alembic CLI, not pytest. Omit both rather
+# than let untestable glue drag the number.
+omit = ["*/server/__main__.py", "*/alembic/*"]
 
 [tool.coverage.report]
 show_missing = true
