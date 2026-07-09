@@ -1,13 +1,22 @@
 <script setup>
 // Tags management view. D7 builds the table; D8 builds the detail/edit modal.
-import { onMounted } from 'vue'
-import { storeToRefs } from 'pinia'
+import { onMounted, ref } from 'vue'
 import { useTagsStore } from '@/stores/tags'
 import { useAuthStore } from '@/stores/auth'
+import TagsTable from '@/components/TagsTable.vue'
+import TagDetailModal from '@/components/TagDetailModal.vue'
 
 const tags = useTagsStore()
 const auth = useAuthStore()
-const { list, loading } = storeToRefs(tags)
+
+// D8 modal state — opened from a D7 table row click.
+const detailOpen = ref(false)
+const selectedTag = ref(null)
+
+function openTag(tag) {
+  selectedTag.value = tag
+  detailOpen.value = true
+}
 
 onMounted(() => {
   if (auth.isAuthed) tags.fetch()
@@ -18,32 +27,12 @@ onMounted(() => {
   <q-page class="q-pa-md">
     <div class="text-h6 q-mb-md">Tags</div>
 
-    <!-- ============ D7: tags table ============
-      Replace with the q-table over `tags.list` ({ name, count, description })
-      with rename/describe/delete/merge actions calling the api client, then
-      tags.fetch() to refresh. -->
+    <!-- ============ D7: tags table ============ -->
     <!-- D7: tags table -->
-    <q-card flat bordered>
-      <q-inner-loading :showing="loading" />
-      <q-list separator>
-        <q-item v-for="t in list" :key="t.name">
-          <q-item-section>
-            <q-item-label>{{ t.name }}</q-item-label>
-            <q-item-label caption>{{ t.description }}</q-item-label>
-          </q-item-section>
-          <q-item-section side>
-            <q-badge>{{ t.count }}</q-badge>
-          </q-item-section>
-        </q-item>
-        <q-item v-if="!loading && !list.length">
-          <q-item-section class="text-grey">No tags.</q-item-section>
-        </q-item>
-      </q-list>
-    </q-card>
+    <TagsTable @open="openTag" />
 
-    <!-- ============ D8: tag detail modal ============
-      Mount the tag detail / edit dialog here (rename, re-describe, merge,
-      detach). Open it from the D7 table rows. -->
+    <!-- ============ D8: tag detail modal ============ -->
     <!-- D8: tag detail modal -->
+    <TagDetailModal v-model="detailOpen" :tag="selectedTag" />
   </q-page>
 </template>
