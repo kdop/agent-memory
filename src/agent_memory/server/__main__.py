@@ -1,20 +1,23 @@
 """`python -m agent_memory.server` — run the API with uvicorn.
 
-Token comes from AGENT_MEMORY_API_TOKEN (required; the server fails closed
-without one). Host/port via AGENT_MEMORY_HOST / AGENT_MEMORY_PORT. The DB is the
-usual resolved store (AGENT_MEMORY_DB / config / XDG default) — back it up before
-pointing the server at the live DB for real (rule #1).
+Token: AGENT_MEMORY_API_TOKEN → config `api_token` (required; the server fails
+closed without one). Bind host/port resolve AGENT_MEMORY_HOST/PORT → config
+`server_host`/`server_port` → local default (127.0.0.1:8099, matching the client
+default), so `python -m agent_memory.server` needs no flags. The DB is
+AGENT_MEMORY_DB (a postgresql:// DSN) — back it up before pointing at real data.
 """
 
-import os
 import sys
+
+from ..config import resolve_api_token, resolve_server_bind
 
 
 def main():
-    token = os.environ.get("AGENT_MEMORY_API_TOKEN")
+    token = resolve_api_token()
     if not token:
         print(
-            "Refusing to start: set AGENT_MEMORY_API_TOKEN to a bearer token first.",
+            "Refusing to start: set AGENT_MEMORY_API_TOKEN (or `memory-cli config set "
+            "api_token …`) to a bearer token first.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -23,8 +26,7 @@ def main():
 
     from .app import create_app
 
-    host = os.environ.get("AGENT_MEMORY_HOST", "127.0.0.1")
-    port = int(os.environ.get("AGENT_MEMORY_PORT", "8000"))
+    host, port = resolve_server_bind()
     uvicorn.run(create_app(token=token), host=host, port=port)
 
 

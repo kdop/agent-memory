@@ -1,9 +1,8 @@
-"""FastAPI service exposing the MemoryStore over HTTP (Ticket B).
+"""FastAPI service — the one process that touches the database.
 
-Routes mirror the store contract 1:1 so the same cross-surface behavior suite
-runs against the API via `ApiDriver`. Bearer-token auth guards every route
-except `/health`. The client surface (CLI / urllib ApiStore) stays stdlib-only;
-only this `[server]` extra pulls FastAPI + uvicorn.
+Async routes (``app.py``) delegate to plain repository functions (``repository.py``)
+over a SQLAlchemy 2.0 async session; models live in ``models.py``. Bearer-token auth
+guards every route except ``/health``. Ships in the ``[server]`` extra.
 """
 
 from .app import create_app

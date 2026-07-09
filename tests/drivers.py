@@ -1,16 +1,18 @@
 """Cross-surface test drivers.
 
 One `MemoryDriver` contract, implemented per surface, so the same behavioral
-tests run against every surface and prove they don't drift.
+tests run against every surface and prove they don't drift. Every driver talks
+to ONE live FastAPI server backed by real Postgres — constructed with the
+`(url, token)` the `live_server` fixture yields:
 
-- `CliDriver`  — subprocess against `memory-cli`.
-- `ApiDriver`  — httpx TestClient over the FastAPI app.
-- `McpDriver`  — MCP client.
+- `CliDriver`  — subprocess against `memory-cli`, steered at the server via
+  `AGENT_MEMORY_API` / `AGENT_MEMORY_API_TOKEN`.
+- `ApiDriver`  — a SYNC `httpx.Client` against the server URL.
+- `McpDriver`  — an in-memory MCP session over `create_mcp(client=ApiClient(...))`.
 
 Drivers return plain structured data (`Memory`, lists, dicts) — never raw CLI
 chrome. Surface-specific output/exit-code/format assertions live in
-`test_cli_surface.py`, not here. Every driver runs against a scratch
-`AGENT_MEMORY_DB` (rule #1: the live DB is never touched).
+`test_cli_surface.py` / `test_api_surface.py`, not here.
 """
 
 # Keep the PEP 604 (`str | None`) annotations below evaluable as strings so the
@@ -31,8 +33,9 @@ MEMORY_CLI = Path(__file__).resolve().parent.parent / "memory-cli"
 def _normalize_tags(tags):
     """Canonicalize a driver-level `tags`/`set_tags`/`add_tags` argument into the
     wire shape every surface expects: a list of {"name": ..., "description": ...}
-    dicts. Accepts, for test convenience: None, a comma-separated string of bare
-    names, a list of bare names, or already-shaped dicts (mixed freely)."""
+    dicts (description omitted unless given). Accepts, for test convenience: None,
+    a comma-separated string of bare names, a list of bare names, or already-shaped
+    dicts (mixed freely)."""
     if tags is None:
         return None
     if isinstance(tags, str):
@@ -51,13 +54,9 @@ def _normalize_tag_names(names):
 
 
 def _cli_launcher():
-    """Interpreter prefix for launching the CLI subprocess.
-
-    When measuring coverage (``AGENT_MEMORY_COV`` set), run the CLI under
-    ``coverage run --parallel-mode`` so the subprocess's lines are recorded;
-    ``coverage combine`` then merges them with the in-process data. Otherwise
-    just the interpreter, so normal test runs pay no coverage overhead.
-    """
+    """Interpreter prefix for launching the CLI subprocess. Under coverage
+    (``AGENT_MEMORY_COV`` set) run the CLI under ``coverage run --parallel-mode``
+    so the subprocess's lines are recorded; otherwise just the interpreter."""
     if os.environ.get("AGENT_MEMORY_COV"):
         return [sys.executable, "-m", "coverage", "run", "--parallel-mode"]
     return [sys.executable]
@@ -79,19 +78,26 @@ class Memory:
 
 
 class CliDriver:
-    """Drives the CLI as a subprocess and parses its output back into data."""
+    """Drives the CLI as a subprocess and parses its output back into data.
+
+    The subprocess is pointed at the live server via `AGENT_MEMORY_API` /
+    `AGENT_MEMORY_API_TOKEN`, so it runs the real remote path (ApiClient → HTTP).
+    """
 
     name = "cli"
 
-    def __init__(self, db_path, agent="tester", extra_env=None):
-        self.db_path = Path(db_path)
+    def __init__(self, url, token, agent="tester", extra_env=None):
+        self.url = url
+        self.token = token
         self.agent = agent
         self.extra_env = extra_env or {}
 
     # ---- plumbing --------------------------------------------------------
     def _env(self):
         env = {**os.environ, "AGENT_NAME": self.agent}
-        env["AGENT_MEMORY_DB"] = str(self.db_path)
+        env["AGENT_MEMORY_API"] = self.url
+        if self.token is not None:
+            env["AGENT_MEMORY_API_TOKEN"] = self.token
         env.update(self.extra_env)
         return env
 
@@ -101,11 +107,6 @@ class CliDriver:
             [*_cli_launcher(), str(MEMORY_CLI), *args],
             env=self._env(), input=stdin, capture_output=True, text=True,
         )
-
-    def initialize(self):
-        # Prime the scratch DB so the one-time "Initialized…" banner doesn't bleed
-        # into later assertions. --yes auto-creates (no TTY in a subprocess).
-        self.raw("--yes", "stats")
 
     # ---- semantic operations --------------------------------------------
     def add(self, content, *, project=None, tags=None, type=None, agent=None):
@@ -280,37 +281,32 @@ class CliDriver:
 
 
 class ApiDriver:
-    """Drives the FastAPI service in-process via Starlette's httpx TestClient.
+    """Drives the live FastAPI service over a SYNC `httpx.Client`.
 
     Same `MemoryDriver` contract as `CliDriver`, so the cross-surface suite runs
-    against the HTTP routes unchanged. A fixed bearer token is sent on every
-    request; the app is built over a `SqliteStore` on the scratch DB (rule #1).
-    Surface-only concerns (401, /health) live in `test_api_surface.py`.
+    against the real HTTP routes unchanged. A fixed bearer token is sent on every
+    request. Surface-only concerns (401, /health, headers) live in
+    `test_api_surface.py`.
     """
 
     name = "api"
-    TOKEN = "test-token"
 
-    def __init__(self, db_path, agent="tester", extra_env=None):
-        # Imported lazily so a cli-only test run never needs FastAPI installed.
-        from fastapi.testclient import TestClient
+    def __init__(self, url, token, agent="tester", extra_env=None):
+        import httpx
 
-        from agent_memory.server import create_app
-        from agent_memory.store import SqliteStore
-
-        self.db_path = Path(db_path)
+        self.url = url.rstrip("/")
+        self.token = token
         self.agent = agent
-        self._client = TestClient(create_app(store=SqliteStore(self.db_path), token=self.TOKEN))
-        self._headers = {"Authorization": f"Bearer {self.TOKEN}"}
-
-    def initialize(self):
-        # create_app() already ran store.initialize(); nothing to prime.
-        pass
+        self._client = httpx.Client(
+            base_url=self.url,
+            headers={"Authorization": f"Bearer {token}"} if token else {},
+            timeout=30,
+        )
 
     # ---- plumbing --------------------------------------------------------
     def _get(self, path, **params):
         clean = {k: v for k, v in params.items() if v is not None}
-        return self._client.get(path, params=clean, headers=self._headers)
+        return self._client.get(path, params=clean)
 
     @staticmethod
     def _to_memory(d, snippet=False):
@@ -327,7 +323,7 @@ class ApiDriver:
             "content": content, "project": project, "type": type,
             "agent": agent or self.agent, "tags": _normalize_tags(tags) or [],
         }
-        resp = self._client.post("/memories", json=body, headers=self._headers)
+        resp = self._client.post("/memories", json=body)
         return resp.json()["id"] if resp.status_code == 201 else None
 
     def query(self, **filters):
@@ -374,17 +370,14 @@ class ApiDriver:
         norm_remove = _normalize_tag_names(remove_tags)
         if norm_remove:
             body["remove_tags"] = norm_remove
-        resp = self._client.patch(f"/memories/{mid}", json=body, headers=self._headers)
+        resp = self._client.patch(f"/memories/{mid}", json=body)
         if resp.status_code == 404:
             return None
         return "updated" if resp.json()["changes"] else "nochange"
 
     def delete(self, *ids):
         """Returns count removed."""
-        resp = self._client.request(
-            "DELETE", "/memories",
-            params={"ids": list(ids)}, headers=self._headers,
-        )
+        resp = self._client.request("DELETE", "/memories", params={"ids": list(ids)})
         return resp.json()["deleted"]
 
     def tags(self):
@@ -401,33 +394,29 @@ class ApiDriver:
 
 
 class McpDriver:
-    """Drives the MCP server over a real in-process client session (no subprocess).
+    """Drives the MCP server over a real in-memory client session (no subprocess).
 
     Same `MemoryDriver` contract, so the cross-surface suite runs against the MCP
-    tools too. Each call opens an in-memory MCP session to the FastMCP server
-    (built over a `SqliteStore` on the scratch DB) and parses the tool's single
-    JSON content block. Tool I/O is async; methods bridge via `asyncio.run`.
+    tools too. The FastMCP server wraps an `ApiClient` pointed at the live server,
+    so an MCP call still traverses the full HTTP → server → Postgres path. Each
+    call opens an in-memory MCP session and parses the tool's single JSON content
+    block. Tool I/O is async; methods bridge via `asyncio.run`.
     """
 
     name = "mcp"
 
-    def __init__(self, db_path, agent="tester", extra_env=None):
-        # Imported lazily so cli/api-only runs never need the mcp SDK installed.
+    def __init__(self, url, token, agent="tester", extra_env=None):
+        from agent_memory.client import ApiClient
         from agent_memory.mcp_server import create_mcp
-        from agent_memory.store import SqliteStore
 
-        self.db_path = Path(db_path)
+        self.url = url
+        self.token = token
         self.agent = agent
-        self._mcp = create_mcp(store=SqliteStore(self.db_path))
-
-    def initialize(self):
-        # create_mcp() already ran store.initialize(); nothing to prime.
-        pass
+        self._mcp = create_mcp(client=ApiClient(url, token))
 
     # ---- plumbing --------------------------------------------------------
     def _call(self, tool, **args):
         import asyncio
-        import json
 
         from mcp.shared.memory import create_connected_server_and_client_session as connect
 
@@ -495,112 +484,17 @@ class McpDriver:
         return self._call("memory_delete", ids=list(ids))["deleted"]
 
     def tags(self):
-        return [(t[0], t[1]) for t in self._call("memory_tags")["tags"]]
+        return [(t["name"], t["count"]) for t in self._call("memory_tags")["tags"]]
 
     def tags_with_descriptions(self):
-        return [tuple(t) for t in self._call("memory_tags")["tags"]]
+        return [(t["name"], t["count"], t.get("description", ""))
+                for t in self._call("memory_tags")["tags"]]
 
     def projects(self):
-        return [(project, count) for project, count in self._call("memory_projects")["projects"]]
+        return [(p["project"], p["count"]) for p in self._call("memory_projects")["projects"]]
 
     def stats(self):
         return self._call("memory_stats")
 
 
-class StoreDriver:
-    """Adapts any `MemoryStore` directly to the `MemoryDriver` contract (no transport).
-
-    Lets the cross-surface behavior suite run against a store engine itself — used to
-    prove `PostgresStore` satisfies the same contract as `SqliteStore` (Ticket F).
-    """
-
-    name = "store"
-
-    def __init__(self, store, agent="tester"):
-        self.store = store
-        self.agent = agent
-
-    def initialize(self):
-        self.store.initialize()
-
-    @staticmethod
-    def _to_memory(d, snippet=False):
-        return Memory(
-            id=d["id"], agent=d.get("agent"), project=d.get("project"),
-            type=d.get("type"), tags=d.get("tags") or [],
-            content="" if snippet else (d.get("content") or ""),
-            snippet=d.get("snippet") if snippet else None,
-        )
-
-    def add(self, content, *, project=None, tags=None, type=None, agent=None):
-        return self.store.add(content, agent or self.agent, project, _normalize_tags(tags) or [], type)
-
-    def query(self, **f):
-        rows = self.store.query(
-            since_days=f.get("since_days"),
-            since=f.get("since"), until=f.get("until"), project=f.get("project"),
-            agent=f.get("agent"), tag=f.get("tag"), mtype=f.get("type"),
-            limit=f.get("limit"))
-        return [self._to_memory(d) for d in rows]
-
-    def search(self, text, **f):
-        rows = self.store.search(
-            text, project=f.get("project"), agent=f.get("agent"),
-            since=f.get("since"), tag=f.get("tag"), limit=f.get("limit"))
-        return [self._to_memory(d, snippet=True) for d in rows]
-
-    def get(self, mid):
-        d = self.store.get(mid)
-        return None if d is None else self._to_memory(d)
-
-    def update(self, mid, *, content=None, project=None, type=None,
-               set_tags=None, add_tags=None, remove_tags=None, stdin=None):
-        changes = self.store.update(
-            mid, new_content=content, project=project, mtype=type,
-            set_tags=_normalize_tags(set_tags), add_tags=_normalize_tags(add_tags),
-            remove_tags=_normalize_tag_names(remove_tags))
-        if changes is None:
-            return None
-        return "updated" if changes else "nochange"
-
-    def delete(self, *ids):
-        count = len(self.store.get_many(list(ids)))
-        self.store.delete(list(ids))
-        return count
-
-    def tags(self):
-        return [(r[0], r[1]) for r in self.store.list_tags()]
-
-    def tags_with_descriptions(self):
-        return [tuple(r) for r in self.store.list_tags()]
-
-    def projects(self):
-        return [(project, count) for project, count in self.store.list_projects()]
-
-    def stats(self):
-        return self.store.stats()
-
-
-class PgDriver(StoreDriver):
-    """StoreDriver over a fresh PostgresStore. Each instance truncates the schema
-    (RESTART IDENTITY) so per-test state is isolated and ids start at 1, matching the
-    other drivers' scratch-DB behavior. Requires AGENT_MEMORY_TEST_PG_DSN."""
-
-    name = "pg"
-
-    def __init__(self, db_path, agent="tester", extra_env=None):
-        import os
-
-        import psycopg
-
-        from agent_memory.pg_store import PostgresStore
-
-        dsn = os.environ["AGENT_MEMORY_TEST_PG_DSN"]
-        store = PostgresStore(dsn)
-        store.initialize()
-        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-            cur.execute("TRUNCATE memories, tags, memory_tags RESTART IDENTITY CASCADE")
-        super().__init__(store, agent=agent)
-
-    def initialize(self):
-        pass  # already initialized + truncated in __init__
+DRIVER_FACTORIES = {"cli": CliDriver, "api": ApiDriver, "mcp": McpDriver}
