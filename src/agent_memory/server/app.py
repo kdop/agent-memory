@@ -45,7 +45,8 @@ def create_app(store: Optional[MemoryStore] = None, token: Optional[str] = None)
     def add_memory(body: MemoryIn, request: Request):
         s = request.app.state.store
         agent = body.agent or get_agent_name()
-        mid = s.add(body.content, agent, body.project, body.tags, body.type)
+        tags = [t.model_dump() for t in body.tags]
+        mid = s.add(body.content, agent, body.project, tags, body.type)
         return {"id": mid}
 
     @app.get("/memories", response_model=List[MemoryOut], dependencies=guard)
@@ -114,7 +115,7 @@ def create_app(store: Optional[MemoryStore] = None, token: Optional[str] = None)
 
     @app.get("/tags", response_model=List[TagCount], dependencies=guard)
     def list_tags(request: Request):
-        return [{"name": r[0], "count": r[1]} for r in request.app.state.store.list_tags()]
+        return [{"name": r[0], "count": r[1], "description": r[2]} for r in request.app.state.store.list_tags()]
 
     @app.get("/projects", response_model=List[ProjectCount], dependencies=guard)
     def list_projects(request: Request):

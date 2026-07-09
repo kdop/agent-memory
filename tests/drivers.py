@@ -17,6 +17,7 @@ chrome. Surface-specific output/exit-code/format assertions live in
 # harness imports on every supported runtime, not just 3.10+.
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -25,6 +26,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 MEMORY_CLI = Path(__file__).resolve().parent.parent / "memory-cli"
+
+
+def _normalize_tags(tags):
+    """Canonicalize a driver-level `tags`/`set_tags`/`add_tags` argument into the
+    wire shape every surface expects: a list of {"name": ..., "description": ...}
+    dicts. Accepts, for test convenience: None, a comma-separated string of bare
+    names, a list of bare names, or already-shaped dicts (mixed freely)."""
+    if tags is None:
+        return None
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    return [t if isinstance(t, dict) else {"name": t} for t in tags]
+
+
+def _normalize_tag_names(names):
+    """Canonicalize a driver-level `remove_tags` argument into a plain list of tag
+    names. Accepts None, a comma-separated string, or a list."""
+    if names is None:
+        return None
+    if isinstance(names, str):
+        return [t.strip() for t in names.split(",") if t.strip()]
+    return list(names)
 
 
 def _cli_launcher():
@@ -89,8 +112,9 @@ class CliDriver:
         args = ["add", content]
         if project:
             args += ["--project", project]
-        if tags:
-            args += ["--tags", tags if isinstance(tags, str) else ",".join(tags)]
+        norm = _normalize_tags(tags)
+        if norm:
+            args += ["--tags", json.dumps(norm)]
         if type:
             args += ["--type", type]
         if agent:
@@ -139,11 +163,13 @@ class CliDriver:
         if type is not None:
             args += ["--type", type]
         if set_tags is not None:
-            args += ["--set-tags", set_tags]
-        if add_tags:
-            args += ["--add-tags", add_tags]
-        if remove_tags:
-            args += ["--remove-tags", remove_tags]
+            args += ["--set-tags", json.dumps(_normalize_tags(set_tags))]
+        norm_add = _normalize_tags(add_tags)
+        if norm_add:
+            args += ["--add-tags", json.dumps(norm_add)]
+        norm_remove = _normalize_tag_names(remove_tags)
+        if norm_remove:
+            args += ["--remove-tags", ",".join(norm_remove)]
         proc = self.raw(*args, stdin=stdin)
         if proc.returncode != 0 or "not found" in proc.stdout:
             return None
@@ -165,6 +191,27 @@ class CliDriver:
             if m:
                 res.append((m.group(1), int(m.group(2))))
         return res
+
+    def tags_with_descriptions(self):
+        """Like tags(), but also captures the '↳ description' line under each tag
+        (empty string when the listing omitted it — the auto-defaulted case)."""
+        out = self.raw("tags").stdout
+        if "No tags found" in out:
+            return []
+        res, pending = [], None
+        for line in out.splitlines():
+            m = re.match(r"\s+(\S+)\s+\((\d+)\)\s*$", line)
+            if m:
+                if pending:
+                    res.append(pending)
+                pending = [m.group(1), int(m.group(2)), ""]
+                continue
+            dm = re.match(r"\s*↳\s+(.*)$", line)
+            if dm and pending:
+                pending[2] = dm.group(1)
+        if pending:
+            res.append(pending)
+        return [tuple(r) for r in res]
 
     def projects(self):
         out = self.raw("projects").stdout
@@ -276,11 +323,9 @@ class ApiDriver:
 
     # ---- semantic operations --------------------------------------------
     def add(self, content, *, project=None, tags=None, type=None, agent=None):
-        if isinstance(tags, str):
-            tags = [t.strip() for t in tags.split(",") if t.strip()]
         body = {
             "content": content, "project": project, "type": type,
-            "agent": agent or self.agent, "tags": tags or [],
+            "agent": agent or self.agent, "tags": _normalize_tags(tags) or [],
         }
         resp = self._client.post("/memories", json=body, headers=self._headers)
         return resp.json()["id"] if resp.status_code == 201 else None
@@ -322,11 +367,13 @@ class ApiDriver:
         if type is not None:
             body["type"] = type
         if set_tags is not None:
-            body["set_tags"] = set_tags
-        if add_tags:
-            body["add_tags"] = add_tags
-        if remove_tags:
-            body["remove_tags"] = remove_tags
+            body["set_tags"] = _normalize_tags(set_tags)
+        norm_add = _normalize_tags(add_tags)
+        if norm_add:
+            body["add_tags"] = norm_add
+        norm_remove = _normalize_tag_names(remove_tags)
+        if norm_remove:
+            body["remove_tags"] = norm_remove
         resp = self._client.patch(f"/memories/{mid}", json=body, headers=self._headers)
         if resp.status_code == 404:
             return None
@@ -342,6 +389,9 @@ class ApiDriver:
 
     def tags(self):
         return [(t["name"], t["count"]) for t in self._get("/tags").json()]
+
+    def tags_with_descriptions(self):
+        return [(t["name"], t["count"], t.get("description", "")) for t in self._get("/tags").json()]
 
     def projects(self):
         return [(p["project"], p["count"]) for p in self._get("/projects").json()]
@@ -402,10 +452,8 @@ class McpDriver:
 
     # ---- semantic operations --------------------------------------------
     def add(self, content, *, project=None, tags=None, type=None, agent=None):
-        if isinstance(tags, str):
-            tags = [t.strip() for t in tags.split(",") if t.strip()]
         return self._call("memory_add", content=content, agent=agent or self.agent,
-                          project=project, tags=tags or [], type=type)["id"]
+                          project=project, tags=_normalize_tags(tags) or [], type=type)["id"]
 
     def query(self, **filters):
         data = self._call(
@@ -435,8 +483,9 @@ class McpDriver:
                set_tags=None, add_tags=None, remove_tags=None, stdin=None):
         """Returns 'updated' | 'nochange' | None (not found)."""
         data = self._call("memory_update", id=mid, content=content, project=project,
-                          type=type, set_tags=set_tags,
-                          add_tags=add_tags or None, remove_tags=remove_tags or None)
+                          type=type, set_tags=_normalize_tags(set_tags),
+                          add_tags=_normalize_tags(add_tags) or None,
+                          remove_tags=_normalize_tag_names(remove_tags) or None)
         if not data["found"]:
             return None
         return "updated" if data["changes"] else "nochange"
@@ -446,7 +495,10 @@ class McpDriver:
         return self._call("memory_delete", ids=list(ids))["deleted"]
 
     def tags(self):
-        return [(name, count) for name, count in self._call("memory_tags")["tags"]]
+        return [(t[0], t[1]) for t in self._call("memory_tags")["tags"]]
+
+    def tags_with_descriptions(self):
+        return [tuple(t) for t in self._call("memory_tags")["tags"]]
 
     def projects(self):
         return [(project, count) for project, count in self._call("memory_projects")["projects"]]
@@ -481,9 +533,7 @@ class StoreDriver:
         )
 
     def add(self, content, *, project=None, tags=None, type=None, agent=None):
-        if isinstance(tags, str):
-            tags = [t.strip() for t in tags.split(",") if t.strip()]
-        return self.store.add(content, agent or self.agent, project, tags or [], type)
+        return self.store.add(content, agent or self.agent, project, _normalize_tags(tags) or [], type)
 
     def query(self, **f):
         rows = self.store.query(
@@ -507,7 +557,8 @@ class StoreDriver:
                set_tags=None, add_tags=None, remove_tags=None, stdin=None):
         changes = self.store.update(
             mid, new_content=content, project=project, mtype=type,
-            set_tags=set_tags, add_tags=add_tags, remove_tags=remove_tags)
+            set_tags=_normalize_tags(set_tags), add_tags=_normalize_tags(add_tags),
+            remove_tags=_normalize_tag_names(remove_tags))
         if changes is None:
             return None
         return "updated" if changes else "nochange"
@@ -518,7 +569,10 @@ class StoreDriver:
         return count
 
     def tags(self):
-        return [(name, count) for name, count in self.store.list_tags()]
+        return [(r[0], r[1]) for r in self.store.list_tags()]
+
+    def tags_with_descriptions(self):
+        return [tuple(r) for r in self.store.list_tags()]
 
     def projects(self):
         return [(project, count) for project, count in self.store.list_projects()]
