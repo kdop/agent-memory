@@ -7,7 +7,7 @@ name = "agent-memory"
 version = "0.1.0"
 description = "Shared, SQLite-backed persistent memory system for AI agents"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 license = { text = "MIT" }
 # Stdlib only — no runtime dependencies, by design (portability across agent hosts).
 dependencies = []
@@ -23,7 +23,7 @@ mcp = ["mcp>=1.0"]
 postgres = ["psycopg[binary]>=3.1"]
 # Test-only. Pulls all surface extras (the drivers run them in-process) + httpx for
 # the TestClient. Never part of the shipped client surface.
-dev = ["pytest", "httpx", "agent-memory[server]", "agent-memory[mcp]", "agent-memory[postgres]"]
+dev = ["pytest", "httpx", "coverage[toml]", "agent-memory[server]", "agent-memory[mcp]", "agent-memory[postgres]"]
 
 [project.urls]
 Homepage = "https://github.com/kdop/agent-memory"
@@ -41,6 +41,19 @@ testpaths = ["tests"]
 # Make the src-layout package importable in-process (ApiDriver builds the app)
 # without requiring an editable install first.
 pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["agent_memory"]
+# parallel so the in-process pytest data and the CLI-subprocess data (CliDriver
+# runs the CLI under `coverage run` when AGENT_MEMORY_COV is set) combine cleanly.
+parallel = true
+# The uvicorn launcher only runs via `python -m agent_memory.server` in production,
+# never under test — omit it rather than let it drag the number as dead untestable code.
+omit = ["*/server/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = ['if __name__ == .__main__.:']
 
 [tool.setuptools.packages.find]
 where = ["src"]

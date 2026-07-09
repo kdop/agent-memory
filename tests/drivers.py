@@ -26,6 +26,20 @@ from pathlib import Path
 
 MEMORY_CLI = Path(__file__).resolve().parent.parent / "memory-cli"
 
+
+def _cli_launcher():
+    """Interpreter prefix for launching the CLI subprocess.
+
+    When measuring coverage (``AGENT_MEMORY_COV`` set), run the CLI under
+    ``coverage run --parallel-mode`` so the subprocess's lines are recorded;
+    ``coverage combine`` then merges them with the in-process data. Otherwise
+    just the interpreter, so normal test runs pay no coverage overhead.
+    """
+    if os.environ.get("AGENT_MEMORY_COV"):
+        return [sys.executable, "-m", "coverage", "run", "--parallel-mode"]
+    return [sys.executable]
+
+
 # Lines a CLI block can start with that are NOT content.
 _SEP = re.compile(r"^[─━]{10,}$")
 
@@ -61,7 +75,7 @@ class CliDriver:
     def raw(self, *args, stdin=None):
         """Run the CLI verbatim; returns the CompletedProcess (for surface tests)."""
         return subprocess.run(
-            [sys.executable, str(MEMORY_CLI), *args],
+            [*_cli_launcher(), str(MEMORY_CLI), *args],
             env=self._env(), input=stdin, capture_output=True, text=True,
         )
 
