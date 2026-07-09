@@ -1,52 +1,41 @@
-"""CLI-surface characterization — assertions that are specific to the CLI:
-exact rendered chrome, exit codes, dry-run text, the create-confirmation guard,
-and config/DB-path resolution. These have no cross-surface meaning, so they stay
-pinned to the CLI (not in test_behaviors.py).
+"""CLI-surface characterization — assertions specific to the CLI: the rendered
+chrome (🕒/👤/🏷️ blocks, "Found N memories"), tag listing with descriptions,
+malformed-input exit codes, and the offline error path. These have no
+cross-surface meaning, so they stay pinned to the CLI (not in test_behaviors.py).
 
-Faithfully preserves the behavior the old tests/test_memory_cli.py pinned.
+Every test drives the real `memory-cli` subprocess pointed at the live server.
 """
-
-import os
-import sqlite3
-import subprocess
-import sys
-import tempfile
-from pathlib import Path
 
 import pytest
 
-from drivers import MEMORY_CLI, CliDriver
+from drivers import CliDriver
 
 
-# ── primed-CLI surface tests ────────────────────────────────────────────────
 @pytest.fixture
-def primed(tmp_path):
-    drv = CliDriver(tmp_path / "memory.db")
-    drv.initialize()
-    return drv
+def cli(live_server):
+    url, token = live_server
+    return CliDriver(url, token)
 
 
-def test_isolation_uses_tempdir(primed):
-    assert str(primed.db_path).startswith(tempfile.gettempdir())
+# ── add / query chrome ───────────────────────────────────────────────────────
+def test_add_chrome(cli):
+    assert "✓ Memory #1 added (tester)" in cli.raw("add", "hello world").stdout
 
 
-def test_add_chrome(primed):
-    assert "✓ Memory #1 added (tester)" in primed.raw("add", "hello world").stdout
+def test_add_explicit_agent_chrome(cli):
+    assert "✓ Memory #1 added (clu)" in cli.raw("add", "x", "--agent", "clu").stdout
 
 
-def test_add_explicit_agent_chrome(primed):
-    assert "✓ Memory #1 added (clu)" in primed.raw("add", "x", "--agent", "clu").stdout
+def test_query_empty_chrome(cli):
+    assert "No memories found." in cli.raw("query").stdout
 
 
-def test_query_empty_chrome(primed):
-    assert "No memories found." in primed.raw("query").stdout
-
-
-def test_query_block_and_footer_chrome(primed):
-    primed.raw("add", "remember the milk", "--project", "home",
-               "--tags", '[{"name":"shopping"},{"name":"food"}]', "--type", "note")
-    out = primed.raw("query").stdout
+def test_query_block_and_footer_chrome(cli):
+    cli.raw("add", "remember the milk", "--project", "home",
+            "--tags", '[{"name":"shopping"},{"name":"food"}]', "--type", "note")
+    out = cli.raw("query").stdout
     assert "#1" in out
+    assert "🕒" in out
     assert "👤 tester @ home [note]" in out
     assert "🏷️" in out
     assert "food, shopping" in out          # alphabetical
@@ -54,253 +43,156 @@ def test_query_block_and_footer_chrome(primed):
     assert "Found 1 memories" in out        # always 'memories', even for 1
 
 
-def test_search_chrome(primed):
-    primed.raw("add", "the quick brown fox")
-    out = primed.raw("search", "brown").stdout
+def test_search_chrome(cli):
+    cli.raw("add", "the quick brown fox")
+    out = cli.raw("search", "brown").stdout
     assert "🔍 Search results for: brown" in out
     assert "Found 1 matches" in out
 
 
-def test_search_no_match_chrome(primed):
-    primed.raw("add", "nothing relevant here")
-    assert "No memories found for: zzzznope" in primed.raw("search", "zzzznope").stdout
+def test_search_no_match_chrome(cli):
+    cli.raw("add", "nothing relevant here")
+    assert "No memories found for: zzzznope" in cli.raw("search", "zzzznope").stdout
 
 
-def test_tags_empty_chrome(primed):
-    assert "No tags found." in primed.raw("tags").stdout
+# ── tags listing ─────────────────────────────────────────────────────────────
+def test_tags_empty_chrome(cli):
+    assert "No tags found." in cli.raw("tags").stdout
 
 
-def test_tags_listing_chrome(primed):
-    primed.raw("add", "a", "--tags", '[{"name":"auth"}]')
-    primed.raw("add", "b", "--tags", '[{"name":"auth"},{"name":"db"}]')
-    out = primed.raw("tags").stdout
+def test_tags_listing_chrome(cli):
+    cli.raw("add", "a", "--tags", '[{"name":"auth"}]')
+    cli.raw("add", "b", "--tags", '[{"name":"auth"},{"name":"db"}]')
+    out = cli.raw("tags").stdout
     assert "🏷️" in out
     assert "auth" in out
     assert "(2)" in out
     assert "(1)" in out
 
 
-# ── tag descriptor (structured JSON, required in schema but optional to supply) ──
-def test_tags_malformed_json_errors(primed):
-    proc = primed.raw("add", "x", "--tags", "not-json-and-not-comma-either")
-    assert proc.returncode != 0
-    assert "JSON array" in proc.stdout
-    assert "No memories found." in primed.raw("query").stdout  # nothing was stored
+def test_tag_descriptor_shown_in_listing(cli):
+    cli.raw("add", "x", "--tags", '[{"name":"auth","description":"authentication flow"}]')
+    assert "authentication flow" in cli.raw("tags").stdout
 
 
-def test_tags_missing_name_field_errors(primed):
-    proc = primed.raw("add", "x", "--tags", '[{"description":"no name given"}]')
-    assert proc.returncode != 0
-    assert "name" in proc.stdout.lower()
-
-
-def test_tag_descriptor_shown_in_listing(primed):
-    primed.raw("add", "x", "--tags", '[{"name":"auth","description":"authentication flow"}]')
-    assert "authentication flow" in primed.raw("tags").stdout
-
-
-def test_tag_auto_default_description_not_shown_redundantly(primed):
+def test_tag_auto_default_description_not_shown_redundantly(cli):
     # A new tag with no description defaults to its own name; the listing skips the
     # '↳ description' line in that case rather than echoing the name back.
-    primed.raw("add", "x", "--tags", '[{"name":"plain"}]')
-    out = primed.raw("tags").stdout
+    cli.raw("add", "x", "--tags", '[{"name":"plain"}]')
+    out = cli.raw("tags").stdout
     assert "plain" in out
     assert "↳" not in out
 
 
-def test_tag_description_migrated_and_backfilled(tmp_path):
-    # A pre-descriptor DB (tags table without the description column) is upgraded
-    # in place on initialize, seeding each existing tag's name as its descriptor.
-    db = tmp_path / "legacy.db"
-    conn = sqlite3.connect(db)
-    conn.executescript("""
-        CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME, agent TEXT, project TEXT, content TEXT, type TEXT);
-        CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL COLLATE NOCASE);
-        INSERT INTO tags (name) VALUES ('legacytag');
-    """)
-    conn.commit()
-    conn.close()
-
-    from agent_memory.sqlite_store import SqliteStore
-    SqliteStore(db).initialize()
-
-    conn = sqlite3.connect(db)
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(tags)")]
-    desc = conn.execute("SELECT description FROM tags WHERE name = 'legacytag'").fetchone()[0]
-    conn.close()
-    assert "description" in cols
-    assert desc == "legacytag"  # backfilled with the tag name
+# ── malformed --tags ─────────────────────────────────────────────────────────
+def test_tags_malformed_json_errors(cli):
+    proc = cli.raw("add", "x", "--tags", "not-json-and-not-comma-either")
+    assert proc.returncode != 0
+    assert "JSON array" in proc.stdout
+    assert "No memories found." in cli.raw("query").stdout  # nothing was stored
 
 
-def test_projects_empty_chrome(primed):
-    assert "No projects found." in primed.raw("projects").stdout
+def test_tags_missing_name_field_errors(cli):
+    proc = cli.raw("add", "x", "--tags", '[{"description":"no name given"}]')
+    assert proc.returncode != 0
+    assert "name" in proc.stdout.lower()
 
 
-def test_projects_listing_chrome(primed):
-    primed.raw("add", "a", "--project", "alpha")
-    primed.raw("add", "b", "--project", "alpha")
-    out = primed.raw("projects").stdout
+# ── projects / stats / show chrome ───────────────────────────────────────────
+def test_projects_empty_chrome(cli):
+    assert "No projects found." in cli.raw("projects").stdout
+
+
+def test_projects_listing_chrome(cli):
+    cli.raw("add", "a", "--project", "alpha")
+    cli.raw("add", "b", "--project", "alpha")
+    out = cli.raw("projects").stdout
     assert "📂 Projects:" in out
     assert "alpha" in out
     assert "(2 memories)" in out
 
 
-def test_stats_chrome(primed):
-    primed.raw("add", "a", "--project", "p", "--tags", '[{"name":"t"}]')
-    out = primed.raw("stats").stdout
+def test_stats_chrome(cli):
+    cli.raw("add", "a", "--project", "p", "--tags", '[{"name":"t"}]')
+    out = cli.raw("stats").stdout
     assert "📊 Memory Statistics" in out
     assert "Total memories:    1" in out
     assert "Tags:              1" in out
 
 
-def test_show_found_chrome(primed):
-    primed.raw("add", "findable content")
-    out = primed.raw("show", "1").stdout
+def test_show_found_chrome(cli):
+    cli.raw("add", "findable content")
+    out = cli.raw("show", "1").stdout
     assert "#1" in out
     assert "findable content" in out
 
 
-def test_show_not_found_exits_1(primed):
-    proc = primed.raw("show", "999")
+def test_show_not_found_exits_1(cli):
+    proc = cli.raw("show", "999")
     assert proc.returncode == 1
     assert "✗ Memory #999 not found." in proc.stdout
 
 
-def test_update_chrome(primed):
-    primed.raw("add", "old text")
-    out = primed.raw("update", "1", "--content", "new text").stdout
+# ── update chrome ────────────────────────────────────────────────────────────
+def test_update_chrome(cli):
+    cli.raw("add", "old text")
+    out = cli.raw("update", "1", "--content", "new text").stdout
     assert "✓ Memory #1 updated" in out
     assert "content" in out
 
 
-def test_update_content_from_stdin(primed):
-    primed.raw("add", "old")
-    out = primed.raw("update", "1", "--content", "-", stdin="piped in").stdout
+def test_update_content_from_stdin(cli):
+    cli.raw("add", "old")
+    out = cli.raw("update", "1", "--content", "-", stdin="piped in").stdout
     assert "✓ Memory #1 updated" in out
-    assert "piped in" in primed.raw("show", "1").stdout
+    assert "piped in" in cli.raw("show", "1").stdout
 
 
-def test_update_no_changes_chrome(primed):
-    primed.raw("add", "x")
-    assert "No changes specified for memory #1" in primed.raw("update", "1").stdout
+def test_update_no_changes_chrome(cli):
+    cli.raw("add", "x")
+    assert "No changes specified for memory #1" in cli.raw("update", "1").stdout
 
 
-def test_update_not_found_exits_1(primed):
-    proc = primed.raw("update", "999", "--content", "y")
+def test_update_not_found_exits_1(cli):
+    proc = cli.raw("update", "999", "--content", "y")
     assert proc.returncode == 1
     assert "✗ Memory #999 not found." in proc.stdout
 
 
-def test_delete_dry_run_does_not_delete(primed):
-    primed.raw("add", "doomed")
-    out = primed.raw("delete", "1").stdout
+# ── delete chrome ────────────────────────────────────────────────────────────
+def test_delete_dry_run_does_not_delete(cli):
+    cli.raw("add", "doomed")
+    out = cli.raw("delete", "1").stdout
     assert "Will delete 1 memory:" in out
     assert "Dry run" in out
-    assert "#1" in primed.raw("show", "1").stdout      # still there
+    assert "#1" in cli.raw("show", "1").stdout      # still there
 
 
-def test_delete_with_yes_chrome(primed):
-    primed.raw("add", "doomed")
-    out = primed.raw("delete", "1", "--yes").stdout
+def test_delete_with_yes_chrome(cli):
+    cli.raw("add", "doomed")
+    out = cli.raw("delete", "1", "--yes").stdout
     assert "✓ Deleted 1 memory." in out
-    assert primed.raw("show", "1").returncode == 1     # gone
+    assert cli.raw("show", "1").returncode == 1     # gone
 
 
-def test_delete_reports_missing_ids(primed):
-    primed.raw("add", "real")
-    assert "⚠ Not found: 999" in primed.raw("delete", "1", "999").stdout
+def test_delete_reports_missing_ids(cli):
+    cli.raw("add", "real")
+    assert "⚠ Not found: 999" in cli.raw("delete", "1", "999").stdout
 
 
-def test_delete_none_found_exits_1(primed):
-    proc = primed.raw("delete", "999")
+def test_delete_none_found_exits_1(cli):
+    proc = cli.raw("delete", "999")
     assert proc.returncode == 1
     assert "No memories found with the given IDs." in proc.stdout
 
 
-# ── config / DB-path resolution (AGENT_MEMORY_DB > db_path > XDG default) ────
-class ConfigEnv:
-    """Runs the CLI with isolated XDG dirs and no AGENT_MEMORY_DB."""
-
-    def __init__(self, root):
-        self.root = root
-        self.data_home = root / "data"
-        self.env = {k: v for k, v in os.environ.items() if k != "AGENT_MEMORY_DB"}
-        self.env.update({
-            "XDG_CONFIG_HOME": str(root / "config"),
-            "XDG_DATA_HOME": str(self.data_home),
-            "AGENT_NAME": "tester",
-        })
-
-    def run(self, *args, env=None):
-        return subprocess.run(
-            [sys.executable, str(MEMORY_CLI), *args],
-            env=env or self.env, capture_output=True, text=True,
-        )
-
-    @property
-    def default_db(self):
-        return self.data_home / "agent-memory" / "memory.db"
-
-
-@pytest.fixture
-def cfg(tmp_path):
-    return ConfigEnv(tmp_path)
-
-
-def test_config_set_get_path(cfg):
-    out = cfg.run("config", "set", "db_path", "/tmp/foo.db").stdout
-    assert "✓ Set db_path = /tmp/foo.db" in out
-    assert cfg.run("config", "get", "db_path").stdout.strip() == "/tmp/foo.db"
-    assert "config.json" in cfg.run("config", "path").stdout
-
-
-def test_config_get_unset_key(cfg):
-    assert "(unset) nope" in cfg.run("config", "get", "nope").stdout
-
-
-def test_config_command_creates_no_db(cfg):
-    cfg.run("config", "get")
-    assert not cfg.default_db.exists()
-
-
-def test_default_is_xdg_data_dir(cfg):
-    out = cfg.run("--yes", "stats").stdout
-    assert str(cfg.data_home) in out
-    assert cfg.default_db.exists()
-
-
-def test_stored_db_path_is_used(cfg):
-    target = cfg.root / "custom" / "m.db"
-    cfg.run("config", "set", "db_path", str(target))
-    cfg.run("--yes", "add", "hello via config")
-    assert target.exists()
-    assert "hello via config" in cfg.run("query").stdout
-
-
-def test_env_overrides_stored(cfg):
-    stored = cfg.root / "stored.db"
-    envdb = cfg.root / "env.db"
-    cfg.run("config", "set", "db_path", str(stored))
-    cfg.run("--yes", "add", "in env db", env={**cfg.env, "AGENT_MEMORY_DB": str(envdb)})
-    assert envdb.exists()
-    assert not stored.exists()          # env won; stored path never created
-
-
-def test_missing_db_without_yes_errors_and_creates_nothing(cfg):
-    proc = cfg.run("stats")             # no --yes, no TTY in subprocess
+# ── offline error path (no traceback, exit 1) ────────────────────────────────
+def test_offline_api_prints_clean_error(cli):
+    # Point the CLI at a dead endpoint: it must render a clean "cannot reach"
+    # message and exit 1 — never dump a traceback.
+    dead = CliDriver("http://127.0.0.1:1", cli.token)
+    proc = dead.raw("stats")
     assert proc.returncode == 1
-    assert "Pass --yes" in proc.stderr
-    assert not cfg.default_db.exists()
-
-
-def test_missing_db_with_yes_creates(cfg):
-    proc = cfg.run("--yes", "stats")
-    assert proc.returncode == 0
-    assert cfg.default_db.exists()
-
-
-def test_existing_db_needs_no_yes(cfg):
-    cfg.run("--yes", "stats")           # create it once
-    assert cfg.run("stats").returncode == 0   # now exists -> no prompt, no error
+    assert "cannot reach the memory API" in proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert "Traceback" not in proc.stdout
