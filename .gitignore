@@ -14,6 +14,12 @@ __pycache__/
 build/
 *.egg-info/
 
+# Coverage data (the badge SVG at coverage.svg IS committed; the raw data is not)
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # Editor / IDE
 .idea/
 .vscode/
