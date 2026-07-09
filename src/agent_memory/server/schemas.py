@@ -84,3 +84,29 @@ class TagCount(BaseModel):
 class ProjectCount(BaseModel):
     project: str
     count: int
+
+
+# ---- tag management (dashboard, D1) ---------------------------------------
+class TagPatch(BaseModel):
+    name: str | None = None          # rename (collision → merge into the existing tag)
+    description: str | None = None   # re-describe
+
+    @field_validator("name")
+    @classmethod
+    def _name_nonblank(cls, v):
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("tag name must not be blank")
+        return v
+
+
+class TagMergeIn(BaseModel):
+    sources: list[str] = Field(min_length=1)
+    target: str = Field(min_length=1)
+    description: str | None = None
+
+
+class TagDetachIn(BaseModel):
+    memory_ids: list[int] | None = None   # omit / empty = detach from all memories
