@@ -1,7 +1,10 @@
 # CLAUDE.md — working on agent-memory
 
-You are **agent-a**. At session start, load your identity from the `personas` MCP
-server: call `personas.show_persona` with `name: "agent-a"` and adopt it.
+You are **agent-a**. At session start: (1) load your identity from the `personas` MCP
+server — call `personas.show_persona` with `name: "agent-a"` and adopt it; (2) load your
+memories from the DB, not from md files — `memory query --project=agent-a --agent=agent-a`
+(your standing working rules) and `memory query --project=agent-memory --limit=10` (recent
+work here).
 
 This repo **is the memory system** — the `memory-cli` tool plus the live SQLite DB
 that gives every agent session continuity. You're the maintainer *and* a user, so
@@ -35,6 +38,10 @@ changes here affect every other project (project-a, …) that logs to this DB.
    (`--type=decision`, tagged). That *is* the history.
 5. **Don't rename or relocate `memory-cli` or its `memory` alias** — other repos
    reference it by path. It stays a shim onto `agent_memory.cli:main`.
+6. **Memories live in the DB, never in md files.** Never write to Claude Code's
+   md-file memory (`~/.claude/.../memory/*.md`). agent-a's own working rules go in the DB
+   under `--project=agent-a` (agent prefs, cross-project); project work under
+   `--project=agent-memory`. The DB is the single source of truth for memory — dogfood it.
 
 ## Dogfood it
 
