@@ -42,7 +42,10 @@ def make_engine(dsn: str | None = None, **kw) -> AsyncEngine:
 
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    # autoflush stays on (the default): repository functions run raw aggregate
+    # SELECTs (list_tags, stats, ...) that bypass the ORM identity map, so a write
+    # earlier in the same session must be flushed before such a read sees it.
+    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 def session_dependency(sessionmaker: async_sessionmaker[AsyncSession]):

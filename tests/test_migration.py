@@ -16,9 +16,9 @@ import sys
 from pathlib import Path
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agent_memory.server import repository as repo
+from agent_memory.server.db import make_sessionmaker
 from agent_memory.server.models import Base
 from agent_memory.server.schemas import TagIn
 from conftest import PG_DSN, make_test_engine
@@ -80,7 +80,7 @@ async def test_alembic_upgrade_head_builds_working_schema():
         # And the schema actually works: add a row through the repo, read it back
         # (exercises the generated tsvector + tag wiring the migration must build).
         eng = make_test_engine()
-        sm = async_sessionmaker(eng, expire_on_commit=False, autoflush=False)
+        sm = make_sessionmaker(eng)
         try:
             async with sm() as s:
                 async with s.begin():
