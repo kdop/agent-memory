@@ -1,6 +1,6 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import { Quasar, Notify, Dialog } from 'quasar'
+import { Quasar, Notify, Dialog, Dark } from 'quasar'
 
 // Quasar styling (fonts + icons + core css). These are the only global CSS imports.
 import '@quasar/extras/roboto-font/roboto-font.css'
@@ -18,10 +18,14 @@ async function bootstrap() {
     await worker.start({ onUnhandledRequest: 'bypass' })
   }
 
+  // Restore the saved theme preference ('true'/'false'); default to dark.
+  const saved = localStorage.getItem('mem-dark')
+  const initialDark = saved === null ? true : saved === 'true'
+
   const app = createApp(App)
   app.use(createPinia())
   app.use(router)
-  app.use(Quasar, { plugins: { Notify, Dialog } })
+  app.use(Quasar, { plugins: { Notify, Dialog, Dark }, config: { dark: initialDark } })
   app.mount('#app')
 }
 

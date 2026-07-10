@@ -8,8 +8,10 @@ import { api } from '@/api/client'
 export const useMemoriesStore = defineStore('memories', () => {
   // ---- view-state (URL-synced) ----
   const q = ref('')            // D4: full-text search string
-  const tags = ref([])         // D5: array of tag names, AND-combined
-  const order = ref('date_desc') // D3: 'date_desc' | 'date_asc'
+  const tags = ref([])         // D5: array of tag names, OR-combined
+  const agent = ref('')        // right-rail: exact agent filter ('' = any)
+  const project = ref('')      // right-rail: exact project filter ('' = any)
+  const order = ref('date_desc') // D3: '<field>_<asc|desc>'
   const limit = ref(100)       // page size
   const offset = ref(0)        // pagination offset
 
@@ -42,6 +44,22 @@ export const useMemoriesStore = defineStore('memories', () => {
     if (row) Object.assign(row, fields)
   }
 
+  /** Drop a row from the loaded list immediately (optimistic delete). */
+  function removeRow(id) {
+    results.value = results.value.filter((r) => r.id !== id)
+    total.value = Math.max(0, total.value - 1)
+  }
+
+  /** Clear all view-state back to defaults (no search / tags / filters / paging). */
+  function reset() {
+    q.value = ''
+    tags.value = []
+    agent.value = ''
+    project.value = ''
+    order.value = 'date_desc'
+    offset.value = 0
+  }
+
   /** Fetch the current view-state from the API and populate results + total. */
   async function fetch() {
     loading.value = true
@@ -50,6 +68,8 @@ export const useMemoriesStore = defineStore('memories', () => {
       const { items, total: t } = await api.listMemories({
         q: q.value || undefined,
         tag: tags.value.length ? tags.value : undefined,
+        agent: agent.value || undefined,
+        project: project.value || undefined,
         order: order.value,
         limit: limit.value,
         offset: offset.value,
@@ -67,10 +87,10 @@ export const useMemoriesStore = defineStore('memories', () => {
 
   return {
     // view-state
-    q, tags, order, limit, offset,
+    q, tags, agent, project, order, limit, offset,
     // results
     results, total, loading, error,
     // derived + helpers
-    page, pageCount, setPage, patchRow, fetch,
+    page, pageCount, setPage, patchRow, removeRow, reset, fetch,
   }
 })
