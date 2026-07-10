@@ -10,6 +10,25 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
+# The only allowed memory `type` values. Anything else — a typo, a lazy default like
+# the old "code", a one-off like "feedback"/"reference" — is rejected at the API
+# boundary rather than silently accepted, so the classification stays meaningful.
+ALLOWED_MEMORY_TYPES = {"decision", "lesson", "note", "preference"}
+
+
+def _validate_memory_type(v: str | None) -> str | None:
+    """Blank/None means "no type" (allowed everywhere; also how UpdateIn clears an
+    existing type). Anything else must be one of ALLOWED_MEMORY_TYPES."""
+    if v is None:
+        return None
+    v = v.strip()
+    if not v:
+        return v  # "" — UpdateIn's clear-the-column sentinel
+    if v not in ALLOWED_MEMORY_TYPES:
+        allowed = ", ".join(sorted(ALLOWED_MEMORY_TYPES))
+        raise ValueError(f"type must be one of: {allowed} (got {v!r})")
+    return v
+
 
 class TagIn(BaseModel):
     name: str = Field(min_length=1)
@@ -39,6 +58,8 @@ class MemoryIn(BaseModel):
     tags: list[TagIn] = []
     type: str | None = None
 
+    _validate_type = field_validator("type")(_validate_memory_type)
+
 
 class MemoryOut(BaseModel):
     id: int
@@ -60,6 +81,8 @@ class UpdateIn(BaseModel):
     set_tags: list[TagIn] | None = None
     add_tags: list[TagIn] | None = None
     remove_tags: list[str] | None = None
+
+    _validate_type = field_validator("type")(_validate_memory_type)
 
 
 class AddResult(BaseModel):

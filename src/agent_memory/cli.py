@@ -227,7 +227,7 @@ def main():
         "--tags",
         help='JSON array of tag objects, e.g. \'[{"name":"auth","description":"authentication flow"},{"name":"db"}]\'. '
              "description is optional (a new tag with none defaults to its own name).")
-    add_parser.add_argument("--type", help="Memory type (decision, code, lesson, note)")
+    add_parser.add_argument("--type", help="Memory type (decision, lesson, note, preference)")
     add_parser.set_defaults(func=add_memory)
 
     query_parser = subparsers.add_parser("query", help="Query memories")

@@ -70,7 +70,7 @@ def test_query_tag_filter(driver):
 
 def test_query_type_filter(driver):
     driver.add("d", type="decision")
-    driver.add("c", type="code")
+    driver.add("n", type="note")
     assert len(driver.query(type="decision")) == 1
 
 

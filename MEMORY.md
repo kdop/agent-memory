@@ -23,7 +23,7 @@ required** — if none is running the CLI prints how to start one
     # Add — AS YOU WORK, not at session end
     # --tags is a JSON array of {"name":..., "description":...}; description is
     # optional — a brand-new tag with none just defaults to its own name.
-    memory add "Implemented auth" --agent=<you> --project=<name> --type=code \
+    memory add "Implemented auth" --agent=<you> --project=<name> --type=note \
       --tags='[{"name":"auth","description":"authentication"},{"name":"feature"}]'
 
     # Query — filtered timeline
@@ -44,8 +44,12 @@ required** — if none is running the CLI prints how to start one
 
 ## Protocol
 
-- **Types:** `code` (changes, refactors), `decision` (architecture, tooling),
-  `lesson` (mistakes, insights), `note` (everything else).
+- **Types (enforced by the API — anything else is rejected with 422):**
+  `decision` (architecture, tooling, judgment calls with rejected alternatives),
+  `lesson` (mistakes, insights), `preference` (standing behavioral rules —
+  corrections or confirmations about how to work), `note` (everything else:
+  changes, refactors, status updates, plain work log). Blank/omitted is also
+  valid (no type set).
 - **Tag liberally** — tags are what make future searches land. A tag carries an
   optional descriptor (`{"name":..., "description":...}`); give one the first time
   you use a new tag if you can, but it's never required — an undescribed new tag
