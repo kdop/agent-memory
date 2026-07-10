@@ -16,6 +16,34 @@ import json
 import os
 from pathlib import Path
 
+
+def load_dotenv():
+    """Load KEY=VALUE pairs from a `.env` file into the environment, stdlib-only
+    (no third-party dependency — keeps the client surface dependency-free, rule
+    #3). Never overrides an already-set variable, so a real exported env var or a
+    CI secret always wins. Searches the current directory and each parent up to
+    the filesystem root (like `.git` discovery), so it works whether a command is
+    run from the repo root or a subdirectory. Idempotent — safe to call more than
+    once (e.g. from both this module and db.py, which doesn't otherwise import
+    config.py but needs the same behavior for `alembic`)."""
+    here = Path.cwd()
+    for d in (here, *here.parents):
+        candidate = d / ".env"
+        if candidate.is_file():
+            for line in candidate.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    os.environ.setdefault(key, value)
+            break
+
+
+load_dotenv()
+
 # The local API the CLI/MCP talk to by default when nothing else is configured.
 DEFAULT_API_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8099

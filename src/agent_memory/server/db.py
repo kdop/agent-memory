@@ -18,6 +18,13 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from ..config import load_dotenv
+
+# This module doesn't otherwise import config.py, but `alembic/env.py` imports
+# db.py directly (never config.py) — without this, a .env-supplied AGENT_MEMORY_DB
+# would be invisible to `alembic upgrade head`.
+load_dotenv()
+
 
 def resolve_async_dsn(dsn: str | None = None) -> str:
     """Normalize a Postgres DSN to the asyncpg driver. Accepts `postgres://`,
