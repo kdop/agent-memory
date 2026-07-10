@@ -39,14 +39,14 @@ def test_list_pagination_and_total_header(client):
     assert len(r2.json()) == 1
 
 
-def test_list_and_multi_tag_filter(client):
+def test_list_multi_tag_or_filter(client):
     _add(client, "has both", ["auth", "web"])
-    _add(client, "has one", ["auth"])
-    _add(client, "has other", ["web"])
+    _add(client, "has auth", ["auth"])
+    _add(client, "has other", ["db"])
     r = client.get("/memories", params={"tag": ["auth", "web"]}, headers=_auth())
-    contents = [m["content"] for m in r.json()]
-    assert contents == ["has both"]           # AND — only the memory with both tags
-    assert r.headers["X-Total-Count"] == "1"
+    contents = {m["content"] for m in r.json()}
+    assert contents == {"has both", "has auth"}   # OR — any of auth/web; "has other" (db) excluded
+    assert r.headers["X-Total-Count"] == "2"
 
 
 def test_list_query_returns_snippet(client):
@@ -148,8 +148,8 @@ def test_detach_tag_from_all(client):
     _add(client, "b", ["shared"])
     r = client.post("/tags/shared/detach", json={}, headers=_auth())
     assert r.json() == {"detached": 2}
-    # tag row remains but with zero memories
-    assert dict((t["name"], t["count"]) for t in client.get("/tags", headers=_auth()).json())["shared"] == 0
+    # zero-memory tags are dropped from the listing
+    assert "shared" not in {t["name"] for t in client.get("/tags", headers=_auth()).json()}
 
 
 def test_detach_tag_404(client):

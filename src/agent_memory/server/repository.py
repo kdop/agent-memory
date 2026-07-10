@@ -195,7 +195,7 @@ async def list_tags(session) -> list[dict]:
     count = func.count(Memory.id)
     stmt = (
         select(Tag.name, count.label("count"), Tag.description)
-        .outerjoin(Tag.memories)
+        .join(Tag.memories)
         .group_by(Tag.id, Tag.name, Tag.description)
         .order_by(count.desc(), Tag.name)
     )
@@ -211,6 +211,16 @@ async def list_projects(session) -> list[dict]:
         .order_by(count.desc())
     )
     return [{"project": p, "count": c} for p, c in await session.execute(stmt)]
+
+
+async def list_agents(session) -> list[dict]:
+    count = func.count()
+    stmt = (
+        select(Memory.agent, count.label("count"))
+        .group_by(Memory.agent)
+        .order_by(count.desc())
+    )
+    return [{"agent": a, "count": c} for a, c in await session.execute(stmt)]
 
 
 async def stats(session) -> dict:
@@ -260,8 +270,8 @@ async def list_memories(session, *, q=None, tags=(), project=None, agent=None, m
         conds.append(Memory.agent == agent)
     if mtype:
         conds.append(Memory.type == mtype)
-    for t in tags:  # AND: the memory must carry every listed tag
-        conds.append(Memory.tags.any(func.lower(Tag.name) == func.lower(t)))
+    if tags:  # OR: the memory matches if it carries ANY of the listed tags
+        conds.append(Memory.tags.any(func.lower(Tag.name).in_([t.lower() for t in tags])))
     tsquery = func.plainto_tsquery("english", q) if q else None
     if tsquery is not None:
         conds.append(Memory.content_tsv.op("@@")(tsquery))
@@ -278,8 +288,14 @@ async def list_memories(session, *, q=None, tags=(), project=None, agent=None, m
         rows = (await session.execute(stmt)).all()
         items = [_dump(m, snippet=s) for m, s in rows]
     else:
-        col = Memory.timestamp.asc() if order == "date_asc" else Memory.timestamp.desc()
-        stmt = base.order_by(col, Memory.id.desc()).limit(limit).offset(offset)
+        # order = "<field>_<asc|desc>"; field ∈ date/agent/project/type/id.
+        cols = {"date": Memory.timestamp, "agent": Memory.agent,
+                "project": Memory.project, "type": Memory.type, "id": Memory.id}
+        field, _, direction = (order or "date_desc").rpartition("_")
+        col = cols.get(field, Memory.timestamp)
+        ordered = col.asc() if direction == "asc" else col.desc()
+        # Stable tiebreak on id so pages don't shuffle within equal sort keys.
+        stmt = base.order_by(ordered, Memory.id.desc()).limit(limit).offset(offset)
         items = [_dump(m) for m in (await session.execute(stmt)).scalars().all()]
     return items, total
 
