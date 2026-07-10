@@ -10,6 +10,7 @@ import { useQuasar } from 'quasar'
 import { storeToRefs } from 'pinia'
 import { useTagsStore } from '@/stores/tags'
 import { api } from '@/api/client'
+import MemoryEditDialog from '@/components/MemoryEditDialog.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -65,9 +66,29 @@ const allSelected = computed({
   },
 })
 
-function preview(content) {
-  const s = String(content || '').trim()
-  return s.length > 140 ? s.slice(0, 140) + '…' : s
+// ---- Edit a memory (opens the same dialog as the memories table) ----------
+const editOpen = ref(false)
+const editing = ref(null)
+
+function openEdit(m) {
+  editing.value = m
+  editOpen.value = true
+}
+
+async function onEditSubmit(payload) {
+  try {
+    await api.patchMemory(payload.id, {
+      content: payload.content,
+      project: payload.project,
+      type: payload.type,
+      set_tags: payload.tagNames.map((name) => ({ name })),
+    })
+    $q.notify({ type: 'positive', message: `Memory #${payload.id} updated` })
+    // Re-load: an edit may have removed this tag from the memory.
+    await Promise.all([loadMemories(), tags.fetch()])
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err?.data?.detail || err?.message || 'Save failed.' })
+  }
 }
 
 // ---- Detach ----------------------------------------------------------------
@@ -159,7 +180,7 @@ async function doMerge() {
 
 <template>
   <q-dialog v-model="open">
-    <q-card style="min-width: 420px; max-width: 640px; width: 90vw">
+    <q-card style="min-width: 420px; max-width: 720px; width: 90vw">
       <q-card-section class="row items-center q-pb-none">
         <div>
           <div class="text-h6">{{ tagName }}</div>
@@ -181,15 +202,16 @@ async function doMerge() {
           <q-checkbox v-model="allSelected" label="Select all" dense :disable="!memories.length" />
         </div>
 
-        <q-list bordered separator style="max-height: 40vh; overflow: auto">
-          <q-item v-for="m in memories" :key="m.id" tag="label" clickable>
+        <q-list bordered separator style="max-height: 60vh; overflow: auto">
+          <q-item v-for="m in memories" :key="m.id">
             <q-item-section side top>
               <q-checkbox v-model="selected" :val="m.id" />
             </q-item-section>
-            <q-item-section>
-              <q-item-label lines="2">{{ preview(m.content) }}</q-item-label>
+            <q-item-section class="cursor-pointer" @click="openEdit(m)">
+              <q-item-label class="mem-full-text">{{ m.content }}</q-item-label>
               <q-item-label caption>
                 #{{ m.id }} · {{ m.agent }} · {{ m.project || '—' }} · {{ m.type || '—' }}
+                <span class="text-primary"> · click to edit</span>
               </q-item-label>
             </q-item-section>
           </q-item>
@@ -269,4 +291,15 @@ async function doMerge() {
       </q-card-actions>
     </q-card>
   </q-dialog>
+
+  <!-- Edit a clicked memory — same dialog the memories table uses -->
+  <MemoryEditDialog v-model="editOpen" :memory="editing" @submit="onEditSubmit" />
 </template>
+
+<style scoped>
+/* Full memory text, no clamp/truncation — wrap naturally, preserve line breaks. */
+.mem-full-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+</style>

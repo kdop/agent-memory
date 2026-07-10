@@ -13,6 +13,7 @@ import { useUrlSync } from '@/composables/useUrlSync'
 import SearchBar from '@/components/SearchBar.vue'
 import MemoriesTable from '@/components/MemoriesTable.vue'
 import TagFilter from '@/components/TagFilter.vue'
+import AgentProjectFilter from '@/components/AgentProjectFilter.vue'
 
 const memories = useMemoriesStore()
 const tags = useTagsStore()
@@ -35,14 +36,13 @@ onMounted(async () => {
       <SearchBar />
     </div>
 
-    <!-- Active tag filters promoted out of the rail by D5 land here. -->
-    <div id="active-filters-target"></div>
-
     <!-- D3: memories q-table (+ D6 create/edit/delete) -->
     <MemoriesTable />
 
-    <!-- D5: multi-tag filter (right rail) -->
-    <Teleport to="#right-rail-target">
+    <!-- D5: multi-tag filter (right rail). `defer` so the teleport waits for the
+         Quasar drawer's target to exist in the DOM before mounting into it. -->
+    <Teleport to="#right-rail-target" defer>
+      <AgentProjectFilter />
       <TagFilter />
     </Teleport>
   </q-page>
