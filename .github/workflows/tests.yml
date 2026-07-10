@@ -29,12 +29,19 @@ jobs:
         with:
           # Single version — the tool targets one supported Python (pyproject: >=3.14).
           python-version: "3.14"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Install test deps
         run: python -m pip install -e ".[dev]"
-      - name: Run tests
+      - name: Run the test script
         env:
           AGENT_MEMORY_TEST_PG_DSN: postgresql://postgres:dev@localhost:5432/memtest
-        run: python -m pytest -v
+        # scripts/test.sh is the single source of truth for "does this project
+        # work" (pytest + frontend build + a live end-to-end smoke) — the exact
+        # same script a developer runs by hand.
+        run: ./scripts/test.sh
 
   # Coverage number on every run (job summary); badge committed only on push to main.
   coverage:
