@@ -9,18 +9,20 @@ bound to that test's own event loop.
 """
 
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_memory.server import repository as repo
+from agent_memory.server.db import make_sessionmaker
 from agent_memory.server.schemas import TagIn
 from conftest import make_test_engine
 
 
 @pytest_asyncio.fixture
 async def session():
-    """A committed-on-success AsyncSession on the (already-truncated) test DB."""
+    """A committed-on-success AsyncSession on the (already-truncated) test DB. Uses
+    the same sessionmaker the real server does — a hand-rolled one here previously
+    drifted out of sync (autoflush=False) and masked a real repository bug."""
     engine = make_test_engine()
-    sm = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    sm = make_sessionmaker(engine)
     async with sm() as s:
         async with s.begin():
             yield s
@@ -129,6 +131,13 @@ async def test_list_tags_counts_and_descriptions(session):
     assert tags["db"]["count"] == 2
     assert tags["db"]["description"] == "the database"
     assert tags["solo"]["description"] == "solo"  # auto-defaulted to its own name
+
+
+async def test_list_tags_excludes_zero_count(session):
+    mid = await repo.add(session, "a", "t", None, _tags("orphan"), None)
+    await repo.update(session, mid, set_tags=[])
+    names = [t["name"] for t in await repo.list_tags(session)]
+    assert "orphan" not in names
 
 
 async def test_list_projects_counts(session):

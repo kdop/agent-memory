@@ -1,10 +1,10 @@
 <script setup>
-// D5 — multi-tag filter (AND semantics). Lives in the right rail: lists every
-// tag with its count (from `tags.list`). Clicking a tag PROMOTES it out of the
-// rail into a highlighted active-filter bar teleported to the top of the
-// memories area; selected tags leave the rail list. Removing a chip demotes it
-// back. Selected tags drive `memories.tags` (AND) and round-trip to the URL via
-// the store, so we keep NO local copy of the selection.
+// D5 — multi-tag filter (OR semantics). Lives in the right rail: lists every
+// tag with its count (from `tags.list`). Clicking a tag PROMOTES it to a
+// highlighted "active" section at the TOP of the same rail; selected tags leave
+// the available list below. Removing a chip demotes it back. Selected tags drive
+// `memories.tags` (OR — a memory matches if it has ANY selected tag) and
+// round-trip to the URL via the store, so we keep NO local copy of the selection.
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useMemoriesStore } from '@/stores/memories'
@@ -48,41 +48,38 @@ function clearAll() {
 </script>
 
 <template>
-  <!-- ===== Promoted active-filter bar (top of the memories area) ===== -->
-  <Teleport to="#active-filters-target" defer>
-    <div v-if="active.length" class="q-mb-md row items-center q-gutter-xs">
-      <span class="text-caption text-grey q-mr-xs">Filtering by</span>
+  <div class="row items-center justify-between q-mb-sm">
+    <div class="text-subtitle2">Filter by tag</div>
+    <q-badge v-if="active.length" color="primary" :label="active.length" />
+  </div>
+
+  <!-- ===== Active (selected) tags — promoted to the top of THIS rail ===== -->
+  <div v-if="active.length" class="q-mb-md">
+    <div class="row items-center justify-between q-mb-xs">
+      <span class="text-caption text-grey">Filtering by (any of)</span>
+      <q-btn v-if="active.length > 1" flat dense no-caps size="sm"
+             label="Clear all" @click="clearAll" />
+    </div>
+    <div class="row q-gutter-xs">
       <q-chip
         v-for="t in active"
         :key="t.name"
         removable
         color="primary"
         text-color="white"
-        class="text-weight-bold"
+        class="text-weight-bold q-ml-none"
         @remove="remove(t.name)"
       >
         {{ t.name }}
         <span v-if="t.count != null" class="q-ml-xs text-caption">({{ t.count }})</span>
       </q-chip>
-      <q-btn
-        v-if="active.length > 1"
-        flat
-        dense
-        no-caps
-        size="sm"
-        label="Clear all"
-        @click="clearAll"
-      />
     </div>
-  </Teleport>
-
-  <!-- ===== Rail: available tags ===== -->
-  <div class="row items-center justify-between q-mb-sm">
-    <div class="text-subtitle2">Filter by tag</div>
-    <q-badge v-if="active.length" color="primary" :label="active.length" />
+    <q-separator class="q-mt-md" />
   </div>
+
+  <!-- ===== Available tags ===== -->
   <div class="text-caption text-grey q-mb-sm">
-    Click to add — memories must match <b>all</b> selected tags.
+    Click to add — memories match <b>any</b> selected tag.
   </div>
 
   <div class="column q-gutter-xs">

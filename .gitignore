@@ -5,6 +5,9 @@ memory.db-journal
 memory.db-wal
 memory.db-shm
 
+# Local environment overrides (real DSNs/tokens) — copy .env.example, never commit.
+.env
+
 # Python
 .venv/
 __pycache__/

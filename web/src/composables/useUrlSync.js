@@ -6,11 +6,13 @@ import { useMemoriesStore } from '@/stores/memories'
 // copy/paste + refresh restores the exact view (requirement 1e).
 //
 // URL param names (documented contract for the whole dashboard):
-//   q      → memories.q       (search string; omitted when empty)
-//   tags   → memories.tags    (comma-joined tag names, AND-combined)
-//   order  → memories.order   ('date_desc' | 'date_asc'; omitted when default)
-//   page   → derived 1-based page from memories.offset / memories.limit
-//            (omitted when page 1)
+//   q       → memories.q       (search string; omitted when empty)
+//   tags    → memories.tags    (comma-joined tag names, OR-combined)
+//   agent   → memories.agent   (exact agent filter; omitted when empty)
+//   project → memories.project (exact project filter; omitted when empty)
+//   order   → memories.order   ('<field>_<asc|desc>'; omitted when default)
+//   page    → derived 1-based page from memories.offset / memories.limit
+//             (omitted when page 1)
 // `limit` is intentionally NOT in the URL — it is a fixed page size (100).
 const DEFAULTS = { order: 'date_desc' }
 
@@ -19,6 +21,8 @@ function stateToQuery(store) {
   const query = {}
   if (store.q) query.q = store.q
   if (store.tags.length) query.tags = store.tags.join(',')
+  if (store.agent) query.agent = store.agent
+  if (store.project) query.project = store.project
   if (store.order && store.order !== DEFAULTS.order) query.order = store.order
   if (store.page > 1) query.page = String(store.page)
   return query
@@ -30,7 +34,9 @@ function queryToState(store, query) {
   store.tags = typeof query.tags === 'string' && query.tags.length
     ? query.tags.split(',').filter(Boolean)
     : []
-  store.order = query.order === 'date_asc' ? 'date_asc' : DEFAULTS.order
+  store.agent = typeof query.agent === 'string' ? query.agent : ''
+  store.project = typeof query.project === 'string' ? query.project : ''
+  store.order = typeof query.order === 'string' && query.order ? query.order : DEFAULTS.order
   const page = Math.max(1, parseInt(query.page, 10) || 1)
   store.offset = (page - 1) * store.limit
 }
@@ -64,7 +70,7 @@ export function useUrlSync() {
 
   // State → URL: push view-state changes into route.query (replace, no history spam).
   watch(
-    () => [store.q, store.tags, store.order, store.offset, store.limit],
+    () => [store.q, store.tags, store.agent, store.project, store.order, store.offset, store.limit],
     () => {
       if (applyingFromUrl) return
       const next = stateToQuery(store)

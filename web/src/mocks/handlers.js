@@ -337,6 +337,17 @@ export const handlers = [
     return HttpResponse.json([...counts.entries()].map(([project, count]) => ({ project, count })))
   }),
 
+  // ---- GET /agents ----
+  http.get('/agents', ({ request }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    const counts = new Map()
+    for (const m of db.memories) {
+      counts.set(m.agent, (counts.get(m.agent) || 0) + 1)
+    }
+    return HttpResponse.json([...counts.entries()].map(([agent, count]) => ({ agent, count })))
+  }),
+
   // ---- GET /stats ----
   http.get('/stats', ({ request }) => {
     const denied = unauthorized(request)

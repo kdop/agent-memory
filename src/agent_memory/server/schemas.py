@@ -86,6 +86,11 @@ class ProjectCount(BaseModel):
     count: int
 
 
+class AgentCount(BaseModel):
+    agent: str
+    count: int
+
+
 # ---- tag management (dashboard, D1) ---------------------------------------
 class TagPatch(BaseModel):
     name: str | None = None          # rename (collision → merge into the existing tag)
