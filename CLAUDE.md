@@ -11,11 +11,10 @@ owns the data, and the shared Postgres DB behind it that gives every agent sessi
 continuity. You're the maintainer *and* a user, so changes here affect every other
 project (project-a, …) that logs to this system.
 
-> **Migration in flight (issue #51):** the architecture is now API-first + Postgres, but
-> the **live agent data has NOT been migrated yet** — it still lives in the old SQLite DB
-> at `~/.local/share/agent-memory/memory.db`. Rules below flagged *(until #51)* describe
-> that live SQLite DB and change once the data lands in Postgres. Don't treat the move as
-> done.
+> **SQLite is decommissioned (issue #51 closed).** The live data now lives in the
+> dedicated Postgres instance (`memory-bank`), reached over the API. The old SQLite file
+> at `~/.local/share/agent-memory/memory.db` is retired — kept on disk as a final
+> read-only snapshot, not written to by anything. Don't repoint any tool at it.
 
 ## The tool
 
@@ -41,11 +40,9 @@ project (project-a, …) that logs to this system.
 
 ## Rules
 
-1. **The DB is live and shared.** Back up before any schema change or destructive op;
-   verify row counts before/after. Never experiment against it — point at a scratch
-   database. *(until #51: the live data is still the SQLite file at
-   `~/.local/share/agent-memory/memory.db` — back up that file; once migrated it's a
-   Postgres DB and you back it up with `pg_dump`.)*
+1. **The DB is live and shared.** Back up (`pg_dump`) before any schema change or
+   destructive op; verify row counts before/after. Never experiment against it — point
+   at a scratch database.
 2. **Never hardcode the DB target.** The **server** resolves it from `AGENT_MEMORY_DB`
    (a `postgresql://` DSN, normalized to asyncpg); the **client** never sees a DB — it
    resolves `AGENT_MEMORY_API` → config `api_url` → local default. Keep those resolution
@@ -65,9 +62,9 @@ project (project-a, …) that logs to this system.
 
 ## Dogfood it
 
-Log your work here as it happens, under `--project=agent-memory --agent=agent-a`.
-Full protocol in `MEMORY.md`.
-
-    memory add "Rewrote the store to an API-first, Postgres-only architecture" \
-      --agent=agent-a --project=agent-memory --type=decision \
-      --tags='[{"name":"architecture","description":"system design changes"},{"name":"migration"}]'
+Do **not** log "did X, shipped Y" narrative here — git/PR history already is that
+record (see the `preference`-type memory on this: `--project=agent-a`, tag
+`memory-protocol`). Before adding an entry, ask: could a future session reconstruct
+this from `git log`? If yes, skip it. Reserve entries here for durable preferences,
+standing rules, and facts *not* reconstructable from git — a deliberate non-action, an
+environment gotcha, a stated user preference. Full protocol in `MEMORY.md`.
