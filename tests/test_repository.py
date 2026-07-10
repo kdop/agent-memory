@@ -67,7 +67,7 @@ async def test_add_reuses_existing_tag_case_insensitively(session):
 
 async def test_query_project_and_type_filters(session):
     await repo.add(session, "a", "t", "alpha", _tags(), "decision")
-    await repo.add(session, "b", "t", "beta", _tags(), "code")
+    await repo.add(session, "b", "t", "beta", _tags(), "note")
     assert len(await repo.query(session, project="alpha")) == 1
     assert len(await repo.query(session, mtype="decision")) == 1
     assert len(await repo.query(session, agent="t")) == 2
