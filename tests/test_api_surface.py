@@ -81,6 +81,34 @@ def test_blank_tag_name_422(client):
     assert resp.status_code == 422
 
 
+def test_disallowed_memory_type_422(client):
+    resp = client.post(
+        "/memories",
+        json={"content": "x", "agent": "t", "type": "code"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 422
+
+
+def test_allowed_memory_type_200(client):
+    resp = client.post(
+        "/memories",
+        json={"content": "x", "agent": "t", "type": "preference"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 201
+
+
+def test_update_disallowed_memory_type_422(client):
+    mid = client.post(
+        "/memories", json={"content": "x", "agent": "t"}, headers=_auth(),
+    ).json()["id"]
+    resp = client.patch(
+        f"/memories/{mid}", json={"type": "reference"}, headers=_auth(),
+    )
+    assert resp.status_code == 422
+
+
 # ── routing ─────────────────────────────────────────────────────────────────
 def test_search_route_not_shadowed_by_id_route(client):
     # /memories/search must win over /memories/{mid:int}; a search must not 422.
