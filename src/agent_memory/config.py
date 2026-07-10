@@ -17,6 +17,26 @@ import os
 from pathlib import Path
 
 
+def _find_env_upward(start):
+    for d in (start, *start.parents):
+        candidate = d / ".env"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _apply_env_file(path):
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
 def load_dotenv():
     """Load KEY=VALUE pairs from a `.env` file into the environment, stdlib-only
     (no third-party dependency — keeps the client surface dependency-free, rule
@@ -25,21 +45,17 @@ def load_dotenv():
     the filesystem root (like `.git` discovery), so it works whether a command is
     run from the repo root or a subdirectory. Idempotent — safe to call more than
     once (e.g. from both this module and db.py, which doesn't otherwise import
-    config.py but needs the same behavior for `alembic`)."""
-    here = Path.cwd()
-    for d in (here, *here.parents):
-        candidate = d / ".env"
-        if candidate.is_file():
-            for line in candidate.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key:
-                    os.environ.setdefault(key, value)
-            break
+    config.py but needs the same behavior for `alembic`).
+
+    Callers (the CLI, the MCP server) commonly run with a cwd outside this repo
+    entirely — e.g. `memory` invoked from another project. cwd-upward search
+    can't find this repo's own .env in that case, since it's a sibling
+    directory, not an ancestor. Fall back to searching upward from this
+    module's own location, which always resolves to the agent-memory repo
+    regardless of the caller's cwd."""
+    found = _find_env_upward(Path.cwd()) or _find_env_upward(Path(__file__).resolve().parent)
+    if found is not None:
+        _apply_env_file(found)
 
 
 load_dotenv()
