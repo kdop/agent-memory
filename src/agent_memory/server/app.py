@@ -13,6 +13,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,6 +23,7 @@ from .auth import require_token
 from .db import make_engine, make_sessionmaker
 from .schemas import (
     AddResult,
+    AgentCount,
     DeleteResult,
     MemoryIn,
     MemoryOut,
@@ -84,7 +86,7 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
         response: Response,
         session: AsyncSession = Depends(get_session),
         q: str | None = None,
-        tag: list[str] = Query(default=[]),   # repeatable; AND across all listed tags
+        tag: list[str] = Query(default=[]),   # repeatable; OR across all listed tags
         since_days: int | None = None,
         since: str | None = None,
         until: str | None = None,
@@ -191,14 +193,38 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
     async def list_projects(session: AsyncSession = Depends(get_session)):
         return await repo.list_projects(session)
 
+    @app.get("/agents", response_model=list[AgentCount], dependencies=guard)
+    async def list_agents(session: AsyncSession = Depends(get_session)):
+        return await repo.list_agents(session)
+
     @app.get("/stats", dependencies=guard)
     async def stats(session: AsyncSession = Depends(get_session)):
         return await repo.stats(session)
 
     # The built dashboard SPA, if present, is served (unauthenticated static assets;
-    # its JS carries the bearer token to the API). Mounted last so API routes win.
+    # its JS carries the bearer token to the API). Registered last so every API
+    # route above wins on an exact path match.
     static_dir = os.environ.get("AGENT_MEMORY_STATIC_DIR")
     if static_dir and os.path.isdir(static_dir):
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="dashboard")
+        assets_dir = os.path.join(static_dir, "assets")
+        if os.path.isdir(assets_dir):
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="dashboard-assets")
+
+        index_path = os.path.join(static_dir, "index.html")
+
+        @app.get("/{full_path:path}")
+        async def serve_dashboard(full_path: str):
+            """SPA fallback for client-side (Vue Router) routes. Since this route is
+            registered last, it only ever receives requests that didn't match a real
+            API route above — but a hard refresh (F5) on an app route makes a real
+            HTTP GET, so without this, any path deeper than `/` 404s (or worse, if it
+            happens to match an API path like the old bare `/tags`, hits that route's
+            auth guard instead of the SPA — hence app routes live under /app, see
+            router.js). Serves a real file if one exists at this path (favicon.ico,
+            mockServiceWorker.js, ...), else index.html so Vue Router takes over."""
+            candidate = os.path.join(static_dir, full_path) if full_path else index_path
+            if full_path and os.path.isfile(candidate):
+                return FileResponse(candidate)
+            return FileResponse(index_path)
 
     return app
