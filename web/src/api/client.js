@@ -166,6 +166,12 @@ export const api = {
     return res.data
   },
 
+  /** GET /agents → [{ agent, count }]. */
+  async listAgents() {
+    const res = await request('GET', '/agents')
+    return res.data
+  },
+
   /** GET /stats → summary counts. */
   async stats() {
     const res = await request('GET', '/stats')

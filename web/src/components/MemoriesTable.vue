@@ -23,33 +23,41 @@ const memories = useMemoriesStore()
 const columns = [
   { name: 'id', label: 'ID', field: 'id', align: 'left', style: 'width: 60px' },
   { name: 'date', label: 'Date', field: 'timestamp', align: 'left', sortable: true, format: (v) => fmtDate(v) },
-  { name: 'agent', label: 'Agent', field: 'agent', align: 'left' },
-  { name: 'project', label: 'Project', field: (r) => r.project || '—', align: 'left' },
-  { name: 'type', label: 'Type', field: (r) => r.type || '—', align: 'left' },
+  { name: 'agent', label: 'Agent', field: 'agent', align: 'left', sortable: true },
+  { name: 'project', label: 'Project', field: (r) => r.project || '—', align: 'left', sortable: true },
+  { name: 'type', label: 'Type', field: (r) => r.type || '—', align: 'left', sortable: true },
   { name: 'content', label: 'Content', field: 'content', align: 'left' },
   { name: 'tags', label: 'Tags', field: 'tags', align: 'left' },
   { name: 'actions', label: '', field: 'actions', align: 'right', style: 'width: 90px' },
 ]
 
-// q-table pagination shape, derived read-only from the store.
-const pagination = computed(() => ({
-  sortBy: 'date',
-  descending: memories.order === 'date_desc',
-  page: memories.page,
-  rowsPerPage: memories.limit,
-  rowsNumber: memories.total,
-}))
+// order is "<field>_<asc|desc>"; split it for q-table's pagination shape.
+function splitOrder(order) {
+  const i = String(order || 'date_desc').lastIndexOf('_')
+  return [order.slice(0, i), order.slice(i + 1)]
+}
 
-/** q-table server-side driver: user paged or toggled the Date sort. */
+// q-table pagination shape, derived read-only from the store.
+const pagination = computed(() => {
+  const [field, dir] = splitOrder(memories.order)
+  return {
+    sortBy: field,
+    descending: dir === 'desc',
+    page: memories.page,
+    rowsPerPage: memories.limit,
+    rowsNumber: memories.total,
+  }
+})
+
+/** q-table server-side driver: user paged or toggled a sortable column
+ *  (Date / Agent / Project / Type). */
 function onRequest(props) {
   const { page, sortBy, descending } = props.pagination
+  const nextOrder = `${sortBy || 'date'}_${descending ? 'desc' : 'asc'}`
   let targetPage = page
-  if (sortBy === 'date') {
-    const nextOrder = descending ? 'date_desc' : 'date_asc'
-    if (nextOrder !== memories.order) {
-      memories.order = nextOrder
-      targetPage = 1 // new sort → back to first page
-    }
+  if (nextOrder !== memories.order) {
+    memories.order = nextOrder
+    targetPage = 1 // new sort → back to first page
   }
   memories.setPage(targetPage)
   memories.fetch()
@@ -129,8 +137,9 @@ function confirmDelete(row) {
   }).onOk(async () => {
     try {
       await api.deleteMemories([row.id])
-      await memories.fetch()
+      memories.removeRow(row.id)  // drop it from the list immediately
       $q.notify({ type: 'positive', message: `Memory #${row.id} deleted` })
+      memories.fetch()            // reconcile/backfill the page in the background
     } catch (err) {
       $q.notify({ type: 'negative', message: err?.message || 'Delete failed' })
     }
@@ -151,6 +160,7 @@ function confirmDelete(row) {
     binary-state-sort
     wrap-cells
     @request="onRequest"
+    @row-click="(evt, row) => openEdit(row)"
   >
     <!-- Toolbar: count + New memory -->
     <template #top>
@@ -196,7 +206,7 @@ function confirmDelete(row) {
       <q-td :props="props" @click.stop>
         <q-btn flat dense round icon="edit" size="sm" aria-label="Edit"
                @click="openEdit(props.row)" />
-        <q-btn flat dense round icon="delete" size="sm" color="negative" aria-label="Delete"
+        <q-btn flat dense round icon="delete" size="sm" color="red-4" aria-label="Delete"
                @click="confirmDelete(props.row)" />
       </q-td>
     </template>
@@ -210,6 +220,10 @@ function confirmDelete(row) {
 </template>
 
 <style scoped>
+/* Whole row opens the edit modal — signal it. Action buttons stop propagation. */
+:deep(.q-table tbody tr) {
+  cursor: pointer;
+}
 .mem-content,
 .mem-snippet {
   display: -webkit-box;
