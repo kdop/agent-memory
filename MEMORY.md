@@ -28,7 +28,7 @@ required** — if none is running the CLI prints how to start one
 
     # Query — filtered timeline
     memory query --project=<name> --limit=10
-    memory query --project=<name> --since-days 0    # 0=today, 1=yesterday; also --since=, --until=
+    memory query --project=<name> --since-days 7    # rolling window: since N days ago through now (0=today); also --since=, --until=
     memory query --project=<name> --tag=bugfix --type=decision
 
     # Search — full text

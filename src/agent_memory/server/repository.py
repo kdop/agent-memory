@@ -21,10 +21,11 @@ from .models import Memory, MemoryTag, Tag
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
 
 
-def _since_days_window(n: int) -> tuple[datetime, datetime]:
-    """A single calendar day N days ago (0=today, 1=yesterday) as (since, until)."""
+def _since_days_window(n: int) -> tuple[datetime, None]:
+    """Rolling window: everything from the start of the day N days ago through now
+    (0=today, 7=the past week). Upper bound stays open so today is always included."""
     day = date.today() - timedelta(days=int(n))
-    return datetime.combine(day, time.min), datetime.combine(day, time(23, 59, 59))
+    return datetime.combine(day, time.min), None
 
 
 def _as_dt(v):

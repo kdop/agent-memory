@@ -231,7 +231,7 @@ def main():
     add_parser.set_defaults(func=add_memory)
 
     query_parser = subparsers.add_parser("query", help="Query memories")
-    query_parser.add_argument("--since-days", type=int, help="Memories from a single day N days ago (0=today, 1=yesterday)")
+    query_parser.add_argument("--since-days", type=int, help="Rolling window: memories since the start of the day N days ago (0=today, 7=past week)")
     query_parser.add_argument("--since", help="Since date (YYYY-MM-DD)")
     query_parser.add_argument("--until", help="Until date (YYYY-MM-DD)")
     query_parser.add_argument("--project", help="Filter by project")

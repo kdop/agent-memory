@@ -42,7 +42,9 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
                      project: Optional[str] = None, agent: Optional[str] = None,
                      tag: Optional[str] = None, type: Optional[str] = None,
                      limit: Optional[int] = None) -> dict:
-        """Query memories by time/project/agent/tag/type. Returns {"memories": [...]}."""
+        """Query memories by time/project/agent/tag/type. since_days is a rolling
+        window: everything since the start of the day N days ago (0=today,
+        7=past week). Returns {"memories": [...]}."""
         return {"memories": api.query(
             since_days=since_days, since=since, until=until,
             project=project, agent=agent, tag=tag, mtype=type, limit=limit)}
