@@ -82,9 +82,21 @@ async def test_query_tag_filter_and_limit(session):
 
 
 async def test_query_since_days_window(session):
-    await repo.add(session, "today", "t", None, _tags(), None)
+    from datetime import datetime, timedelta
+
+    from agent_memory.server.models import Memory
+
+    mid = await repo.add(session, "today", "t", None, _tags(), None)
     assert len(await repo.query(session, since_days=0)) == 1
-    assert await repo.query(session, since_days=5) == []
+    # rolling window: today's entry stays visible at any N
+    assert len(await repo.query(session, since_days=5)) == 1
+
+    old_id = await repo.add(session, "ten days ago", "t", None, _tags(), None)
+    old = await session.get(Memory, old_id)
+    old.timestamp = datetime.now() - timedelta(days=10)
+    await session.flush()
+    assert [m["id"] for m in await repo.query(session, since_days=5)] == [mid]
+    assert len(await repo.query(session, since_days=30)) == 2
 
 
 async def test_search_matches_and_snippets(session):

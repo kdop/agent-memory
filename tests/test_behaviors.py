@@ -79,9 +79,10 @@ def test_query_since_days_today(driver):
     assert len(driver.query(since_days=0)) == 1
 
 
-def test_query_since_days_excludes_other_days(driver):
+def test_query_since_days_is_rolling_window(driver):
     driver.add("today entry")
-    assert driver.query(since_days=7) == []
+    # since_days=N spans from N days ago through now, so today is always inside
+    assert len(driver.query(since_days=7)) == 1
 
 
 # ---- search ---------------------------------------------------------------
