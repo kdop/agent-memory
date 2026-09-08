@@ -28,7 +28,7 @@ echo "       alias memory=\"$MEMORY_CLI\""
 echo "     Add those two lines to your shell profile to persist them."
 echo ""
 echo "Set your agent name in your shell profile, e.g.:"
-echo "       export AGENT_NAME=agent-a        # or clu, etc."
+echo "       export AGENT_NAME=my-agent"
 echo ""
 
 # Smoke test against a throwaway DB so we never touch the live one.

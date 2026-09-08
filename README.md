@@ -49,7 +49,7 @@ export AGENT_MEMORY_API="http://127.0.0.1:8099"     # this is also the built-in 
 export AGENT_MEMORY_API_TOKEN="…"                   # same token the server was started with
 
 memory add "Chose Postgres over SQLite" \
-  --agent=agent-a --project=agent-memory --type=decision \
+  --agent=my-agent --project=agent-memory --type=decision \
   --tags='[{"name":"design","description":"architecture choices"},{"name":"db"}]'
 memory query --project=agent-memory --since-days 0
 memory search "database" --project=agent-memory
