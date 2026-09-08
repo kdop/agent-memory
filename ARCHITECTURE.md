@@ -56,7 +56,7 @@ CLI, API, and MCP produce identical results.
 1. **Persistent continuity** — solve the fresh-slate problem; remember across sessions.
 2. **Queryable timeline** — structured filters (date, tag, project, type), not grep.
 3. **Fast at scale** — stays fast at 100k+ memories via proper indexing (GIN FTS).
-4. **Multi-agent shared memory** — agent-a, Clu, etc. share one DB; cross-agent continuity.
+4. **Multi-agent shared memory** — several agents share one DB; cross-agent continuity.
 5. **Single writer of the schema** — Alembic owns DDL; the API owns all data access.
 
 ## Key decisions
