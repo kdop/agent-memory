@@ -72,6 +72,7 @@ new tag with no description defaults to its own name. Full command reference:
 | **API service** | Async FastAPI + SQLAlchemy 2.0 (asyncpg); the only thing that touches Postgres. `python -m agent_memory.server`. | `[server]` |
 | **CLI client** | `memory-cli` — a presentation layer over `ApiClient`. Stdlib-only, never opens a DB. | none |
 | **MCP client** | Same `ApiClient`, exposed as MCP tools over stdio. | `[mcp]` |
+| **Dashboard** | Vue 3 + Quasar single-page app, served by the API service under `/app`. | `web/` (Node) |
 
 ### Endpoint & auth resolution (clients)
 
@@ -95,6 +96,16 @@ claude mcp add agent-memory -- agent-memory-mcp
 Like the CLI, the MCP server is an `ApiClient` — it talks HTTP to the running FastAPI
 service (`AGENT_MEMORY_API` / `api_url`), never a database. Run it directly for another
 MCP client with `python -m agent_memory.mcp_server` (stdio).
+
+## Dashboard
+
+A browser UI for the same API: search and filter memories, edit them in place, and
+manage tags (rename, merge, detach). Built with Vue 3 and Quasar; the API service serves
+the built assets under `/app`, so it needs no separate host. Log in once with the bearer
+token. See [web/README.md](web/README.md) for the dev setup (runs against an in-browser
+mock, no backend needed) and the build.
+
+![dashboard](docs/dashboard.png)
 
 ## PostgreSQL
 
