@@ -166,9 +166,9 @@ A minimal client using the packaged wrapper:
 from agent_memory.client import ApiClient   # resolves AGENT_MEMORY_API / api_token
 
 api = ApiClient()
-mid = api.add("shipped the async rewrite", agent="agent-a", project="project-a",
+mid = api.add("shipped the async rewrite", agent="my-agent", project="my-project",
               tags=[{"name": "release", "description": "ship events"}], mtype="decision")
-rows = api.query(project="project-a", limit=5)
+rows = api.query(project="my-project", limit=5)
 ```
 
 ## Notes

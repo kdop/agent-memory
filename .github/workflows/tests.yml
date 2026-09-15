@@ -7,7 +7,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Postgres service backs the `pg` cross-surface tests (Ticket F). Without
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported (pyproject requires-python) and newest.
+        python-version: ["3.11", "3.14"]
+    # Postgres service backs the `pg` cross-surface tests. Without
     # AGENT_MEMORY_TEST_PG_DSN those tests skip; here it's always present.
     services:
       postgres:
@@ -27,10 +32,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          # Single version — the tool targets one supported Python (pyproject: >=3.14).
-          python-version: "3.14"
+          python-version: ${{ matrix.python-version }}
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
       - name: Install test deps

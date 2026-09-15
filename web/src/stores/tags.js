@@ -2,8 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '@/api/client'
 
-// All tags with counts + descriptions. Feeds the right-rail filter (D5) and the
-// tags management view (D7/D8). Kept simple: one `fetch()` that D7 mutations can
+// All tags with counts + descriptions. Feeds the right-rail filter and the
+// tags management view. Kept simple: one `fetch()` that mutations can
 // re-run after merge/delete/patch.
 export const useTagsStore = defineStore('tags', () => {
   const list = ref([])       // TagCount[]  { name, count, description }
