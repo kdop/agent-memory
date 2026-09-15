@@ -1,8 +1,8 @@
 # Frozen API contract — dashboard v1
 
 The dashboard talks to the FastAPI memory server. **This document is the frozen
-contract**: the UI swarm builds against it (via the MSW mock in `web/src/mocks/`), and
-the backend (D1) implements it. Do not diverge without updating this file.
+contract**: the frontend builds against it (via the MSW mock in `web/src/mocks/`) and
+the backend implements it. Do not diverge without updating this file.
 
 Base URL comes from config (dev: Vite proxy / MSW; prod: same-origin `/`).
 
@@ -20,7 +20,7 @@ and validates it on login by calling `GET /tags`.
 {
   "id": 42,
   "timestamp": "2026-07-09 14:50:41+00:00",   // string, may be null
-  "agent": "agent-a",
+  "agent": "my-agent",
   "project": "agent-memory",                    // may be null
   "content": "…",
   "type": "decision",                           // may be null
@@ -47,7 +47,7 @@ Query params (all optional):
 | `project` | string | exact |
 | `agent` | string | exact |
 | `type` | string | exact |
-| `since_days` | int | single day N days ago (0=today); overrides since/until |
+| `since_days` | int | rolling window: since the start of the day N days ago (0=today, 7=past week); overrides since/until |
 | `since` / `until` | string | ISO date/datetime bounds |
 | `order` | `date_desc`\|`date_asc` | default `date_desc` (ignored when `q` set → rank order) |
 | `limit` | int | default **100** |
@@ -111,7 +111,7 @@ Body: `{ "memory_ids"?: int[] }` — omit or `[]` = **all** memories. The tag it
 
 ## Mock seed (for `web/src/mocks/`)
 
-Seed the mock with ~250 memories across agents `agent-a`/`clu`, projects
-`agent-memory`/`project-a`/null, types `decision`/`code`/`lesson`/`note`, and ~40 tags with
+Seed the mock with ~250 memories across agents `alpha`/`beta`, projects
+`agent-memory`/`web-app`/null, types `decision`/`lesson`/`note`/`preference`, and ~40 tags with
 descriptions and realistic counts, timestamps spread over the last ~60 days — enough to
 exercise pagination (3 pages), search, AND-filtering, and tag merge.

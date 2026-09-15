@@ -24,10 +24,11 @@ cd web && npm run build          # → web/dist/
 AGENT_MEMORY_DB=postgresql://…/memory \
 AGENT_MEMORY_API_TOKEN=<token> \
 AGENT_MEMORY_STATIC_DIR="$PWD/web/dist" \
-python -m agent_memory.server    # dashboard at http://127.0.0.1:8099/
+python -m agent_memory.server    # dashboard at http://127.0.0.1:8099/app
 ```
 
-The server mounts `dist/` at `/` (unauthenticated static assets); the SPA sends the
+The server serves `dist/` as unauthenticated static assets, with the app routes under
+`/app` so they can never collide with an API path on a hard refresh; the SPA sends the
 bearer token to the API. Log in once by pasting the token — it validates against
 `GET /tags` and is remembered in `localStorage`.
 

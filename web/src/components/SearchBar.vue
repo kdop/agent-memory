@@ -1,6 +1,6 @@
 <script setup>
-// D4 — full-text search bar. Debounced input drives `memories.q` and refetches.
-// Results carry a `snippet` when q is set; the table (D3) renders the highlight.
+// Full-text search bar. Debounced input drives `memories.q` and refetches.
+// Results carry a `snippet` when q is set; the table renders the highlight.
 // Keeps NO local copy of the query — the store is the single source of truth so
 // the URL (via useUrlSync) stays in step.
 import { storeToRefs } from 'pinia'

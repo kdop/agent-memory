@@ -31,11 +31,12 @@ echo "Set your agent name in your shell profile, e.g.:"
 echo "       export AGENT_NAME=my-agent"
 echo ""
 
-# Smoke test against a throwaway DB so we never touch the live one.
-echo "🧪 Testing memory-cli (scratch DB)..."
-AGENT_MEMORY_DB="$(mktemp -d)/smoke.db" "$MEMORY_CLI" --yes stats >/dev/null && echo "✓ memory-cli works"
+# Smoke test: the client is stdlib-only, so --help must work with nothing installed
+# and no server running.
+echo "🧪 Testing memory-cli..."
+"$MEMORY_CLI" --help >/dev/null && echo "✓ memory-cli runs"
 
 echo ""
 echo "✅ Setup info printed."
 echo "📚 Docs: README.md (usage), MEMORY.md (logging protocol), ARCHITECTURE.md (design)"
-echo "🔍 Try:  memory query --today   |   memory search \"topic\""
+echo "🔍 Try:  memory query --since-days 0   |   memory search \"topic\""
