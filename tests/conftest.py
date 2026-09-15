@@ -122,11 +122,7 @@ def live_server(_schema):
 
 @pytest.fixture(autouse=True)
 def _truncate(_schema):
-    """Wipe the three tables before each test (RESTART IDENTITY so ids start at 1).
-
-    A brief settle after the commit lets the shared session-scoped uvicorn server
-    (a separate thread/loop) quiesce any connection still closing from the previous
-    test, so a fresh test's first write is never raced by lingering async cleanup."""
+    """Wipe the three tables before each test (RESTART IDENTITY so ids start at 1)."""
     async def _do():
         eng = make_test_engine()
         try:
@@ -138,7 +134,6 @@ def _truncate(_schema):
             await eng.dispose()
 
     asyncio.run(_do())
-    time.sleep(0.1)
 
 
 @pytest.fixture(params=["cli", "api", "mcp"])

@@ -17,7 +17,7 @@ dependencies = []
 # The API service — the only surface that touches the database. Async FastAPI +
 # SQLAlchemy 2.0 (asyncpg) + Alembic. The client surface stays stdlib-only (rule #3).
 server = [
-    "fastapi>=0.110",
+    "fastapi>=0.118",
     "uvicorn>=0.29",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
@@ -28,9 +28,7 @@ server = [
 # test helper; the migration is tracked in issue #72.
 mcp = ["mcp>=1.0,<2"]
 # Test-only. Pulls the server + mcp extras + httpx for the ASGI test client.
-# pytest-rerunfailures guards the cross-surface suite against the (product-safe)
-# residual timing flake of a shared threaded uvicorn server + per-test truncate.
-dev = ["pytest", "pytest-asyncio", "pytest-rerunfailures", "httpx", "coverage[toml]",
+dev = ["pytest", "pytest-asyncio", "httpx", "coverage[toml]",
        "agent-memory[server]", "agent-memory[mcp]"]
 
 [project.urls]
@@ -51,11 +49,6 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 # Async tests (SQLAlchemy async engine / httpx AsyncClient) — no per-test decorator.
 asyncio_mode = "auto"
-# The cross-surface suite drives ONE shared threaded uvicorn server + real Postgres;
-# a rare cross-thread/loop timing flake can lose a fresh test's first write (the
-# product itself is race-free — proven by an in-process read-after-write stress).
-# Retry a failed test up to twice: a genuine bug still fails all attempts.
-addopts = "--reruns 2 --reruns-delay 1"
 
 [tool.coverage.run]
 source = ["agent_memory"]
