@@ -7,7 +7,7 @@ name = "agent-memory"
 version = "0.2.0"
 description = "Shared, Postgres-backed persistent memory service for AI agents (API-first)"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 # Stdlib only — the client surface (CLI + MCP + urllib ApiClient) has no runtime
 # dependencies, by design (portability + fast CLI cold-start).
