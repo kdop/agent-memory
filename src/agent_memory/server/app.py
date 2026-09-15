@@ -44,6 +44,12 @@ async def get_session(request: Request) -> AsyncSession:
             yield session
 
 
+# scope="function": the dependency closes, and so the transaction commits, before
+# the response is sent. With the default request scope the commit would land after
+# the client already holds the new id.
+SessionDep = Depends(get_session, scope="function")
+
+
 def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None = None) -> FastAPI:
     """Build the app. In production (`sessionmaker` omitted) the lifespan builds a
     pooled engine from AGENT_MEMORY_DB and disposes it on shutdown; tests inject a
@@ -76,7 +82,7 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
         return {"status": "ok"}
 
     @app.post("/memories", response_model=AddResult, status_code=201, dependencies=guard)
-    async def add_memory(body: MemoryIn, session: AsyncSession = Depends(get_session)):
+    async def add_memory(body: MemoryIn, session: AsyncSession = SessionDep):
         mid = await repo.add(session, body.content, body.agent or "unknown",
                              body.project, body.tags, body.type)
         return {"id": mid}
@@ -84,7 +90,7 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
     @app.get("/memories", response_model=list[MemoryOut], dependencies=guard)
     async def query_memories(
         response: Response,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = SessionDep,
         q: str | None = None,
         tag: list[str] = Query(default=[]),   # repeatable; OR across all listed tags
         since_days: int | None = None,
@@ -107,14 +113,14 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
     # `/memories/bulk` and `/memories/search` are declared before `/memories/{mid}`
     # so the literal paths win the match.
     @app.get("/memories/bulk", dependencies=guard)
-    async def get_memories_bulk(session: AsyncSession = Depends(get_session),
+    async def get_memories_bulk(session: AsyncSession = SessionDep,
                                 ids: list[int] = Query(default=[])):
         """Compact rows for a set of ids in one round trip (delete preview)."""
         return await repo.get_many(session, ids)
 
     @app.get("/memories/search", response_model=list[MemoryOut], dependencies=guard)
     async def search_memories(
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = SessionDep,
         q: str = "",
         project: str | None = None,
         agent: str | None = None,
@@ -126,14 +132,14 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
                                  since=since, tag=tag, limit=limit)
 
     @app.get("/memories/{mid}", response_model=MemoryOut, dependencies=guard)
-    async def get_memory(mid: int, session: AsyncSession = Depends(get_session)):
+    async def get_memory(mid: int, session: AsyncSession = SessionDep):
         row = await repo.get(session, mid)
         if row is None:
             raise HTTPException(status_code=404, detail=f"Memory #{mid} not found")
         return row
 
     @app.patch("/memories/{mid}", response_model=UpdateResult, dependencies=guard)
-    async def update_memory(mid: int, body: UpdateIn, session: AsyncSession = Depends(get_session)):
+    async def update_memory(mid: int, body: UpdateIn, session: AsyncSession = SessionDep):
         sent = body.model_fields_set
         changes = await repo.update(
             session, mid,
@@ -149,7 +155,7 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
         return {"changes": changes}
 
     @app.delete("/memories", response_model=DeleteResult, dependencies=guard)
-    async def delete_memories(session: AsyncSession = Depends(get_session), ids: list[int] = Query(...)):
+    async def delete_memories(session: AsyncSession = SessionDep, ids: list[int] = Query(...)):
         found = {r["id"] for r in await repo.get_many(session, ids)}
         to_delete = [i for i in ids if i in found]
         if to_delete:
@@ -157,11 +163,11 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
         return {"deleted": len(to_delete), "missing": [i for i in ids if i not in found]}
 
     @app.get("/tags", response_model=list[TagCount], dependencies=guard)
-    async def list_tags(session: AsyncSession = Depends(get_session)):
+    async def list_tags(session: AsyncSession = SessionDep):
         return await repo.list_tags(session)
 
     @app.patch("/tags/{name}", dependencies=guard)
-    async def patch_tag(name: str, body: TagPatch, session: AsyncSession = Depends(get_session)):
+    async def patch_tag(name: str, body: TagPatch, session: AsyncSession = SessionDep):
         sent = body.model_fields_set
         result = await repo.patch_tag(
             session, name,
@@ -172,33 +178,33 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
         return result
 
     @app.delete("/tags/{name}", dependencies=guard)
-    async def delete_tag(name: str, session: AsyncSession = Depends(get_session)):
+    async def delete_tag(name: str, session: AsyncSession = SessionDep):
         result = await repo.delete_tag(session, name)
         if result is None:
             raise HTTPException(status_code=404, detail=f"Tag '{name}' not found")
         return result
 
     @app.post("/tags/merge", dependencies=guard)
-    async def merge_tags(body: TagMergeIn, session: AsyncSession = Depends(get_session)):
+    async def merge_tags(body: TagMergeIn, session: AsyncSession = SessionDep):
         return await repo.merge_tags(session, body.sources, body.target, body.description)
 
     @app.post("/tags/{name}/detach", dependencies=guard)
-    async def detach_tag(name: str, body: TagDetachIn, session: AsyncSession = Depends(get_session)):
+    async def detach_tag(name: str, body: TagDetachIn, session: AsyncSession = SessionDep):
         result = await repo.detach_tag(session, name, body.memory_ids)
         if result is None:
             raise HTTPException(status_code=404, detail=f"Tag '{name}' not found")
         return result
 
     @app.get("/projects", response_model=list[ProjectCount], dependencies=guard)
-    async def list_projects(session: AsyncSession = Depends(get_session)):
+    async def list_projects(session: AsyncSession = SessionDep):
         return await repo.list_projects(session)
 
     @app.get("/agents", response_model=list[AgentCount], dependencies=guard)
-    async def list_agents(session: AsyncSession = Depends(get_session)):
+    async def list_agents(session: AsyncSession = SessionDep):
         return await repo.list_agents(session)
 
     @app.get("/stats", dependencies=guard)
-    async def stats(session: AsyncSession = Depends(get_session)):
+    async def stats(session: AsyncSession = SessionDep):
         return await repo.stats(session)
 
     # The built dashboard SPA, if present, is served (unauthenticated static assets;
