@@ -1,5 +1,5 @@
 <script setup>
-// D8 — Tag detail modal. Opens on a TagsTable row click. Lists the memories
+// Tag detail modal. Opens on a TagsTable row click. Lists the memories
 // carrying the tag (GET /memories?tag=<name>), lets you detach the tag from
 // selected memories or from ALL of them (POST /tags/{name}/detach — omit/empty
 // ids = all), and consolidate tags via a merge dialog (POST /tags/merge:

@@ -1,10 +1,10 @@
 <script setup>
 // Memories view. Wires the data flow (hydrate view-state from the URL, then
 // fetch) and mounts the ticket components into their regions:
-//   D4 SearchBar        — top of the view
-//   #active-filters     — promoted tag chips (filled by D5 via teleport)
-//   D3 MemoriesTable    — paginated table + D6 create/edit/delete
-//   D5 TagFilter        — right rail (teleported), promotes chips up here
+//   SearchBar           — top of the view
+//   #active-filters     — promoted tag chips (filled by TagFilter via teleport)
+//   MemoriesTable       — paginated table + create/edit/delete
+//   TagFilter           — right rail (teleported), promotes chips up here
 import { onMounted } from 'vue'
 import { useMemoriesStore } from '@/stores/memories'
 import { useTagsStore } from '@/stores/tags'
@@ -31,15 +31,15 @@ onMounted(async () => {
 
 <template>
   <q-page class="q-pa-md">
-    <!-- D4: search -->
+    <!-- search -->
     <div class="q-mb-md">
       <SearchBar />
     </div>
 
-    <!-- D3: memories q-table (+ D6 create/edit/delete) -->
+    <!-- memories q-table (+ create/edit/delete) -->
     <MemoriesTable />
 
-    <!-- D5: multi-tag filter (right rail). `defer` so the teleport waits for the
+    <!-- multi-tag filter (right rail). `defer` so the teleport waits for the
          Quasar drawer's target to exist in the DOM before mounting into it. -->
     <Teleport to="#right-rail-target" defer>
       <AgentProjectFilter />

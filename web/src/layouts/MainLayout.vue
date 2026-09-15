@@ -1,6 +1,6 @@
 <script setup>
 // App shell: top bar + two-pane body (main content | right rail) + login gate.
-// D3–D8 render their UI into the router-view page and the named right-rail slot.
+// Pages and components render their UI into the router-view page and the named right-rail slot.
 import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import { useAuthStore } from '@/stores/auth'
@@ -37,7 +37,7 @@ function onLogout() {
     <q-header elevated>
       <q-toolbar>
         <q-btn flat no-caps dense
-               label="Agent Memorys" class="text-h6 q-px-sm"
+               label="Agent Memory" class="text-h6 q-px-sm"
                @click="goHome" />
 
         <!-- Nav (only once signed in) -->
@@ -64,7 +64,7 @@ function onLogout() {
     </q-header>
 
     <!-- ===================== Right rail (only when signed in) =====================
-      Pages inject rail content (D5 TagFilter) via the teleport target id. -->
+      Pages inject rail content (TagFilter) via the teleport target id. -->
     <q-drawer v-if="auth.isAuthed" side="right" show-if-above bordered :width="300">
       <div class="q-pa-md">
         <div id="right-rail-target"></div>
