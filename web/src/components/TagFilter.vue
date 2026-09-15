@@ -1,5 +1,5 @@
 <script setup>
-// D5 — multi-tag filter (OR semantics). Lives in the right rail: lists every
+// Multi-tag filter (OR semantics). Lives in the right rail: lists every
 // tag with its count (from `tags.list`). Clicking a tag PROMOTES it to a
 // highlighted "active" section at the TOP of the same rail; selected tags leave
 // the available list below. Removing a chip demotes it back. Selected tags drive

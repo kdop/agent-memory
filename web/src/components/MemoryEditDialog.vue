@@ -1,5 +1,5 @@
 <script setup>
-// D6 — create / edit form dialog. Pure form: it gathers values and emits
+// Create / edit form dialog. Pure form: it gathers values and emits
 // `submit`; the table (MemoriesTable) owns the API orchestration so the
 // "what to do after a mutation" policy lives in one place (optimistic edit vs
 // refetch on create). `memory` prop present → edit mode; null → create mode.
