@@ -20,7 +20,7 @@ and validates it on login by calling `GET /tags`.
 {
   "id": 42,
   "timestamp": "2026-07-09 14:50:41+00:00",   // string, may be null
-  "agent": "agent-a",
+  "agent": "my-agent",
   "project": "agent-memory",                    // may be null
   "content": "…",
   "type": "decision",                           // may be null
@@ -111,7 +111,7 @@ Body: `{ "memory_ids"?: int[] }` — omit or `[]` = **all** memories. The tag it
 
 ## Mock seed (for `web/src/mocks/`)
 
-Seed the mock with ~250 memories across agents `agent-a`/`clu`, projects
-`agent-memory`/`project-a`/null, types `decision`/`code`/`lesson`/`note`, and ~40 tags with
+Seed the mock with ~250 memories across agents `alpha`/`beta`, projects
+`agent-memory`/`web-app`/null, types `decision`/`lesson`/`note`/`preference`, and ~40 tags with
 descriptions and realistic counts, timestamps spread over the last ~60 days — enough to
 exercise pagination (3 pages), search, AND-filtering, and tag merge.
