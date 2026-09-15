@@ -2,16 +2,16 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { api } from '@/api/client'
 
-// The shared memories view-state. This is the store D3 (table), D4 (search),
-// and D5 (multi-tag filter) all drive. The view-state fields (q/tags/order/
+// The shared memories view-state. The table, the search bar,
+// and the multi-tag filter all drive it. The view-state fields (q/tags/order/
 // limit/offset) round-trip to the URL via composables/useUrlSync.js.
 export const useMemoriesStore = defineStore('memories', () => {
   // ---- view-state (URL-synced) ----
-  const q = ref('')            // D4: full-text search string
-  const tags = ref([])         // D5: array of tag names, OR-combined
+  const q = ref('')            // full-text search string
+  const tags = ref([])         // array of tag names, OR-combined
   const agent = ref('')        // right-rail: exact agent filter ('' = any)
   const project = ref('')      // right-rail: exact project filter ('' = any)
-  const order = ref('date_desc') // D3: '<field>_<asc|desc>'
+  const order = ref('date_desc') // '<field>_<asc|desc>'
   const limit = ref(100)       // page size
   const offset = ref(0)        // pagination offset
 
@@ -33,7 +33,7 @@ export const useMemoriesStore = defineStore('memories', () => {
   }
 
   /**
-   * Optimistically patch a single loaded row in place (D6 in-place edit).
+   * Optimistically patch a single loaded row in place (in-place edit).
    * Deliberately does NOT re-filter: an edit that no longer matches the active
    * query stays visible until the next fetch() (eventual consistency).
    * @param {number} id
