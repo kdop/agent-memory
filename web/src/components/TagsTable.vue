@@ -1,10 +1,10 @@
 <script setup>
-// D7 — Tags management table. A q-table over `tags.list` ({ name, count,
+// Tags management table. A q-table over `tags.list` ({ name, count,
 // description }) with alphabetical-by-name default sort (name column sortable),
 // inline rename / re-describe (PATCH /tags/{name} — a rename onto an existing
 // name merges, which we surface), and delete (DELETE /tags/{name}). Every
 // mutation re-runs tags.fetch(). Clicking a row emits `open` so TagsPage can
-// pop the D8 detail modal.
+// pop the detail modal.
 import { ref, computed } from 'vue'
 import { useQuasar } from 'quasar'
 import { storeToRefs } from 'pinia'

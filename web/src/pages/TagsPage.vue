@@ -1,5 +1,5 @@
 <script setup>
-// Tags management view. D7 builds the table; D8 builds the detail/edit modal.
+// Tags management view: the table and the detail/edit modal.
 import { onMounted, ref } from 'vue'
 import { useTagsStore } from '@/stores/tags'
 import { useAuthStore } from '@/stores/auth'
@@ -9,7 +9,7 @@ import TagDetailModal from '@/components/TagDetailModal.vue'
 const tags = useTagsStore()
 const auth = useAuthStore()
 
-// D8 modal state — opened from a D7 table row click.
+// Modal state — opened from a table row click.
 const detailOpen = ref(false)
 const selectedTag = ref(null)
 
@@ -27,12 +27,10 @@ onMounted(() => {
   <q-page class="q-pa-md">
     <div class="text-h6 q-mb-md">Tags</div>
 
-    <!-- ============ D7: tags table ============ -->
-    <!-- D7: tags table -->
+    <!-- tags table -->
     <TagsTable @open="openTag" />
 
-    <!-- ============ D8: tag detail modal ============ -->
-    <!-- D8: tag detail modal -->
+    <!-- tag detail modal -->
     <TagDetailModal v-model="detailOpen" :tag="selectedTag" />
   </q-page>
 </template>

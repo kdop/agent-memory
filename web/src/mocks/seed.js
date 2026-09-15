@@ -66,7 +66,7 @@ const TAG_DEFS = [
 const CONTENT_STEMS = [
   'Repointed DB path resolution to prefer AGENT_MEMORY_DB',
   'Added X-Total-Count header to the memories list endpoint',
-  'Split the store contract so ApiStore and SqliteStore stay in lockstep',
+  'Moved DSN normalisation into the server so clients never see a database URL',
   'Introduced AND multi-tag filtering on GET /memories',
   'Fixed a snippet ranking bug when the query spanned word boundaries',
   'Wrote the coverage gate that fails a PR lowering coverage',
@@ -76,7 +76,7 @@ const CONTENT_STEMS = [
   'Handled the 503 case when the server has no token configured',
   'Added pagination with limit/offset and a total count',
   'Scoped the stdlib-only rule to the client surface only',
-  'Backed up memory.db before the schema migration',
+  'Backed up the database with pg_dump before the schema migration',
   'Seeded the MSW mock with deterministic fixtures',
   'Wired the login gate to validate tokens against GET /tags',
   'Refactored the CLI shim onto agent_memory.cli:main',

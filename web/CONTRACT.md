@@ -1,8 +1,8 @@
 # Frozen API contract — dashboard v1
 
 The dashboard talks to the FastAPI memory server. **This document is the frozen
-contract**: the UI swarm builds against it (via the MSW mock in `web/src/mocks/`), and
-the backend (D1) implements it. Do not diverge without updating this file.
+contract**: the frontend builds against it (via the MSW mock in `web/src/mocks/`) and
+the backend implements it. Do not diverge without updating this file.
 
 Base URL comes from config (dev: Vite proxy / MSW; prod: same-origin `/`).
 
@@ -47,7 +47,7 @@ Query params (all optional):
 | `project` | string | exact |
 | `agent` | string | exact |
 | `type` | string | exact |
-| `since_days` | int | single day N days ago (0=today); overrides since/until |
+| `since_days` | int | rolling window: since the start of the day N days ago (0=today, 7=past week); overrides since/until |
 | `since` / `until` | string | ISO date/datetime bounds |
 | `order` | `date_desc`\|`date_asc` | default `date_desc` (ignored when `q` set → rank order) |
 | `limit` | int | default **100** |

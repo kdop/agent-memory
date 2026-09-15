@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "SPA dashboard for the agent-memory server (D2 skeleton, issue #56)",
+  "description": "SPA dashboard for the agent-memory server",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
