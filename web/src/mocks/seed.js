@@ -15,9 +15,9 @@ function makeRng(seed) {
   }
 }
 
-const AGENTS = ['agent-a', 'clu']
-const PROJECTS = ['agent-memory', 'project-a', null]
-const TYPES = ['decision', 'code', 'lesson', 'note']
+const AGENTS = ['alpha', 'beta']
+const PROJECTS = ['agent-memory', 'web-app', null]
+const TYPES = ['decision', 'lesson', 'note', 'preference']
 
 // ~40 tags, each with a description.
 const TAG_DEFS = [
@@ -54,8 +54,8 @@ const TAG_DEFS = [
   ['token', 'bearer token auth'],
   ['deploy', 'deployment'],
   ['logging', 'logging protocol'],
-  ['persona', 'persona MCP'],
-  ['project-a', 'project-a project'],
+  ['release', 'release process'],
+  ['web-app', 'web-app project'],
   ['dogfood', 'dogfooding memory'],
   ['schema', 'db schema design'],
   ['index', 'db indexing'],

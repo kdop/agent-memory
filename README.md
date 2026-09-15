@@ -43,8 +43,8 @@ python -m agent_memory.server           # binds 127.0.0.1:8099
 **4. Point the CLI at it** and log a memory:
 
 ```bash
-export PATH="$HOME/workspace/agent-memory:$PATH"
-alias memory="$HOME/workspace/agent-memory/memory-cli"
+export PATH="$PWD:$PATH"          # from the repo root; or `pip install -e .` for the console script
+alias memory="$PWD/memory-cli"
 export AGENT_MEMORY_API="http://127.0.0.1:8099"     # this is also the built-in default
 export AGENT_MEMORY_API_TOKEN="…"                   # same token the server was started with
 
@@ -56,7 +56,7 @@ memory search "database" --project=agent-memory
 ```
 
 Memories are attributed per agent (`--agent`), scoped by `--project`, classified by
-`--type` (`code | decision | lesson | note`), and tagged for retrieval. Tags are
+`--type` (`decision | lesson | note | preference`), and tagged for retrieval. Tags are
 structured objects — `--tags` takes a **JSON array** of `{"name", "description"}`, and a
 new tag with no description defaults to its own name. Full command reference:
 `memory --help`.
