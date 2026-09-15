@@ -24,7 +24,9 @@ server = [
     "alembic>=1.13",
 ]
 # The MCP server. Optional, like [server] — keeps the client stdlib-only.
-mcp = ["mcp>=1.0"]
+# Pinned below 2.x: mcp 2 renames FastMCP to MCPServer and drops the in-memory
+# test helper; the migration is tracked in issue #72.
+mcp = ["mcp>=1.0,<2"]
 # Test-only. Pulls the server + mcp extras + httpx for the ASGI test client.
 # pytest-rerunfailures guards the cross-surface suite against the (product-safe)
 # residual timing flake of a shared threaded uvicorn server + per-test truncate.
