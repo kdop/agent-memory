@@ -16,7 +16,8 @@ def test_resolve_async_dsn_normalizes(given, expected):
     assert resolve_async_dsn(given) == expected
 
 
-def test_resolve_async_dsn_rejects_non_postgres():
+def test_resolve_async_dsn_rejects_non_postgres(monkeypatch):
+    monkeypatch.delenv("AGENT_MEMORY_DB", raising=False)
     with pytest.raises(RuntimeError):
         resolve_async_dsn("sqlite:///x.db")
     with pytest.raises(RuntimeError):
@@ -59,7 +60,7 @@ def test_server_bind_defaults_and_override(monkeypatch):
 
 
 def test_get_agent_name(monkeypatch):
-    monkeypatch.setenv("AGENT_NAME", "agent-a")
-    assert config.get_agent_name() == "agent-a"
+    monkeypatch.setenv("AGENT_NAME", "my-agent")
+    assert config.get_agent_name() == "my-agent"
     monkeypatch.delenv("AGENT_NAME", raising=False)
     assert config.get_agent_name() == "unknown"

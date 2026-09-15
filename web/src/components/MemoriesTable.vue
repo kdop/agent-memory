@@ -1,12 +1,12 @@
 <script setup>
-// D3 — paginated memories table (server-side) + D6 create / edit / delete.
+// Paginated memories table (server-side) + create / edit / delete.
 //
 // Server-side pagination & sort are driven entirely by the `memories` store
 // (results / total / order / loading + setPage). We bind `:pagination` from a
 // computed view of the store and react to q-table's `@request` — no local copy
 // of page/sort state. Only the Date column is sortable (→ memories.order).
 //
-// Mutations (D6):
+// Mutations:
 //   • edit   → PATCH, then OPTIMISTICALLY patch the row in place (no refetch —
 //              an edit that no longer matches the filter stays until refresh).
 //   • create → POST, then memories.fetch().
@@ -81,7 +81,7 @@ function renderSnippet(snippet) {
   return escapeHtml(snippet).replace(/→(.*?)←/g, '<mark>$1</mark>')
 }
 
-// ---- create / edit / delete (D6) ----------------------------------------
+// ---- create / edit / delete ---------------------------------------------
 const dialogOpen = ref(false)
 const editing = ref(null) // null → create mode
 
