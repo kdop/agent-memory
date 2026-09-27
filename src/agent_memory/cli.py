@@ -207,6 +207,11 @@ def show_stats(args, client):
     print(f"Newest:            {s['newest'] or 'N/A'}")
 
 
+def reindex_memories(args, client):
+    n = client.reindex()
+    print(f"✓ Reindexed {n} memories")
+
+
 def config_command(args, parser):
     """Get/set persistent client settings (api_url, api_token, server_host/port).
     Local-only; never touches the API."""
@@ -297,6 +302,10 @@ def main():
     delete_parser.add_argument("ids", type=int, nargs="+", help="Memory ID(s) to delete")
     delete_parser.add_argument("--yes", "-y", action="store_true", help="Actually delete (without this, runs as dry-run)")
     delete_parser.set_defaults(func=delete_memory)
+
+    reindex_parser = subparsers.add_parser(
+        "reindex", help="Give every memory a vector from the server's current embedding model")
+    reindex_parser.set_defaults(func=reindex_memories)
 
     config_parser = subparsers.add_parser("config", help="Get/set persistent client settings (api_url, api_token)")
     config_sub = config_parser.add_subparsers(dest="config_action")

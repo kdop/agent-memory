@@ -9,6 +9,7 @@ concern — the CLI/MCP resolve it and send it; the server only falls back to
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -38,6 +39,8 @@ from .schemas import (
     UpdateResult,
 )
 
+log = logging.getLogger(__name__)
+
 
 async def get_session(request: Request) -> AsyncSession:
     sm: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
@@ -59,6 +62,18 @@ def get_embedder(request: Request) -> Embedder | None:
 
 
 EmbedderDep = Depends(get_embedder)
+
+
+async def _reindex_at_startup(app: FastAPI) -> None:
+    """Fill in vectors for rows that have none, or one from another model, once
+    at server start. A failure here is logged and must not stop the server: the
+    rows can still be fixed later with `POST /admin/reindex`."""
+    try:
+        async with app.state.sessionmaker() as session, session.begin():
+            n = await repo.reindex(session, app.state.embedder)
+        log.info("reindex at startup: %d memories updated", n)
+    except Exception:
+        log.exception("reindex at startup failed; the server keeps running")
 
 
 def create_app(
@@ -84,6 +99,8 @@ def create_app(
         # Built here, not at construction, so the model loads once at server
         # start and an app built for tests stays cheap.
         app.state.embedder = embedder if embedder is not None else make_embedder()
+        if app.state.embedder.model_name is not None:
+            await _reindex_at_startup(app)
         try:
             yield
         finally:
@@ -232,6 +249,16 @@ def create_app(
     @app.get("/stats", dependencies=guard)
     async def stats(session: AsyncSession = SessionDep):
         return await repo.stats(session)
+
+    @app.post("/admin/reindex", dependencies=guard)
+    async def reindex(session: AsyncSession = SessionDep,
+                      embedder: Embedder | None = EmbedderDep):
+        """Give every row a vector from the current model: rows with none, and
+        rows embedded by another model. Returns how many rows changed."""
+        if embedder is None or embedder.model_name is None:
+            reason = getattr(embedder, "reason", "the server has no embedding model")
+            raise HTTPException(status_code=503, detail=f"Cannot reindex: {reason}")
+        return {"updated": await repo.reindex(session, embedder)}
 
     # The built dashboard SPA, if present, is served (unauthenticated static assets;
     # its JS carries the bearer token to the API). Registered last so every API
