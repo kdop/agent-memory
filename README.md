@@ -116,6 +116,24 @@ It then loads on demand in that project — when the task matches its descriptio
 `/memory`. To pick up protocol changes: `claude plugin update memory@agent-memory`, or
 turn on auto-update for the marketplace in the `/plugin` Marketplaces tab.
 
+### Changing the skill
+
+`claude plugin update` only notices a new **version number** in
+`.claude-plugin/plugin.json`, never new file contents. A skill edit pushed without a bump
+never reaches the projects that installed it.
+
+A pre-commit hook in `.githooks/` bumps the patch version for you whenever a commit
+touches `skills/` or `.claude-plugin/`. Git only runs hooks from `.git/hooks/`, which is
+not committed, so the hook has to be switched on **once per clone**:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Without that line the hook file is just sitting in the repo and git ignores it. The
+`plugin-version` GitHub workflow is the safety net: it fails a pull request that changes
+the plugin without a bump.
+
 ## Dashboard
 
 A browser UI for the same API: search and filter memories, edit them in place, and
