@@ -8,6 +8,7 @@ a per-test decorator. Each gets a fresh NullPool engine so the async session is
 bound to that test's own event loop.
 """
 
+import pytest
 import pytest_asyncio
 
 from agent_memory.server import repository as repo
@@ -181,3 +182,96 @@ async def test_stats_aggregates(session):
     assert s["today"] == 2
     assert s["oldest"] is not None
     assert s["newest"] is not None
+
+
+# ── embedding on write ───────────────────────────────────────────────────────
+async def _stored_vector(session, mid):
+    """The two internal columns, read straight from the table: `_dump` leaves
+    them out on purpose, so `repo.get` cannot show them."""
+    from sqlalchemy import select
+
+    from agent_memory.server.models import Memory
+
+    stmt = select(Memory.embedding, Memory.embedding_model).where(Memory.id == mid)
+    return (await session.execute(stmt)).one()
+
+
+def _expected(text):
+    from conftest import FakeEmbedder
+
+    return FakeEmbedder().embed([text])[0]
+
+
+async def test_add_stores_vector_and_model_name(session):
+    from conftest import FakeEmbedder
+
+    mid = await repo.add(session, "fox in the snow", "t", None, _tags(), None,
+                         embedder=FakeEmbedder())
+    vec, model = await _stored_vector(session, mid)
+    assert model == "fake"
+    # REAL is a 4-byte float, so the stored values come back a little rounded.
+    assert vec == pytest.approx(_expected("fox in the snow"), abs=1e-6)
+
+
+async def test_add_without_embedder_leaves_null(session):
+    mid = await repo.add(session, "no model here", "t", None, _tags(), None)
+    assert await _stored_vector(session, mid) == (None, None)
+
+
+async def test_add_with_null_embedder_leaves_null(session):
+    from agent_memory.server.embedding import NullEmbedder
+
+    mid = await repo.add(session, "model is off", "t", None, _tags(), None,
+                         embedder=NullEmbedder())
+    assert await _stored_vector(session, mid) == (None, None)
+
+
+async def test_update_content_replaces_vector(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    mid = await repo.add(session, "first text", "t", None, _tags(), None, embedder=emb)
+    await repo.update(session, mid, content="second text", embedder=emb)
+    await session.flush()
+    vec, model = await _stored_vector(session, mid)
+    assert model == "fake"
+    assert vec == pytest.approx(_expected("second text"), abs=1e-6)
+    assert vec != pytest.approx(_expected("first text"), abs=1e-6)
+
+
+async def test_update_tags_only_keeps_vector(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    mid = await repo.add(session, "steady text", "t", None, _tags("a"), None, embedder=emb)
+    await repo.update(session, mid, add_tags=_tags("b"), project="p", mtype="note",
+                      embedder=emb)
+    await session.flush()
+    vec, model = await _stored_vector(session, mid)
+    assert model == "fake"
+    assert vec == pytest.approx(_expected("steady text"), abs=1e-6)
+
+
+async def test_update_same_content_keeps_vector(session):
+    from conftest import FakeEmbedder
+
+    mid = await repo.add(session, "same text", "t", None, _tags(), None,
+                         embedder=FakeEmbedder())
+    # Same content is not a change, so the row keeps what it has, even when the
+    # update runs without a model.
+    changes = await repo.update(session, mid, content="same text")
+    assert changes == []
+    vec, model = await _stored_vector(session, mid)
+    assert model == "fake"
+    assert vec == pytest.approx(_expected("same text"), abs=1e-6)
+
+
+async def test_update_content_without_model_clears_vector(session):
+    from agent_memory.server.embedding import NullEmbedder
+    from conftest import FakeEmbedder
+
+    mid = await repo.add(session, "old text", "t", None, _tags(), None,
+                         embedder=FakeEmbedder())
+    await repo.update(session, mid, content="new text", embedder=NullEmbedder())
+    await session.flush()
+    assert await _stored_vector(session, mid) == (None, None)

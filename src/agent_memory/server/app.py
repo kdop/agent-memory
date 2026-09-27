@@ -52,6 +52,15 @@ async def get_session(request: Request) -> AsyncSession:
 SessionDep = Depends(get_session, scope="function")
 
 
+def get_embedder(request: Request) -> Embedder | None:
+    """The embedder the lifespan put on `app.state`. None when an app was built
+    without one and its lifespan never ran (some in-process tests)."""
+    return getattr(request.app.state, "embedder", None)
+
+
+EmbedderDep = Depends(get_embedder)
+
+
 def create_app(
     sessionmaker: async_sessionmaker | None = None,
     token: str | None = None,
@@ -95,9 +104,10 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/memories", response_model=AddResult, status_code=201, dependencies=guard)
-    async def add_memory(body: MemoryIn, session: AsyncSession = SessionDep):
+    async def add_memory(body: MemoryIn, session: AsyncSession = SessionDep,
+                         embedder: Embedder | None = EmbedderDep):
         mid = await repo.add(session, body.content, body.agent or "unknown",
-                             body.project, body.tags, body.type)
+                             body.project, body.tags, body.type, embedder=embedder)
         # Stored either way; the warnings only tell the writer what the entry lacks.
         return {"id": mid, "warnings": warnings_for(body)}
 
@@ -153,7 +163,8 @@ def create_app(
         return row
 
     @app.patch("/memories/{mid}", response_model=UpdateResult, dependencies=guard)
-    async def update_memory(mid: int, body: UpdateIn, session: AsyncSession = SessionDep):
+    async def update_memory(mid: int, body: UpdateIn, session: AsyncSession = SessionDep,
+                            embedder: Embedder | None = EmbedderDep):
         sent = body.model_fields_set
         changes = await repo.update(
             session, mid,
@@ -163,6 +174,7 @@ def create_app(
             set_tags=body.set_tags if "set_tags" in sent else None,
             add_tags=body.add_tags if "add_tags" in sent else None,
             remove_tags=body.remove_tags if "remove_tags" in sent else None,
+            embedder=embedder,
         )
         if changes is None:
             raise HTTPException(status_code=404, detail=f"Memory #{mid} not found")
