@@ -26,3 +26,6 @@ coverage.xml
 # Editor / IDE
 .idea/
 .vscode/
+
+# Local DB dumps / exports taken before destructive ops — never commit.
+backups/

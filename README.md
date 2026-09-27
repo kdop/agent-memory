@@ -61,7 +61,8 @@ structured objects — `--tags` takes a **JSON array** of `{"name", "description
 new tag with no description defaults to its own name. Full command reference:
 `memory --help`.
 
-- **[MEMORY.md](MEMORY.md)** — the logging protocol (imported by other repos)
+- **[SKILL.md](SKILL.md)** — the logging protocol, as a Claude Code skill each project
+  copies in; see [Claude Code skill](#claude-code-skill)
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — schema, design decisions, programmatic access
 - **[CLAUDE.md](CLAUDE.md)** — instructions for an agent working *on this tool*
 
@@ -96,6 +97,21 @@ claude mcp add agent-memory -- agent-memory-mcp
 Like the CLI, the MCP server is an `ApiClient` — it talks HTTP to the running FastAPI
 service (`AGENT_MEMORY_API` / `api_url`), never a database. Run it directly for another
 MCP client with `python -m agent_memory.mcp_server` (stdio).
+
+## Claude Code skill
+
+The top-level `SKILL.md` packages the protocol as a Claude Code skill. It is
+deliberately **per project, not global**: a project opts in by copying the file into its
+own tree and committing it, the same way it pins any other dependency — nothing in
+`~/.claude` and no path into this checkout.
+
+```bash
+mkdir -p <project>/.claude/skills/memory
+cp /path/to/agent-memory/SKILL.md <project>/.claude/skills/memory/
+```
+
+It then loads on demand in that project — when the task matches its description or via
+`/memory`. Re-copy to pick up protocol changes.
 
 ## Dashboard
 
