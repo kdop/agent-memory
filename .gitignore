@@ -29,3 +29,6 @@ coverage.xml
 
 # Local DB dumps / exports taken before destructive ops — never commit.
 backups/
+
+# Downloaded embedding model files (AGENT_MEMORY_EMBED_CACHE default).
+.cache/
