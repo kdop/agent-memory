@@ -32,6 +32,27 @@ class DuplicateMemory(RuntimeError):
         super().__init__(f"duplicate of memory #{existing_id} (score {score:.2f})")
 
 
+class ApiRefused(RuntimeError):
+    """The server turned the request down and said why (an HTTP 4xx with a
+    plain `detail` string, such as a search mode it cannot serve). `status` is
+    the HTTP code; `str(e)` is the server's message, ready to print."""
+
+    def __init__(self, status: int, detail: str):
+        self.status = status
+        self.detail = detail
+        super().__init__(detail)
+
+
+def _detail_from(body: str) -> str | None:
+    """The plain-string `detail` of an error body, or None when the body is
+    not the shape `{"detail": "<message>"}`."""
+    try:
+        d = json.loads(body).get("detail")
+    except (ValueError, AttributeError):
+        return None
+    return d if isinstance(d, str) else None
+
+
 def _duplicate_from(detail: str) -> DuplicateMemory | None:
     """Build a DuplicateMemory from a 409 body, or None when the body is not
     the duplicate shape `{"detail": {"reason": "duplicate", ...}}`."""
@@ -84,6 +105,10 @@ class ApiClient:
                 dup = _duplicate_from(detail)
                 if dup is not None:
                     raise dup from e
+            if 400 <= e.code < 500:
+                message = _detail_from(detail)
+                if message is not None:
+                    raise ApiRefused(e.code, message) from e
             raise RuntimeError(f"{method} {path} → HTTP {e.code}: {detail}") from e
         except urllib.error.URLError as e:
             raise ApiUnreachable(
@@ -130,10 +155,14 @@ class ApiClient:
         total = int((headers or {}).get("X-Total-Count") or len(rows))
         return rows, total
 
-    def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None):
+    def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None,
+               mode=None):
+        """Rows with a `snippet` and a `score`. `mode` is "keyword", "semantic"
+        or "hybrid"; None leaves it out, so the server picks its default
+        (keyword). A mode the server cannot serve raises `ApiRefused`."""
         _, data = self._call("GET", "/memories/search", params={
             "q": text, "project": project, "agent": agent,
-            "since": since, "tag": tag, "limit": limit,
+            "since": since, "tag": tag, "limit": limit, "mode": mode,
         })
         return data or []
 

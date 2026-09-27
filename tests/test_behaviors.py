@@ -6,6 +6,8 @@ ids, counts, content, tags — never on surface chrome. Surface-specific output
 lives in test_cli_surface.py / test_api_surface.py.
 """
 
+import pytest
+
 
 # ---- add ------------------------------------------------------------------
 def test_add_returns_incrementing_ids(driver):
@@ -123,6 +125,27 @@ def test_search_snippet_highlights_match(driver):
     # ts_headline wraps the match with the →/← markers the store configures.
     snip = rows[0].snippet
     assert "gamma" in snip and "→" in snip and "←" in snip
+
+
+def test_search_semantic_puts_exact_text_first(driver):
+    # The live server embeds with FakeEmbedder: the same text gives the same
+    # vector, so the memory whose text matches the query exactly scores 1.0
+    # and comes first. The others still come back, ranked below it.
+    for content in ("a dog in the yard", "rain on the window",
+                    "the cat sat on the mat", "coffee before code"):
+        driver.add(content)
+    rows = driver.search("the cat sat on the mat", mode="semantic")
+    assert len(rows) == 4
+    assert rows[0].id == 3
+    assert rows[0].score == pytest.approx(1.0, abs=0.005)
+    scores = [r.score for r in rows]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_search_keyword_mode_matches_the_default(driver):
+    driver.add("the quick brown fox")
+    driver.add("a slow red hen")
+    assert driver.search("brown", mode="keyword") == driver.search("brown")
 
 
 # ---- tags / projects ------------------------------------------------------

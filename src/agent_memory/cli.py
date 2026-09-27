@@ -9,7 +9,7 @@ import argparse
 import json
 import sys
 
-from .client import ApiClient, ApiUnreachable, DuplicateMemory
+from .client import ApiClient, ApiRefused, ApiUnreachable, DuplicateMemory
 from .config import config_path, get_agent_name, load_config, save_config
 
 # Box-drawing separators used in the rendered output.
@@ -90,18 +90,32 @@ def query_memories(args, client):
         print(f"Found {len(rows)} memories")
 
 
+def _search_header(row):
+    """The `━━━ #id ━━━…` line of a search result, with the score when the
+    server sent one: `━━━ #12 score 0.87 ━━━…`."""
+    score = row.get("score")
+    if score is None:
+        return f"━━━ #{row['id']} {HBAR}"
+    return f"━━━ #{row['id']} score {score:.2f} {HBAR}"
+
+
 def search_memories(args, client):
     limit = _effective_limit(args)
     rows = client.search(args.query, project=args.project, agent=args.agent,
-                         since=args.since, tag=args.tag, limit=limit)
+                         since=args.since, tag=args.tag, limit=limit, mode=args.mode)
     if not rows:
         print(f"No memories found for: {args.query}")
         return
     print(f"🔍 Search results for: {args.query}\n")
     for row in rows:
-        print(f"━━━ #{row['id']} {HBAR}")
+        print(_search_header(row))
         _print_meta(row)
-        print(f"\n{row['snippet']}\n")
+        # Keyword search sends a snippet with the matches marked. Semantic
+        # search has no words to mark, so it sends none: show the content.
+        body = row.get("snippet")
+        if body is None:
+            body = row.get("content", "")
+        print(f"\n{body}\n")
     print(f"{FOOT}")
     if limit and len(rows) >= limit:
         print(f"Found {len(rows)} matches (limit reached; use --all or --limit to see more)")
@@ -273,8 +287,16 @@ def main():
     query_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     query_parser.set_defaults(func=query_memories)
 
-    search_parser = subparsers.add_parser("search", help="Full-text search")
+    search_parser = subparsers.add_parser(
+        "search", help="Search memories by words, by meaning, or both",
+        formatter_class=argparse.RawTextHelpFormatter)
     search_parser.add_argument("query", help="Search query")
+    search_parser.add_argument(
+        "--mode", choices=["keyword", "semantic", "hybrid"], default="keyword",
+        help="How to match (default keyword):\n"
+             "  keyword   matches words\n"
+             "  semantic  matches meaning; needs the embedding model on the server\n"
+             "  hybrid    combines both")
     search_parser.add_argument("--project", help="Filter by project")
     search_parser.add_argument("--agent", help="Filter by agent")
     search_parser.add_argument("--tag", help="Filter by tag")
@@ -339,7 +361,9 @@ def main():
 
     try:
         args.func(args, ApiClient())
-    except ApiUnreachable as e:
+    except (ApiUnreachable, ApiRefused) as e:
+        # No server, or the server said no and said why: show the message,
+        # never a traceback.
         print(f"✗ {e}", file=sys.stderr)
         sys.exit(1)
 

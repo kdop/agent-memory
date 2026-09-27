@@ -53,6 +53,7 @@ memory add "Chose Postgres over SQLite" \
   --tags='[{"name":"design","description":"architecture choices"},{"name":"db"}]'
 memory query --project=agent-memory --since-days 0
 memory search "database" --project=agent-memory
+memory search "why we picked the database" --mode=semantic   # by meaning; needs the embedding model
 ```
 
 Memories are attributed per agent (`--agent`), scoped by `--project`, classified by

@@ -14,7 +14,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import ApiClient, DuplicateMemory
+from .client import ApiClient, ApiRefused, DuplicateMemory
 from .config import get_agent_name
 
 
@@ -61,11 +61,20 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
     @mcp.tool()
     def memory_search(q: str, project: Optional[str] = None, agent: Optional[str] = None,
                       since: Optional[str] = None, tag: Optional[str] = None,
-                      limit: int = 20) -> dict:
-        """Full-text search. limit 0 returns every match. Returns {"memories": [...]}
-        with snippets."""
-        return {"memories": api.search(
-            q, project=project, agent=agent, since=since, tag=tag, limit=limit)}
+                      limit: int = 20, mode: str = "keyword") -> dict:
+        """Search memories. `mode` picks how to match: "keyword" finds memories
+        that contain the words in `q`; "semantic" finds memories that mean the
+        same thing as `q`, even in other words, and needs the embedding model on
+        the server; "hybrid" combines both. limit 0 returns every match. Returns
+        {"memories": [...]}, best match first, each with a `score` and, for
+        keyword mode, a `snippet` with the matches marked. When the server cannot
+        serve the mode it returns {"error": "<why>"}."""
+        try:
+            rows = api.search(q, project=project, agent=agent, since=since, tag=tag,
+                              limit=limit, mode=mode)
+        except ApiRefused as e:
+            return {"error": str(e)}
+        return {"memories": rows}
 
     @mcp.tool()
     def memory_show(id: int) -> dict:
