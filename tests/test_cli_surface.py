@@ -125,15 +125,15 @@ def test_search_mode_rejects_unknown_value(cli):
     assert "invalid choice: 'fuzzy'" in proc.stderr
 
 
-def test_search_hybrid_is_accepted_and_the_refusal_is_readable(cli):
-    # hybrid reaches the server; until it is implemented the server refuses
-    # with a 400, and the user sees that message, not a traceback.
-    cli.raw("add", "x")
-    proc = cli.raw("search", "x", "--mode", "hybrid")
-    assert proc.returncode == 1
-    assert proc.stderr.strip() == "✗ hybrid mode is not available yet"
-    assert "Traceback" not in proc.stderr
-    assert "Traceback" not in proc.stdout
+def test_search_hybrid_returns_fused_results(cli):
+    # hybrid reaches the server and comes back fused: the exact text is found by
+    # words and by meaning, so it ranks first with a score of 2/61.
+    cli.raw("add", "the cat sat on the mat")
+    cli.raw("add", "a dog in the yard")
+    proc = cli.raw("search", "the cat sat on the mat", "--mode", "hybrid")
+    assert proc.returncode == 0, proc.stderr
+    assert "#1 score 0.03" in proc.stdout
+    assert proc.stdout.index("#1 ") < proc.stdout.index("#2 ")
 
 
 # ── tags listing ─────────────────────────────────────────────────────────────

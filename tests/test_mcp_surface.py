@@ -71,11 +71,13 @@ def test_memory_search_semantic_mode(mcp):
 
 
 def test_memory_search_hybrid_is_passed_through(mcp):
-    # hybrid reaches the server; until it is implemented the server refuses,
-    # and the tool hands that reason back as {"error": ...}.
-    _add(mcp, "x")
-    data = mcp._call("memory_search", q="x", mode="hybrid")
-    assert data == {"error": "hybrid mode is not available yet"}
+    # hybrid reaches the server and comes back fused: the exact text is found by
+    # words and by meaning, so it ranks first with a score of 2/61.
+    _add(mcp, "the cat sat on the mat")
+    _add(mcp, "a dog in the yard")
+    hits = mcp._call("memory_search", q="the cat sat on the mat", mode="hybrid")["memories"]
+    assert hits[0]["id"] == 1
+    assert hits[0]["score"] == pytest.approx(2 / 61, abs=1e-6)
 
 
 def test_memory_search_docstring_explains_the_modes(mcp):
