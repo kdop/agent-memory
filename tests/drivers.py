@@ -94,6 +94,7 @@ class Memory:
     tags: list = field(default_factory=list)
     content: str = ""
     snippet: str | None = None
+    score: float | None = None
 
 
 class CliDriver:
@@ -156,8 +157,10 @@ class CliDriver:
             args += ["--limit", str(filters["limit"])]
         return self._parse_memories(self.raw(*args).stdout)
 
-    def search(self, text, **filters):
+    def search(self, text, mode=None, **filters):
         args = ["search", text]
+        if mode is not None:
+            args += ["--mode", mode]
         for flag in ("project", "agent", "since", "tag"):
             if filters.get(flag):
                 args += [f"--{flag}", str(filters[flag])]
@@ -262,14 +265,18 @@ class CliDriver:
     def _parse_memories(self, text, snippet=False):
         if "No memories found" in text:
             return []
-        parts = re.split(r"━+ #(\d+)[^\n]*\n", text)
+        # Each header is `━━━ #<id> [score <n>] ━━━…`; keep the rest of the line
+        # so the score can be read out of it.
+        parts = re.split(r"━+ #(\d+)([^\n]*)\n", text)
         out = []
         it = iter(parts[1:])  # parts[0] is the preamble before the first block
-        for mid, body in zip(it, it):
-            out.append(self._parse_block(int(mid), body, snippet=snippet))
+        for mid, header, body in zip(it, it, it):
+            sm = re.search(r"score (-?\d+\.\d+)", header)
+            score = float(sm.group(1)) if sm else None
+            out.append(self._parse_block(int(mid), body, snippet=snippet, score=score))
         return out
 
-    def _parse_block(self, mid, body, snippet=False):
+    def _parse_block(self, mid, body, snippet=False, score=None):
         agent = project = type_ = None
         tags = []
         collected = []
@@ -299,6 +306,7 @@ class CliDriver:
             id=mid, agent=agent, project=project, type=type_, tags=tags,
             content="" if snippet else text_body,
             snippet=text_body if snippet else None,
+            score=score,
         )
 
 
@@ -337,6 +345,7 @@ class ApiDriver:
             type=d.get("type"), tags=d.get("tags") or [],
             content="" if snippet else (d.get("content") or ""),
             snippet=d.get("snippet") if snippet else None,
+            score=d.get("score"),
         )
 
     # ---- semantic operations --------------------------------------------
@@ -361,9 +370,9 @@ class ApiDriver:
         )
         return [self._to_memory(d) for d in resp.json()]
 
-    def search(self, text, **filters):
+    def search(self, text, mode=None, **filters):
         resp = self._get(
-            "/memories/search", q=text,
+            "/memories/search", q=text, mode=mode,
             project=filters.get("project"), agent=filters.get("agent"),
             since=filters.get("since"), tag=filters.get("tag"),
             limit=filters.get("limit"),
@@ -461,6 +470,7 @@ class McpDriver:
             type=d.get("type"), tags=d.get("tags") or [],
             content="" if snippet else (d.get("content") or ""),
             snippet=d.get("snippet") if snippet else None,
+            score=d.get("score"),
         )
 
     # ---- semantic operations --------------------------------------------
@@ -482,9 +492,9 @@ class McpDriver:
         )
         return [self._to_memory(d) for d in data["memories"]]
 
-    def search(self, text, **filters):
+    def search(self, text, mode=None, **filters):
         data = self._call(
-            "memory_search", q=text,
+            "memory_search", q=text, mode=mode,
             project=filters.get("project"), agent=filters.get("agent"),
             since=filters.get("since"), tag=filters.get("tag"),
             limit=filters.get("limit"),

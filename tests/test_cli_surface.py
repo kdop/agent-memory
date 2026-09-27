@@ -6,6 +6,8 @@ cross-surface meaning, so they stay pinned to the CLI (not in test_behaviors.py)
 Every test drives the real `memory-cli` subprocess pointed at the live server.
 """
 
+import re
+
 import pytest
 
 from drivers import CliDriver
@@ -68,6 +70,70 @@ def test_search_chrome(cli):
 def test_search_no_match_chrome(cli):
     cli.raw("add", "nothing relevant here")
     assert "No memories found for: zzzznope" in cli.raw("search", "zzzznope").stdout
+
+
+# ── search --mode ────────────────────────────────────────────────────────────
+def _seed_search(cli):
+    for content in ("the cat sat on the mat", "a dog in the yard",
+                    "rain on the window", "coffee before code"):
+        cli.raw("add", content)
+
+
+def test_search_help_explains_each_mode(cli):
+    out = cli.raw("search", "--help").stdout
+    assert "--mode" in out
+    assert "keyword" in out and "matches words" in out
+    assert "semantic" in out and "matches meaning" in out
+    assert "hybrid" in out and "combines both" in out
+
+
+def test_search_defaults_to_keyword(cli):
+    _seed_search(cli)
+    plain = cli.raw("search", "cat").stdout
+    keyword = cli.raw("search", "cat", "--mode", "keyword").stdout
+    assert plain == keyword
+    assert "Found 1 matches" in plain
+    assert "→cat←" in plain                  # the keyword snippet marks the match
+
+
+def test_search_keyword_prints_score_in_header(cli):
+    _seed_search(cli)
+    out = cli.raw("search", "cat").stdout
+    assert re.search(r"^━━━ #1 score -?\d\.\d\d ━+$", out, re.M)
+
+
+def test_search_semantic_prints_score_and_ranks_exact_text_first(cli):
+    _seed_search(cli)
+    proc = cli.raw("search", "the cat sat on the mat", "--mode", "semantic")
+    assert proc.returncode == 0
+    out = proc.stdout
+    # Every stored memory comes back, best first, with a two-decimal score.
+    headers = re.findall(r"^━━━ #(\d+) score (-?\d\.\d\d) ━+$", out, re.M)
+    assert len(headers) == 4
+    assert headers[0] == ("1", "1.00")
+    scores = [float(sc) for _id, sc in headers]
+    assert scores == sorted(scores, reverse=True)
+    # Semantic search has no snippet, so the content is shown instead of "None".
+    assert "the cat sat on the mat" in out
+    assert "None" not in out
+    assert "Found 4 matches" in out
+
+
+def test_search_mode_rejects_unknown_value(cli):
+    proc = cli.raw("search", "x", "--mode", "fuzzy")
+    assert proc.returncode == 2
+    assert "invalid choice: 'fuzzy'" in proc.stderr
+
+
+def test_search_hybrid_returns_fused_results(cli):
+    # hybrid reaches the server and comes back fused: the exact text is found by
+    # words and by meaning, so it ranks first with a score of 2/61.
+    cli.raw("add", "the cat sat on the mat")
+    cli.raw("add", "a dog in the yard")
+    proc = cli.raw("search", "the cat sat on the mat", "--mode", "hybrid")
+    assert proc.returncode == 0, proc.stderr
+    assert "#1 score 0.03" in proc.stdout
+    assert proc.stdout.index("#1 ") < proc.stdout.index("#2 ")
 
 
 # ── tags listing ─────────────────────────────────────────────────────────────
