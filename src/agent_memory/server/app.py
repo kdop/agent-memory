@@ -100,8 +100,8 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
         agent: str | None = None,
         type: str | None = None,
         order: str = "date_desc",
-        limit: int = 100,
-        offset: int = 0,
+        limit: int = Query(default=100, ge=0, description="0 = no limit"),
+        offset: int = Query(default=0, ge=0),
     ):
         items, total = await repo.list_memories(
             session, q=q, tags=tag, project=project, agent=agent, mtype=type,
@@ -126,7 +126,7 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
         agent: str | None = None,
         since: str | None = None,
         tag: str | None = None,
-        limit: int = 20,
+        limit: int = Query(default=20, ge=0, description="0 = no limit"),
     ):
         return await repo.search(session, q, project=project, agent=agent,
                                  since=since, tag=tag, limit=limit)

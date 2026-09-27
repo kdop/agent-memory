@@ -154,3 +154,17 @@ def test_detach_tag_from_all(client):
 
 def test_detach_tag_404(client):
     assert client.post("/tags/nope/detach", json={}, headers=_auth()).status_code == 404
+
+
+def test_list_limit_zero_means_no_limit(client):
+    for i in range(7):
+        _add(client, f"m{i}")
+    r = client.get("/memories", params={"limit": 0}, headers=_auth())
+    assert r.status_code == 200
+    assert len(r.json()) == 7
+    assert r.headers["X-Total-Count"] == "7"
+
+
+def test_list_negative_limit_rejected(client):
+    r = client.get("/memories", params={"limit": -1}, headers=_auth())
+    assert r.status_code == 422

@@ -241,3 +241,15 @@ def test_update_reindexes_old_gone_new_found(driver):
     driver.update(mid, content="replaced penguin")
     assert driver.search("orangutan") == []
     assert len(driver.search("penguin")) == 1
+
+
+def test_query_limit_zero_returns_everything(driver):
+    for i in range(3):
+        driver.add(f"m{i}")
+    assert len(driver.query(limit=0)) == 3
+
+
+def test_search_limit_zero_returns_everything(driver):
+    for i in range(3):
+        driver.add(f"needle {i}")
+    assert len(driver.search("needle", limit=0)) == 3
