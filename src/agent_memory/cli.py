@@ -52,8 +52,11 @@ def _print_meta(row):
 def add_memory(args, client):
     agent = args.agent or get_agent_name()
     tags = _parse_tags_json(args.tags, "--tags") or []
-    mid = client.add(args.content, agent, args.project, tags, args.type)
+    mid, warnings = client.add_with_warnings(args.content, agent, args.project, tags, args.type)
     print(f"✓ Memory #{mid} added ({agent})")
+    # One line per rule the entry breaks. The memory is stored either way.
+    for w in warnings:
+        print(f"warning: {w}")
 
 
 def _effective_limit(args):

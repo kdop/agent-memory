@@ -67,11 +67,18 @@ class ApiClient:
 
     # ---- operations ------------------------------------------------------
     def add(self, content, agent, project, tags, mtype):
+        """The new id only."""
+        mid, _ = self.add_with_warnings(content, agent, project, tags, mtype)
+        return mid
+
+    def add_with_warnings(self, content, agent, project, tags, mtype):
+        """(id, warnings): warnings is the list of rule names the entry breaks
+        (see server/checks.py). The memory is stored either way."""
         _, data = self._call("POST", "/memories", body={
             "content": content, "agent": agent, "project": project,
             "tags": list(tags), "type": mtype,
         })
-        return data["id"]
+        return data["id"], data.get("warnings") or []
 
     def query(self, *, since_days=None, since=None, until=None, project=None,
               agent=None, tag=None, mtype=None, limit=None):

@@ -87,6 +87,8 @@ class UpdateIn(BaseModel):
 
 class AddResult(BaseModel):
     id: int
+    # Rule names the entry breaks (see server/checks.py). Empty when it is clean.
+    warnings: list[str] = []
 
 
 class UpdateResult(BaseModel):
