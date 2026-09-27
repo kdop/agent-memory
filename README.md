@@ -26,7 +26,7 @@ the only thing with a `postgresql://` DSN.
 **2. Install the server extra and create the schema** (Alembic owns it):
 
 ```bash
-pip install -e ".[server]"
+pip install -e ".[server]"        # add the [embed] extra to search by meaning: ".[server,embed]"
 export AGENT_MEMORY_DB="postgresql://user:pass@localhost:5432/agent_memory"
 alembic upgrade head
 ```
@@ -52,8 +52,9 @@ memory add "Chose Postgres over SQLite" \
   --agent=my-agent --project=agent-memory --type=decision \
   --tags='[{"name":"design","description":"architecture choices"},{"name":"db"}]'
 memory query --project=agent-memory --since-days 0
-memory search "database" --project=agent-memory
-memory search "why we picked the database" --mode=semantic   # by meaning; needs the embedding model
+memory search "database" --project=agent-memory                    # by words (the default)
+memory search "why we picked the database" --mode semantic        # by meaning; needs the [embed] extra
+memory search "why we picked the database" --mode hybrid          # both lists, combined
 ```
 
 Memories are attributed per agent (`--agent`), scoped by `--project`, classified by
@@ -61,6 +62,34 @@ Memories are attributed per agent (`--agent`), scoped by `--project`, classified
 structured objects — `--tags` takes a **JSON array** of `{"name", "description"}`, and a
 new tag with no description defaults to its own name. Full command reference:
 `memory --help`.
+
+**Search** has three modes, `--mode keyword|semantic|hybrid`. `keyword` (the default)
+finds memories that contain the words of the query and marks them in a snippet.
+`semantic` finds memories that mean the same thing, even in other words: the server
+turns each memory into a meaning vector with a small local model and compares the query
+against those vectors. `hybrid` runs both and combines the two lists, so a memory found
+both by words and by meaning comes first (how it is combined: [ARCHITECTURE.md](ARCHITECTURE.md)).
+The last two need the `[embed]` extra on the server (`pip install -e ".[server,embed]"`).
+Without it, `semantic` answers with an error that says so and `hybrid` falls back to
+keyword. Two environment variables control the model, both read by the server at
+start: `AGENT_MEMORY_EMBED_MODEL` (default `BAAI/bge-small-en-v1.5`; `off` turns it
+off) and `AGENT_MEMORY_EMBED_CACHE` (where the model files are stored; default
+`.cache/fastembed` under the repo root). `memory reindex` gives every memory that has
+no vector, or a vector from another model, a vector from the current model. The server
+also runs this once at start, so after installing the model, or switching to another,
+a restart is enough.
+
+**Adding** checks the entry. A new memory whose meaning is nearly the same as one
+already in the same project (cosine 0.92 or above) is refused and nothing is stored:
+the API answers `409` with the existing id, the CLI prints `✗ Duplicate of memory #<id>
+(score 0.97). Use 'memory update <id>' or --force.` and exits with code 3, and the MCP
+tool returns `{"error": "duplicate", "existing_id": <id>, "score": <score>}`. Update
+the existing memory, or pass `--force` when the new one is meant as a separate record.
+A server without the model has no vectors to compare, so it never refuses. Three
+warnings can print after the id, one per line: `warning: short` (under 40 characters),
+`warning: no-project` (no `--project`), and `warning: no-reasoning` (a `decision` or
+`lesson` with no word that says why, such as "because" or "rejected"). Warnings never
+block; the memory is stored either way.
 
 - **[skills/memory/SKILL.md](skills/memory/SKILL.md)** — the logging protocol, as a
   Claude Code skill each project installs; see [Claude Code skill](#claude-code-skill)
@@ -75,7 +104,7 @@ new tag with no description defaults to its own name. Full command reference:
 | **CLI client** | `memory-cli` — a presentation layer over `ApiClient`. Stdlib-only, never opens a DB. | none |
 | **MCP client** | Same `ApiClient`, exposed as MCP tools over stdio. | `[mcp]` |
 | **Dashboard** | Vue 3 + Quasar single-page app, served by the API service under `/app`. | `web/` (Node) |
-| **Embeddings** | A small local model (`BAAI/bge-small-en-v1.5`, 384 dims) run in the API service through fastembed. Optional: without it the service runs with no vectors. `AGENT_MEMORY_EMBED_MODEL=off` disables it; `AGENT_MEMORY_EMBED_CACHE` sets where model files land (default `.cache/fastembed`). | `[embed]` |
+| **Meaning vectors** | A small local model (`BAAI/bge-small-en-v1.5`, 384 numbers per vector) run inside the API service through fastembed. It serves `--mode semantic`, `--mode hybrid` and the duplicate check on add. Optional: `pip install -e ".[embed]"`; without it the service runs with no vectors. `AGENT_MEMORY_EMBED_MODEL=off` turns it off; `AGENT_MEMORY_EMBED_CACHE` sets where model files land (default `.cache/fastembed`). | `[embed]` |
 
 ### Endpoint & auth resolution (clients)
 
@@ -89,7 +118,8 @@ new tag with no description defaults to its own name. Full command reference:
 
 Agents can reach the memory system over **MCP**. Install the extra and register the
 stdio server once — it's then available in every session, exposing tools
-`memory_add/query/search/show/update/delete/tags/projects/stats`:
+`memory_add/query/search/show/update/delete/tags/projects/stats` (`memory_search` takes
+`mode`, `memory_add` takes `force` and returns the warnings):
 
 ```bash
 pip install -e ".[mcp]"               # installs the `agent-memory-mcp` entry point
