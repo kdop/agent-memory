@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Persistent cross-session memory for agents via `memory-cli` (the agent-memory service). Use at the start of every session to load context for the current project, and while working to log decisions, lessons, preferences and notes as they happen. Also for querying, searching, updating or deleting past memories, or when the user says "remember", "log this", "what did we decide", or asks what happened in a project.
+description: Persistent cross-session memory for agents via `memory-cli` (the agent-memory service). Use at the start of every session to load context for the current project, and while working to log decisions, lessons, preferences and notes as they happen. Also for querying, searching, updating or deleting past memories, or when the user says "remember", "log this", "what did we decide", or asks what happened in a project. Log only what will still matter in later sessions: durable decisions, lessons, preferences and facts. Do not log diary-style entries of what was done.
 ---
 
 # Agent memory
