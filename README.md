@@ -61,8 +61,8 @@ structured objects — `--tags` takes a **JSON array** of `{"name", "description
 new tag with no description defaults to its own name. Full command reference:
 `memory --help`.
 
-- **[SKILL.md](SKILL.md)** — the logging protocol, as a Claude Code skill each project
-  copies in; see [Claude Code skill](#claude-code-skill)
+- **[skills/memory/SKILL.md](skills/memory/SKILL.md)** — the logging protocol, as a
+  Claude Code skill each project installs; see [Claude Code skill](#claude-code-skill)
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — schema, design decisions, programmatic access
 - **[CLAUDE.md](CLAUDE.md)** — instructions for an agent working *on this tool*
 
@@ -100,18 +100,21 @@ MCP client with `python -m agent_memory.mcp_server` (stdio).
 
 ## Claude Code skill
 
-The top-level `SKILL.md` packages the protocol as a Claude Code skill. It is
-deliberately **per project, not global**: a project opts in by copying the file into its
-own tree and committing it, the same way it pins any other dependency — nothing in
-`~/.claude` and no path into this checkout.
+`skills/memory/SKILL.md` packages the protocol as a Claude Code skill, and this repo is
+a plugin marketplace for it (`.claude-plugin/`). It is deliberately **per project, not
+global**: a project opts in by installing the plugin at project scope, which records the
+dependency in its `.claude/settings.json` — commit that, the same way you pin any other
+dependency. Nothing lives in `~/.claude` and nothing points into this checkout.
 
 ```bash
-mkdir -p <project>/.claude/skills/memory
-cp /path/to/agent-memory/SKILL.md <project>/.claude/skills/memory/
+cd <project>
+claude plugin marketplace add kdop/agent-memory
+claude plugin install memory@agent-memory --scope project
 ```
 
 It then loads on demand in that project — when the task matches its description or via
-`/memory`. Re-copy to pick up protocol changes.
+`/memory`. To pick up protocol changes: `claude plugin update memory@agent-memory`, or
+turn on auto-update for the marketplace in the `/plugin` Marketplaces tab.
 
 ## Dashboard
 

@@ -1,7 +1,7 @@
 # Architecture — agent-memory
 
 How the `agent_memory` package is built and why. For usage, see [README.md](README.md);
-for the agent logging protocol, see [SKILL.md](SKILL.md).
+for the agent logging protocol, see [skills/memory/SKILL.md](skills/memory/SKILL.md).
 
 ## Overview
 

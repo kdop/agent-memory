@@ -1,1 +1,1 @@
-../../../SKILL.md
+../../../skills/memory/SKILL.md
