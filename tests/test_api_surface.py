@@ -127,3 +127,28 @@ def test_add_then_read_round_trips_over_http(client):
     got = client.get(f"/memories/{mid}", headers=_auth()).json()
     assert got["content"] == "over the wire"
     assert got["tags"] == ["net"]
+
+
+# ── warnings on add ──────────────────────────────────────────────────────────
+def test_add_returns_warnings_and_still_stores(client):
+    resp = client.post(
+        "/memories",
+        json={"content": "tiny", "type": "decision", "agent": "tester"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["warnings"] == ["short", "no-project", "no-reasoning"]
+    # Stored regardless of the warnings.
+    assert client.get(f"/memories/{body['id']}", headers=_auth()).status_code == 200
+
+
+def test_add_clean_entry_has_empty_warnings(client):
+    resp = client.post(
+        "/memories",
+        json={"content": "Run the build on every push because the nightly was too slow.",
+              "project": "ci", "type": "decision", "agent": "tester"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 201
+    assert resp.json()["warnings"] == []

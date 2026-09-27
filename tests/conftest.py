@@ -13,12 +13,16 @@ Postgres — the anti-drift guard. The whole suite is skipped unless
 - `retrieval_set` (function): loads `tests/data/retrieval_set.json` into the test
   DB and returns its questions with the inserted ids filled in, so search quality
   can be measured against known answers.
+- `FakeEmbedder`: a cheap, deterministic stand-in for the embedding model. The
+  live server runs with it, so no test loads a real model by accident.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 import os
 import socket
 import threading
@@ -35,6 +39,26 @@ from sqlalchemy.pool import NullPool
 PG_DSN = os.environ.get("AGENT_MEMORY_TEST_PG_DSN")
 
 TOKEN = "test-token"
+
+
+class FakeEmbedder:
+    """Deterministic vectors from a hash of the text: same text, same vector,
+    every run, no model. Unit length, 8 wide, so `cosine` on them is a dot
+    product like on the real thing. Shared by every ticket that needs an
+    embedder in tests."""
+
+    model_name = "fake"
+    dim = 8
+
+    def embed(self, texts):
+        return [self._one(t) for t in texts]
+
+    def _one(self, text):
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        # Each byte becomes a signed value in [-1, 1); eight of them make the vector.
+        raw = [(b - 128) / 128.0 for b in digest[: self.dim]]
+        norm = math.sqrt(sum(x * x for x in raw)) or 1.0
+        return [x / norm for x in raw]
 
 
 def pytest_collection_modifyitems(config, items):
@@ -102,7 +126,8 @@ def live_server(_schema):
     from agent_memory.server.db import make_sessionmaker
 
     engine = make_test_engine()
-    app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN)
+    app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN,
+                     embedder=FakeEmbedder())
 
     port = _free_port()
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")

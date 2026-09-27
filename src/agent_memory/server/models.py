@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    REAL,
     BigInteger,
     Computed,
     DateTime,
@@ -19,7 +20,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -43,6 +44,13 @@ class Memory(Base):
     content_tsv: Mapped[str] = mapped_column(
         TSVECTOR, Computed("to_tsvector('english', content)", persisted=True)
     )
+
+    # Meaning vector for semantic search, plus the name of the model that made it.
+    # A plain float array: no pgvector, so nothing has to be installed on the DB
+    # host, and the table is small enough to scan without an index. Both are
+    # internal — the API never returns them.
+    embedding: Mapped[list[float] | None] = mapped_column(ARRAY(REAL))
+    embedding_model: Mapped[str | None] = mapped_column(Text)
 
     tags: Mapped[list[Tag]] = relationship(
         secondary="memory_tags", back_populates="memories", order_by="Tag.name",

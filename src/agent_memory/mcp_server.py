@@ -32,9 +32,11 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
                    type: Optional[str] = None) -> dict:
         """Add a memory. `tags` is a list of {"name": str, "description": str (optional)}
         — a brand-new tag with no description auto-defaults to its own name. Returns
-        {"id": <new id>}."""
-        mid = api.add(content, agent or get_agent_name(), project, tags or [], type)
-        return {"id": mid}
+        {"id": <new id>, "warnings": [...]}: warnings are rule names the entry breaks
+        (short, no-project, no-reasoning). The memory is stored either way."""
+        mid, warnings = api.add_with_warnings(
+            content, agent or get_agent_name(), project, tags or [], type)
+        return {"id": mid, "warnings": warnings}
 
     @mcp.tool()
     def memory_query(since_days: Optional[int] = None,

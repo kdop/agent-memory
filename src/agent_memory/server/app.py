@@ -20,7 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .. import __version__
 from . import repository as repo
 from .auth import require_token
+from .checks import warnings_for
 from .db import make_engine, make_sessionmaker
+from .embedding import Embedder, make_embedder
 from .schemas import (
     AddResult,
     AgentCount,
@@ -50,11 +52,17 @@ async def get_session(request: Request) -> AsyncSession:
 SessionDep = Depends(get_session, scope="function")
 
 
-def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None = None) -> FastAPI:
+def create_app(
+    sessionmaker: async_sessionmaker | None = None,
+    token: str | None = None,
+    embedder: Embedder | None = None,
+) -> FastAPI:
     """Build the app. In production (`sessionmaker` omitted) the lifespan builds a
     pooled engine from AGENT_MEMORY_DB and disposes it on shutdown; tests inject a
     sessionmaker bound to their own test engine. Token falls back to
-    AGENT_MEMORY_API_TOKEN."""
+    AGENT_MEMORY_API_TOKEN. The embedder lands on `app.state.embedder`; when
+    omitted, the lifespan builds one from the environment with `make_embedder()`
+    (a `NullEmbedder` when the model is off or not installed)."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -64,6 +72,9 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
             app.state.sessionmaker = make_sessionmaker(engine)
         else:
             app.state.sessionmaker = sessionmaker
+        # Built here, not at construction, so the model loads once at server
+        # start and an app built for tests stays cheap.
+        app.state.embedder = embedder if embedder is not None else make_embedder()
         try:
             yield
         finally:
@@ -75,6 +86,8 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
     if sessionmaker is not None:
         # Available even when the ASGI lifespan isn't run (e.g. httpx ASGITransport tests).
         app.state.sessionmaker = sessionmaker
+    if embedder is not None:
+        app.state.embedder = embedder
     guard = [Depends(require_token)]
 
     @app.get("/health")
@@ -85,7 +98,8 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
     async def add_memory(body: MemoryIn, session: AsyncSession = SessionDep):
         mid = await repo.add(session, body.content, body.agent or "unknown",
                              body.project, body.tags, body.type)
-        return {"id": mid}
+        # Stored either way; the warnings only tell the writer what the entry lacks.
+        return {"id": mid, "warnings": warnings_for(body)}
 
     @app.get("/memories", response_model=list[MemoryOut], dependencies=guard)
     async def query_memories(
