@@ -26,6 +26,21 @@ def test_add_explicit_agent_chrome(cli):
     assert "✓ Memory #1 added (clu)" in cli.raw("add", "x", "--agent", "clu").stdout
 
 
+def test_add_prints_warnings_after_id(cli):
+    out = cli.raw("add", "tiny", "--type", "decision").stdout
+    lines = out.splitlines()
+    assert lines[0] == "✓ Memory #1 added (tester)"
+    assert lines[1:] == ["warning: short", "warning: no-project", "warning: no-reasoning"]
+    # The memory is stored even with warnings.
+    assert cli.get(1) is not None
+
+
+def test_add_clean_entry_prints_no_warnings(cli):
+    out = cli.raw("add", "Run the build on every push because the nightly was too slow.",
+                  "--project", "ci", "--type", "decision").stdout
+    assert "warning:" not in out
+
+
 def test_query_empty_chrome(cli):
     assert "No memories found." in cli.raw("query").stdout
 

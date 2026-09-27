@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .. import __version__
 from . import repository as repo
 from .auth import require_token
+from .checks import warnings_for
 from .db import make_engine, make_sessionmaker
 from .schemas import (
     AddResult,
@@ -85,7 +86,8 @@ def create_app(sessionmaker: async_sessionmaker | None = None, token: str | None
     async def add_memory(body: MemoryIn, session: AsyncSession = SessionDep):
         mid = await repo.add(session, body.content, body.agent or "unknown",
                              body.project, body.tags, body.type)
-        return {"id": mid}
+        # Stored either way; the warnings only tell the writer what the entry lacks.
+        return {"id": mid, "warnings": warnings_for(body)}
 
     @app.get("/memories", response_model=list[MemoryOut], dependencies=guard)
     async def query_memories(
