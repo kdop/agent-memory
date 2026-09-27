@@ -169,3 +169,20 @@ DSN the script prints and work there.
 ./scripts/db_copy.sh load "$AGENT_MEMORY_DB"      # the live DSN, read only
 ./scripts/db_copy.sh down
 ```
+
+### Replaying the write checks
+
+Before a write check goes live, see what it would have done to the entries already
+there. `scripts/replay_write_checks.py` walks the copy's memories in the order they
+were written and runs the duplicate check and the warnings on each one as if it were
+new. It prints one line per memory (id, date, project, `refuse #<id> <score>` or `ok`,
+then the warnings) and ends with the totals. It only reads: vectors are computed on
+the fly with the same model the server uses (the `[embed]` extra), and it refuses any
+DSN whose host is not `localhost` or `127.0.0.1`. `--since` and `--until` narrow the
+report to a range of days; `--embedder fake` swaps in a hash-based stand-in for a
+quick check of the script itself.
+
+```bash
+python scripts/replay_write_checks.py --dsn postgresql://memory:memory@127.0.0.1:5434/memory
+python scripts/replay_write_checks.py --dsn ... --since 2026-09-01 --until 2026-09-30
+```
