@@ -70,6 +70,9 @@ class MemoryOut(BaseModel):
     type: str | None = None
     tags: list[str] = []
     snippet: str | None = None
+    # Search only: the ts_rank of a keyword hit, the cosine of a semantic hit.
+    # None for rows that come from anything other than a search.
+    score: float | None = None
 
 
 class UpdateIn(BaseModel):

@@ -162,6 +162,85 @@ async def test_create_app_builds_embedder_from_env_at_startup(monkeypatch):
         await engine.dispose()
 
 
+# ── reindex at startup ───────────────────────────────────────────────────────
+async def _plant_rows_without_vectors(engine, *texts):
+    from agent_memory.server import repository as repo
+    from agent_memory.server.db import make_sessionmaker
+
+    async with make_sessionmaker(engine)() as session, session.begin():
+        return [await repo.add(session, t, "t", None, [], None) for t in texts]
+
+
+async def _stored_models(engine):
+    from sqlalchemy import select
+
+    from agent_memory.server.models import Memory
+
+    async with engine.connect() as conn:
+        stmt = select(Memory.id, Memory.embedding_model).order_by(Memory.id)
+        return dict((await conn.execute(stmt)).all())
+
+
+async def test_lifespan_reindexes_once_at_startup(caplog):
+    from agent_memory.server.app import create_app
+    from agent_memory.server.db import make_sessionmaker
+    from conftest import make_test_engine
+
+    engine = make_test_engine()
+    try:
+        ids = await _plant_rows_without_vectors(engine, "before the model", "also before")
+        app = create_app(sessionmaker=make_sessionmaker(engine), token="t",
+                         embedder=FakeEmbedder())
+        with caplog.at_level(logging.INFO, logger="agent_memory.server.app"):
+            async with app.router.lifespan_context(app):
+                pass
+        assert await _stored_models(engine) == {ids[0]: "fake", ids[1]: "fake"}
+        assert any("2 memories" in r.getMessage() for r in caplog.records)
+    finally:
+        await engine.dispose()
+
+
+async def test_lifespan_skips_reindex_without_a_model(monkeypatch):
+    from agent_memory.server.app import create_app
+    from agent_memory.server.db import make_sessionmaker
+    from conftest import make_test_engine
+
+    monkeypatch.setenv("AGENT_MEMORY_EMBED_MODEL", "off")
+    engine = make_test_engine()
+    try:
+        ids = await _plant_rows_without_vectors(engine, "stays bare")
+        app = create_app(sessionmaker=make_sessionmaker(engine), token="t")
+        async with app.router.lifespan_context(app):
+            pass
+        assert await _stored_models(engine) == {ids[0]: None}
+    finally:
+        await engine.dispose()
+
+
+async def test_lifespan_survives_a_failed_reindex(caplog):
+    from agent_memory.server.app import create_app
+    from agent_memory.server.db import make_sessionmaker
+    from conftest import make_test_engine
+
+    class BrokenEmbedder(FakeEmbedder):
+        def embed(self, texts):
+            raise RuntimeError("model blew up")
+
+    engine = make_test_engine()
+    try:
+        ids = await _plant_rows_without_vectors(engine, "never embedded")
+        app = create_app(sessionmaker=make_sessionmaker(engine), token="t",
+                         embedder=BrokenEmbedder())
+        with caplog.at_level(logging.ERROR, logger="agent_memory.server.app"):
+            async with app.router.lifespan_context(app):
+                # The server is up: the failure was logged, not raised.
+                assert app.state.embedder.model_name == "fake"
+        assert await _stored_models(engine) == {ids[0]: None}
+        assert any("reindex at startup failed" in r.getMessage() for r in caplog.records)
+    finally:
+        await engine.dispose()
+
+
 # ── the real model, once ─────────────────────────────────────────────────────
 @pytest.mark.embed
 def test_real_model_embeds_unit_vectors(monkeypatch):

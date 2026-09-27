@@ -265,3 +265,151 @@ async def test_add_without_model_never_refuses():
             assert again.json()["id"] != first.json()["id"]
     finally:
         await engine.dispose()
+
+
+# ── search modes ────────────────────────────────────────────────────────────
+def _seed_search(client):
+    """Four memories; the live server embeds each one with FakeEmbedder."""
+    ids = {}
+    for key, content in [("cat", "the cat sat on the mat"), ("dog", "a dog in the yard"),
+                         ("rain", "rain on the window"), ("code", "coffee before code")]:
+        ids[key] = client.post("/memories", json={"content": content, "agent": "t"},
+                               headers=_auth()).json()["id"]
+    return ids
+
+
+def test_search_default_mode_is_keyword_with_score(client):
+    ids = _seed_search(client)
+    resp = client.get("/memories/search", params={"q": "cat"}, headers=_auth())
+    assert resp.status_code == 200
+    hits = resp.json()
+    assert [h["id"] for h in hits] == [ids["cat"]]
+    assert hits[0]["score"] > 0
+    assert "cat" in hits[0]["snippet"]
+    same = client.get("/memories/search", params={"q": "cat", "mode": "keyword"},
+                      headers=_auth()).json()
+    assert same == hits
+
+
+def test_search_semantic_mode_over_http(client):
+    ids = _seed_search(client)
+    query = "the cat sat on the mat"
+    resp = client.get("/memories/search", params={"q": query, "mode": "semantic"},
+                      headers=_auth())
+    assert resp.status_code == 200
+    hits = resp.json()
+    assert len(hits) == 4
+    assert hits[0]["id"] == ids["cat"]
+    assert hits[0]["score"] == pytest.approx(1.0, abs=1e-6)
+    assert hits[0]["snippet"] is None
+    scores = [h["score"] for h in hits]
+    assert scores == sorted(scores, reverse=True)
+
+    limited = client.get("/memories/search", params={"q": query, "mode": "semantic", "limit": 2},
+                         headers=_auth()).json()
+    assert [h["id"] for h in limited] == [h["id"] for h in hits[:2]]
+
+
+def test_search_hybrid_mode_400_until_implemented(client):
+    resp = client.get("/memories/search", params={"q": "x", "mode": "hybrid"}, headers=_auth())
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "hybrid mode is not available yet"
+
+
+def test_search_unknown_mode_422(client):
+    resp = client.get("/memories/search", params={"q": "x", "mode": "fuzzy"}, headers=_auth())
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("embedder", ["null", "none"])
+async def test_search_semantic_without_model_400(embedder):
+    # An app whose embedder is a NullEmbedder (model off or not installed), or that
+    # has none at all, must refuse semantic search with a message that says why.
+    # Keyword search keeps working on the same app.
+    from agent_memory.server.app import create_app
+    from agent_memory.server.db import make_sessionmaker
+    from agent_memory.server.embedding import NullEmbedder
+
+    engine = make_test_engine()
+    kwargs = {"embedder": NullEmbedder("fastembed is not installed")} if embedder == "null" else {}
+    app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN, **kwargs)
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            resp = await c.get("/memories/search", params={"q": "x", "mode": "semantic"},
+                               headers=_auth())
+            assert resp.status_code == 400
+            detail = resp.json()["detail"]
+            assert detail.startswith("semantic search is not available")
+            if embedder == "null":
+                assert "fastembed is not installed" in detail
+            else:
+                assert "off or not installed" in detail
+            ok = await c.get("/memories/search", params={"q": "x"}, headers=_auth())
+            assert ok.status_code == 200
+    finally:
+        await engine.dispose()
+
+
+# ── POST /admin/reindex ─────────────────────────────────────────────────────
+async def _clear_vectors():
+    """Drop every stored vector, as if the rows were written before the model
+    existed. Goes straight to the table; no route can do this."""
+    from sqlalchemy import update
+
+    from agent_memory.server.models import Memory
+
+    engine = make_test_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(update(Memory).values(embedding=None, embedding_model=None))
+    finally:
+        await engine.dispose()
+
+
+def test_reindex_needs_token(client):
+    assert client.post("/admin/reindex").status_code == 401
+
+
+async def test_reindex_returns_the_count_and_fills_vectors(live_server):
+    from conftest import FakeEmbedder
+
+    url, _ = live_server
+    async with httpx.AsyncClient(base_url=url, timeout=30) as c:
+        ids = []
+        for text in ("first", "second", "third"):
+            body = (await c.post("/memories", json={"content": text, "agent": "t"},
+                                 headers=_auth())).json()
+            ids.append(body["id"])
+        await _clear_vectors()
+        assert (await _stored_vector(ids[0])) == (None, None)
+
+        resp = await c.post("/admin/reindex", headers=_auth())
+        assert resp.status_code == 200
+        assert resp.json() == {"updated": 3}
+        for mid, text in zip(ids, ("first", "second", "third")):
+            vec, model = await _stored_vector(mid)
+            assert model == "fake"
+            assert vec == pytest.approx(FakeEmbedder().embed([text])[0], abs=1e-6)
+
+        # Nothing left to do the second time.
+        resp = await c.post("/admin/reindex", headers=_auth())
+        assert resp.json() == {"updated": 0}
+
+
+async def test_reindex_503_when_the_server_has_no_model():
+    from agent_memory.server.app import create_app
+    from agent_memory.server.db import make_sessionmaker
+    from agent_memory.server.embedding import NullEmbedder
+
+    engine = make_test_engine()
+    app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN,
+                     embedder=NullEmbedder("embedding is off"))
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            resp = await c.post("/admin/reindex", headers=_auth())
+            assert resp.status_code == 503
+            assert "embedding is off" in resp.json()["detail"]
+    finally:
+        await engine.dispose()

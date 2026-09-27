@@ -257,3 +257,31 @@ def test_search_footer_says_when_limit_reached(cli):
     out = cli.raw("search", "needle", "--limit", "2").stdout
     assert "Found 2 matches (limit reached; use --all or --limit to see more)" in out
     assert "Found 3 matches" in cli.raw("search", "needle", "--all").stdout
+
+
+# ── reindex ──────────────────────────────────────────────────────────────────
+def test_reindex_chrome(cli):
+    import asyncio
+
+    from sqlalchemy import text
+
+    from conftest import make_test_engine
+
+    cli.raw("add", "one")
+    cli.raw("add", "two")
+
+    # Take the vectors away, as if the rows were written before the model existed.
+    async def _clear():
+        engine = make_test_engine()
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("UPDATE memories SET embedding = NULL, embedding_model = NULL"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_clear())
+
+    proc = cli.raw("reindex")
+    assert proc.returncode == 0
+    assert "✓ Reindexed 2 memories" in proc.stdout
+    assert "✓ Reindexed 0 memories" in cli.raw("reindex").stdout

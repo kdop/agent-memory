@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import delete as sql_delete
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -50,7 +50,7 @@ def _embed(embedder: Embedder | None, content: str) -> tuple[list[float] | None,
     return embedder.embed([content])[0], embedder.model_name
 
 
-def _dump(m: Memory, snippet: str | None = None) -> dict:
+def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> dict:
     # `embedding` and `embedding_model` stay out on purpose: they are internal.
     return {
         "id": m.id,
@@ -61,6 +61,7 @@ def _dump(m: Memory, snippet: str | None = None) -> dict:
         "type": m.type,
         "tags": [t.name for t in m.tags],
         "snippet": snippet,
+        "score": score,
     }
 
 
@@ -147,16 +148,8 @@ async def query(session, *, since_days=None, since=None, until=None, project=Non
     return [_dump(m) for m in rows]
 
 
-async def search(session, text, *, project=None, agent=None, since=None, tag=None, limit=None) -> list[dict]:
-    tsquery = func.plainto_tsquery("english", text)
-    snippet = func.ts_headline("english", Memory.content, tsquery, _HEADLINE)
-    rank = func.ts_rank(Memory.content_tsv, tsquery)
-
-    stmt = (
-        select(Memory, snippet.label("snippet"))
-        .options(selectinload(Memory.tags))
-        .where(Memory.content_tsv.op("@@")(tsquery))
-    )
+def _search_filters(stmt, *, project=None, agent=None, since=None, tag=None):
+    """The WHERE clauses every search mode shares."""
     if project:
         stmt = stmt.where(Memory.project == project)
     if agent:
@@ -165,11 +158,56 @@ async def search(session, text, *, project=None, agent=None, since=None, tag=Non
         stmt = stmt.where(Memory.timestamp >= _as_dt(since))
     if tag:
         stmt = stmt.where(Memory.tags.any(func.lower(Tag.name) == func.lower(tag)))
+    return stmt
+
+
+async def search(session, text, *, project=None, agent=None, since=None, tag=None, limit=None) -> list[dict]:
+    """Keyword search: rows whose words match `text`, best ts_rank first. Each
+    row carries its rank as `score` and a highlighted `snippet`."""
+    tsquery = func.plainto_tsquery("english", text)
+    snippet = func.ts_headline("english", Memory.content, tsquery, _HEADLINE)
+    rank = func.ts_rank(Memory.content_tsv, tsquery)
+
+    stmt = (
+        select(Memory, snippet.label("snippet"), rank.label("score"))
+        .options(selectinload(Memory.tags))
+        .where(Memory.content_tsv.op("@@")(tsquery))
+    )
+    stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag)
     stmt = stmt.order_by(rank.desc())
     if limit:
         stmt = stmt.limit(int(limit))
     rows = (await session.execute(stmt)).all()
-    return [_dump(m, snippet=snip) for m, snip in rows]
+    return [_dump(m, snippet=snip, score=float(score)) for m, snip, score in rows]
+
+
+async def search_semantic(session, embedder: Embedder, text, *, project=None, agent=None,
+                          since=None, tag=None, limit=None) -> list[dict]:
+    """Search by meaning: rows closest to `text` in vector space, best first.
+
+    Takes the same filters as `search`, but only rows that have a vector can
+    match. The whole candidate set is loaded and scored in Python with `cosine`;
+    that is fine at the sizes this system holds, and it needs no extension in
+    Postgres. Ties are broken by id, newest first. `limit` of 0 or None means
+    all rows. Each row carries the cosine as `score`; `snippet` is None, since
+    there are no matched words to highlight."""
+    query_vec = embedder.embed([text])[0]
+
+    stmt = (
+        select(Memory)
+        .options(selectinload(Memory.tags))
+        # Only vectors from the running model: another model's vector may have a
+        # different width, and cosine of two widths is an error, not a low score.
+        .where(Memory.embedding.is_not(None), Memory.embedding_model == embedder.model_name)
+    )
+    stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag)
+    rows = (await session.execute(stmt)).scalars().all()
+
+    scored = [(cosine(query_vec, m.embedding), m) for m in rows]
+    scored.sort(key=lambda pair: (-pair[0], -pair[1].id))
+    if limit:
+        scored = scored[: int(limit)]
+    return [_dump(m, score=score) for score, m in scored]
 
 
 async def get(session, mid: int) -> dict | None:
@@ -436,3 +474,33 @@ async def detach_tag(session, name, memory_ids=None) -> dict | None:
         stmt = stmt.where(MemoryTag.memory_id.in_(list(memory_ids)))
     res = await session.execute(stmt)
     return {"detached": res.rowcount}
+
+
+# ---- reindex: fill in missing or stale vectors -----------------------------
+async def reindex(session, embedder: Embedder | None, batch: int = 64) -> int:
+    """Give every row a vector from the current model.
+
+    Picks rows with no vector, or with a vector from another model, in id
+    order, `batch` rows at a time; embeds each batch with one call; writes the
+    vectors back. Returns the number of rows updated. Does nothing and returns
+    0 when there is no embedder or it has no model."""
+    if embedder is None or embedder.model_name is None:
+        return 0
+    model = embedder.model_name
+    stale = or_(Memory.embedding.is_(None), Memory.embedding_model.is_distinct_from(model))
+    updated = 0
+    last_id = 0
+    while True:
+        # Walk by id, not by offset: rows already done drop out of the filter,
+        # so an offset would skip rows.
+        stmt = (select(Memory).where(stale, Memory.id > last_id)
+                .order_by(Memory.id).limit(int(batch)))
+        rows = (await session.execute(stmt)).scalars().all()
+        if not rows:
+            return updated
+        vectors = embedder.embed([m.content for m in rows])
+        for m, vec in zip(rows, vectors):
+            m.embedding, m.embedding_model = vec, model
+        await session.flush()
+        updated += len(rows)
+        last_id = rows[-1].id

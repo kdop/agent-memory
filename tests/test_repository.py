@@ -340,3 +340,202 @@ async def test_find_duplicate_skips_rows_without_a_vector(session):
 
 def test_duplicate_threshold_value():
     assert repo.DUPLICATE_THRESHOLD == 0.92
+
+
+# ── semantic search ──────────────────────────────────────────────────────────
+async def _add_many(session, texts, embedder):
+    return [await repo.add(session, t, "t", None, _tags(), None, embedder=embedder)
+            for t in texts]
+
+
+async def test_search_semantic_orders_by_cosine(session):
+    from agent_memory.server.embedding import cosine
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    query = "the cat sat on the mat"
+    await _add_many(session, ["a dog in the yard", "rain on the window", "coffee before code"], emb)
+    exact = await repo.add(session, query, "t", None, _tags(), None, embedder=emb)
+
+    hits = await repo.search_semantic(session, emb, query)
+    assert len(hits) == 4
+    # The memory that says the same thing as the query is the closest one.
+    assert hits[0]["id"] == exact
+    assert hits[0]["score"] == pytest.approx(1.0, abs=1e-6)
+    assert hits[0]["snippet"] is None
+    # The rest come in falling order of cosine, and the scores are the real cosines.
+    scores = [h["score"] for h in hits]
+    assert scores == sorted(scores, reverse=True)
+    qv = emb.embed([query])[0]
+    for h in hits[1:]:
+        assert h["score"] == pytest.approx(cosine(qv, emb.embed([h["content"]])[0]), abs=1e-6)
+
+
+async def test_search_semantic_breaks_ties_by_id_descending(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    # Same text, same vector, same score: the newer row wins.
+    ids = await _add_many(session, ["twin", "twin"], emb)
+    hits = await repo.search_semantic(session, emb, "twin")
+    assert [h["id"] for h in hits] == sorted(ids, reverse=True)
+    assert hits[0]["score"] == pytest.approx(hits[1]["score"])
+
+
+async def test_search_semantic_applies_filters(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    a = await repo.add(session, "alpha thing", "ann", "alpha", _tags("x"), None, embedder=emb)
+    b = await repo.add(session, "beta thing", "bob", "beta", _tags("y"), None, embedder=emb)
+    c = await repo.add(session, "alpha other", "bob", "alpha", _tags("y"), None, embedder=emb)
+
+    async def ids(**filters):
+        return {h["id"] for h in await repo.search_semantic(session, emb, "q", **filters)}
+
+    assert await ids(project="alpha") == {a, c}
+    assert await ids(agent="bob") == {b, c}
+    assert await ids(tag="X") == {a}
+    assert await ids(project="alpha", agent="bob") == {c}
+    assert await ids(since="2999-01-01") == set()
+
+
+async def test_search_semantic_skips_rows_without_a_vector(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    with_vec = await repo.add(session, "has a vector", "t", None, _tags(), None, embedder=emb)
+    await repo.add(session, "has no vector", "t", None, _tags(), None)
+    hits = await repo.search_semantic(session, emb, "vector")
+    assert [h["id"] for h in hits] == [with_vec]
+
+
+async def test_search_semantic_applies_limit(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    await _add_many(session, ["one", "two", "three", "four"], emb)
+    everything = await repo.search_semantic(session, emb, "q")
+    assert len(everything) == 4
+    assert len(await repo.search_semantic(session, emb, "q", limit=0)) == 4
+    assert len(await repo.search_semantic(session, emb, "q", limit=None)) == 4
+    top2 = await repo.search_semantic(session, emb, "q", limit=2)
+    assert [h["id"] for h in top2] == [h["id"] for h in everything[:2]]
+
+
+async def test_search_keyword_carries_rank_as_score(session):
+    await repo.add(session, "fox fox fox", "t", None, _tags(), None)
+    await repo.add(session, "one fox among many other words here", "t", None, _tags(), None)
+    hits = await repo.search(session, "fox")
+    assert len(hits) == 2
+    assert all(isinstance(h["score"], float) and h["score"] > 0 for h in hits)
+    assert hits[0]["score"] >= hits[1]["score"]
+    assert hits[0]["snippet"] is not None
+    # Rows from a plain read carry no score.
+    assert (await repo.get(session, hits[0]["id"]))["score"] is None
+
+
+# ── reindex ──────────────────────────────────────────────────────────────────
+async def _set_model(session, mid, model):
+    """Pretend the row was embedded by another model, without touching the vector."""
+    from sqlalchemy import update as sql_update
+
+    from agent_memory.server.models import Memory
+
+    await session.execute(sql_update(Memory).where(Memory.id == mid).values(embedding_model=model))
+    session.expire_all()
+
+
+class _CountingEmbedder:
+    """FakeEmbedder that remembers how big each `embed` call was."""
+
+    model_name = "fake"
+    dim = 8
+
+    def __init__(self):
+        from conftest import FakeEmbedder
+
+        self._inner = FakeEmbedder()
+        self.calls = []
+
+    def embed(self, texts):
+        self.calls.append(len(texts))
+        return self._inner.embed(texts)
+
+
+async def test_reindex_fills_rows_without_vectors(session):
+    from conftest import FakeEmbedder
+
+    a = await repo.add(session, "no vector yet", "t", None, _tags(), None)
+    b = await repo.add(session, "also none", "t", None, _tags(), None)
+    assert await _stored_vector(session, a) == (None, None)
+
+    assert await repo.reindex(session, FakeEmbedder()) == 2
+    for mid, text in ((a, "no vector yet"), (b, "also none")):
+        vec, model = await _stored_vector(session, mid)
+        assert model == "fake"
+        assert vec == pytest.approx(_expected(text), abs=1e-6)
+
+
+async def test_reindex_replaces_vectors_from_another_model(session):
+    from conftest import FakeEmbedder
+
+    mid = await repo.add(session, "old model text", "t", None, _tags(), None,
+                         embedder=FakeEmbedder())
+    await _set_model(session, mid, "old-model")
+
+    assert await repo.reindex(session, FakeEmbedder()) == 1
+    vec, model = await _stored_vector(session, mid)
+    assert model == "fake"
+    assert vec == pytest.approx(_expected("old model text"), abs=1e-6)
+
+
+async def test_reindex_leaves_current_model_rows_alone(session):
+    emb = _CountingEmbedder()
+    mid = await repo.add(session, "already done", "t", None, _tags(), None, embedder=emb)
+    emb.calls.clear()
+
+    assert await repo.reindex(session, emb) == 0
+    assert emb.calls == []
+    vec, model = await _stored_vector(session, mid)
+    assert model == "fake"
+    assert vec == pytest.approx(_expected("already done"), abs=1e-6)
+
+
+async def test_reindex_touches_only_the_stale_rows(session):
+    from conftest import FakeEmbedder
+
+    done = await repo.add(session, "current", "t", None, _tags(), None, embedder=FakeEmbedder())
+    missing = await repo.add(session, "missing", "t", None, _tags(), None)
+    stale = await repo.add(session, "stale", "t", None, _tags(), None, embedder=FakeEmbedder())
+    await _set_model(session, stale, "old-model")
+
+    assert await repo.reindex(session, FakeEmbedder()) == 2
+    for mid, text in ((done, "current"), (missing, "missing"), (stale, "stale")):
+        vec, model = await _stored_vector(session, mid)
+        assert model == "fake"
+        assert vec == pytest.approx(_expected(text), abs=1e-6)
+    # A second run finds nothing left to do.
+    assert await repo.reindex(session, FakeEmbedder()) == 0
+
+
+async def test_reindex_embeds_in_batches_in_id_order(session):
+    for i in range(5):
+        await repo.add(session, f"row {i}", "t", None, _tags(), None)
+    emb = _CountingEmbedder()
+
+    assert await repo.reindex(session, emb, batch=2) == 5
+    assert emb.calls == [2, 2, 1]
+    for mid in range(1, 6):
+        vec, model = await _stored_vector(session, mid)
+        assert model == "fake"
+        assert vec == pytest.approx(_expected(f"row {mid - 1}"), abs=1e-6)
+
+
+async def test_reindex_without_model_does_nothing(session):
+    from agent_memory.server.embedding import NullEmbedder
+
+    mid = await repo.add(session, "left alone", "t", None, _tags(), None)
+    assert await repo.reindex(session, None) == 0
+    assert await repo.reindex(session, NullEmbedder()) == 0
+    assert await _stored_vector(session, mid) == (None, None)
