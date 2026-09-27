@@ -10,15 +10,20 @@ Postgres — the anti-drift guard. The whole suite is skipped unless
   before each test, so state is isolated and ids start at 1.
 - `driver` (function, parametrized cli/api/mcp): one driver per surface, built
   against the live server.
+- `retrieval_set` (function): loads `tests/data/retrieval_set.json` into the test
+  DB and returns its questions with the inserted ids filled in, so search quality
+  can be measured against known answers.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -143,3 +148,71 @@ def driver(request, live_server):
 
     url, token = live_server
     return DRIVER_FACTORIES[request.param](url, token)
+
+
+RETRIEVAL_SET_PATH = Path(__file__).resolve().parent / "data" / "retrieval_set.json"
+
+
+def load_retrieval_set(path=RETRIEVAL_SET_PATH):
+    """Read the retrieval set file and check it is well formed.
+
+    Returns `(memories, questions)`. Each memory has `content`, `project`, `type`
+    and `tags`; each question has `question`, `answers` (indexes into memories)
+    and `paraphrase`. A bad index or an empty answer list is a data error, so it
+    raises rather than letting a test score against nothing."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    memories, questions = data["memories"], data["questions"]
+    for n, q in enumerate(questions):
+        if not q["answers"]:
+            raise ValueError(f"question {n} has no answers: {q['question']!r}")
+        for i in q["answers"]:
+            if not 0 <= i < len(memories):
+                raise ValueError(f"question {n} points at memory {i}, "
+                                 f"but there are only {len(memories)}")
+        q.setdefault("paraphrase", False)
+    return memories, questions
+
+
+@pytest.fixture
+def retrieval_set():
+    """Insert the retrieval set's memories into the (already truncated) test DB.
+
+    Returns the questions, each with an `expected_ids` list holding the ids the
+    answering memories were given on insert. Goes through the repository, not
+    HTTP, so it needs no live server."""
+    from agent_memory.server import repository as repo
+    from agent_memory.server.db import make_sessionmaker
+    from agent_memory.server.schemas import TagIn
+
+    memories, questions = load_retrieval_set()
+
+    async def _load():
+        eng = make_test_engine()
+        try:
+            async with make_sessionmaker(eng)() as session, session.begin():
+                ids = []
+                for m in memories:
+                    tags = [TagIn(**t) for t in m.get("tags", [])]
+                    ids.append(await repo.add(session, m["content"], "retrieval-set",
+                                              m["project"], tags, m["type"]))
+                return ids
+        finally:
+            await eng.dispose()
+
+    ids = asyncio.run(_load())
+    return [dict(q, expected_ids=[ids[i] for i in q["answers"]]) for q in questions]
+
+
+def pytest_terminal_summary(terminalreporter):
+    """Print recorded retrieval scores at the end of the run, so they show even
+    under `-q`, where a passing test's stdout is hidden."""
+    lines = []
+    for rep in terminalreporter.stats.get("passed", []):
+        for name, value in getattr(rep, "user_properties", []):
+            if name.startswith("recall@"):
+                lines.append(f"{rep.nodeid}: {name} = {value}")
+    if lines:
+        terminalreporter.write_sep("-", "retrieval scores")
+        for line in lines:
+            terminalreporter.write_line(line)

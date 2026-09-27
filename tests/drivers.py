@@ -53,6 +53,25 @@ def _normalize_tag_names(names):
     return list(names)
 
 
+def recall_at(k, results, expected):
+    """Share of the expected ids found in the top `k` results.
+
+    `results` is a ranked list of memory ids, or of objects with an `id` field
+    (a `Memory`, or a dict from the repository). `expected` is the set of ids
+    that answer the question. Returns a float in [0, 1]: 1.0 when every expected
+    id is in the top k, 0.0 when none is. An empty `expected` is a data error."""
+    expected = set(expected)
+    if not expected:
+        raise ValueError("recall_at needs at least one expected id")
+    top = []
+    for r in results[:k]:
+        if isinstance(r, dict):
+            top.append(r["id"])
+        else:
+            top.append(getattr(r, "id", r))
+    return len(expected & set(top)) / len(expected)
+
+
 def _cli_launcher():
     """Interpreter prefix for launching the CLI subprocess. Under coverage
     (``AGENT_MEMORY_COV`` set) run the CLI under ``coverage run --parallel-mode``
