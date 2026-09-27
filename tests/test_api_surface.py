@@ -195,3 +195,73 @@ async def test_routes_embed_on_add_and_content_update(live_server):
 
         got = (await c.get(f"/memories/{mid}", headers=_auth())).json()
         assert "embedding" not in got and "embedding_model" not in got
+
+
+# ── duplicate refusal on add ─────────────────────────────────────────────────
+def _post(client, content, project=None, **params):
+    return client.post("/memories", params=params, headers=_auth(),
+                       json={"content": content, "project": project, "agent": "tester"})
+
+
+def test_add_identical_content_409_with_existing_id(client):
+    first = _post(client, "dup me", "proj")
+    assert first.status_code == 201
+    existing = first.json()["id"]
+
+    again = _post(client, "dup me", "proj")
+    assert again.status_code == 409
+    detail = again.json()["detail"]
+    assert detail["reason"] == "duplicate"
+    assert detail["existing_id"] == existing
+    assert detail["score"] == pytest.approx(1.0, abs=1e-5)
+    assert set(again.json()) == {"detail"}
+    assert set(detail) == {"reason", "existing_id", "score"}
+    # Nothing was inserted.
+    assert len(client.get("/memories", headers=_auth()).json()) == 1
+
+
+def test_add_same_content_in_another_project_is_stored(client):
+    assert _post(client, "dup me", "alpha").status_code == 201
+    assert _post(client, "dup me", "beta").status_code == 201
+    assert _post(client, "dup me", None).status_code == 201
+
+
+def test_add_same_content_with_no_project_twice_409(client):
+    assert _post(client, "dup me", None).status_code == 201
+    assert _post(client, "dup me", None).status_code == 409
+
+
+def test_add_force_stores_the_duplicate(client):
+    assert _post(client, "dup me", "proj").status_code == 201
+    forced = _post(client, "dup me", "proj", force="true")
+    assert forced.status_code == 201
+    assert forced.json()["id"] == 2
+    assert len(client.get("/memories", headers=_auth()).json()) == 2
+
+
+def test_add_force_false_still_checks(client):
+    assert _post(client, "dup me", "proj").status_code == 201
+    assert _post(client, "dup me", "proj", force="false").status_code == 409
+
+
+async def test_add_without_model_never_refuses():
+    # A separate in-process app with a NullEmbedder: no vectors, so the same
+    # content twice is stored twice.
+    from agent_memory.server.app import create_app
+    from agent_memory.server.db import make_sessionmaker
+    from agent_memory.server.embedding import NullEmbedder
+
+    engine = make_test_engine()
+    app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN,
+                     embedder=NullEmbedder())
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            body = {"content": "dup me", "project": "proj", "agent": "tester"}
+            first = await c.post("/memories", json=body, headers=_auth())
+            again = await c.post("/memories", json=body, headers=_auth())
+            assert first.status_code == 201
+            assert again.status_code == 201
+            assert again.json()["id"] != first.json()["id"]
+    finally:
+        await engine.dispose()

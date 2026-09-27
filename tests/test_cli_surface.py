@@ -201,6 +201,29 @@ def test_delete_none_found_exits_1(cli):
     assert "No memories found with the given IDs." in proc.stdout
 
 
+# ── duplicate refusal ────────────────────────────────────────────────────────
+def test_add_duplicate_exits_3_with_hint(cli):
+    assert "✓ Memory #1 added" in cli.raw("add", "dup me", "--project", "proj").stdout
+    proc = cli.raw("add", "dup me", "--project", "proj")
+    assert proc.returncode == 3
+    assert proc.stdout.strip() == (
+        "✗ Duplicate of memory #1 (score 1.00). Use 'memory update 1' or --force.")
+    assert "Traceback" not in proc.stderr
+    assert "Found 1 memories" in cli.raw("query").stdout   # nothing new stored
+
+
+def test_add_force_stores_the_duplicate(cli):
+    cli.raw("add", "dup me", "--project", "proj")
+    proc = cli.raw("add", "dup me", "--project", "proj", "--force")
+    assert proc.returncode == 0
+    assert "✓ Memory #2 added (tester)" in proc.stdout
+    assert "Found 2 memories" in cli.raw("query").stdout
+
+
+def test_add_help_lists_force(cli):
+    assert "--force" in cli.raw("add", "--help").stdout
+
+
 # ── offline error path (no traceback, exit 1) ────────────────────────────────
 def test_offline_api_prints_clean_error(cli):
     # Point the CLI at a dead endpoint: it must render a clean "cannot reach"

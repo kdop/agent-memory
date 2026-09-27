@@ -21,6 +21,29 @@ class ApiUnreachable(RuntimeError):
     message; the CLI renders it as a clean error instead of a traceback."""
 
 
+class DuplicateMemory(RuntimeError):
+    """The server refused an add (HTTP 409) because a memory this close already
+    exists in the same project. `existing_id` says which one; `score` is the
+    cosine between the two. Pass `force=True` to store it anyway."""
+
+    def __init__(self, existing_id: int, score: float):
+        self.existing_id = existing_id
+        self.score = score
+        super().__init__(f"duplicate of memory #{existing_id} (score {score:.2f})")
+
+
+def _duplicate_from(detail: str) -> DuplicateMemory | None:
+    """Build a DuplicateMemory from a 409 body, or None when the body is not
+    the duplicate shape `{"detail": {"reason": "duplicate", ...}}`."""
+    try:
+        d = json.loads(detail).get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(d, dict) or d.get("reason") != "duplicate":
+        return None
+    return DuplicateMemory(int(d["existing_id"]), float(d["score"]))
+
+
 class ApiClient:
     def __init__(self, base_url: str | None = None, token: str | None = None, timeout: int = 30):
         self.base_url = (base_url or resolve_api_url()).rstrip("/")
@@ -57,6 +80,10 @@ class ApiClient:
             if e.code == 404:
                 return 404, e.headers, None
             detail = e.read().decode(errors="replace")
+            if e.code == 409:
+                dup = _duplicate_from(detail)
+                if dup is not None:
+                    raise dup from e
             raise RuntimeError(f"{method} {path} → HTTP {e.code}: {detail}") from e
         except urllib.error.URLError as e:
             raise ApiUnreachable(
@@ -66,18 +93,22 @@ class ApiClient:
             ) from e
 
     # ---- operations ------------------------------------------------------
-    def add(self, content, agent, project, tags, mtype):
+    def add(self, content, agent, project, tags, mtype, force=False):
         """The new id only."""
-        mid, _ = self.add_with_warnings(content, agent, project, tags, mtype)
+        mid, _ = self.add_with_warnings(content, agent, project, tags, mtype, force=force)
         return mid
 
-    def add_with_warnings(self, content, agent, project, tags, mtype):
+    def add_with_warnings(self, content, agent, project, tags, mtype, force=False):
         """(id, warnings): warnings is the list of rule names the entry breaks
-        (see server/checks.py). The memory is stored either way."""
-        _, data = self._call("POST", "/memories", body={
+        (see server/checks.py). The memory is stored either way, unless the
+        server finds a near-duplicate in the same project: then it raises
+        `DuplicateMemory` and stores nothing. `force=True` skips that check."""
+        body = {
             "content": content, "agent": agent, "project": project,
             "tags": list(tags), "type": mtype,
-        })
+        }
+        params = {"force": "true"} if force else None
+        _, data = self._call("POST", "/memories", params=params, body=body)
         return data["id"], data.get("warnings") or []
 
     def query(self, *, since_days=None, since=None, until=None, project=None,

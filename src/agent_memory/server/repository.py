@@ -15,11 +15,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .embedding import Embedder
+from .embedding import Embedder, cosine
 from .models import Memory, MemoryTag, Tag
 
 # ts_headline markers match the old snippet() output so clients render identically.
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
+
+# A new memory whose vector scores this close to one already in its project is
+# a duplicate. Cosine on unit vectors: 1.0 is the same text, 0.92 is a rewording.
+DUPLICATE_THRESHOLD = 0.92
 
 
 def _since_days_window(n: int) -> tuple[datetime, None]:
@@ -87,6 +91,35 @@ async def add(session, content, agent, project, tags, mtype, embedder=None) -> i
         m.tags.append(await _get_or_create_tag(session, spec.name, spec.description))
     await session.flush()
     return m.id
+
+
+async def find_duplicate(session, embedder, content, project) -> tuple[int, float] | None:
+    """The memory that `content` would duplicate, as `(id, score)`, or None.
+
+    Embeds the content and compares it, in Python, with every vector in the
+    same project (`project=None` compares with the memories that have none).
+    Only vectors from the same model count: a vector from another model is not
+    comparable, and may not even have the same length. Returns the best match
+    when its cosine is at or above `DUPLICATE_THRESHOLD`. Without a model
+    (no embedder, or a `NullEmbedder`) there is nothing to compare, so it
+    returns None and nothing is ever refused."""
+    vector, model = _embed(embedder, content)
+    if vector is None:
+        return None
+    stmt = (
+        select(Memory.id, Memory.embedding)
+        .where(Memory.project.is_not_distinct_from(project))
+        .where(Memory.embedding.is_not(None))
+        .where(Memory.embedding_model == model)
+    )
+    best: tuple[int, float] | None = None
+    for mid, stored in await session.execute(stmt):
+        score = cosine(vector, list(stored))
+        if best is None or score > best[1]:
+            best = (mid, score)
+    if best is not None and best[1] >= DUPLICATE_THRESHOLD:
+        return best
+    return None
 
 
 async def query(session, *, since_days=None, since=None, until=None, project=None,

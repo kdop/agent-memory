@@ -23,6 +23,24 @@ def test_add_explicit_agent_is_attributed(driver):
     assert driver.get(mid).agent == "clu"
 
 
+def test_add_refuses_a_duplicate_in_the_same_project(driver):
+    # The live server embeds with FakeEmbedder, so identical text is a duplicate.
+    assert driver.add("dup me", project="proj") == 1
+    assert driver.add("dup me", project="proj") is None
+    assert len(driver.query()) == 1
+
+
+def test_add_same_content_in_another_project_is_not_a_duplicate(driver):
+    assert driver.add("dup me", project="alpha") == 1
+    assert driver.add("dup me", project="beta") == 2
+    assert driver.add("dup me") == 3
+
+
+def test_add_force_stores_a_duplicate(driver):
+    assert driver.add("dup me", project="proj") == 1
+    assert driver.add("dup me", project="proj", force=True) == 2
+
+
 # ---- query ----------------------------------------------------------------
 def test_query_empty(driver):
     assert driver.query() == []
