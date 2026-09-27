@@ -1,0 +1,64 @@
+name: plugin-version
+
+# The memory skill is delivered to other projects as a Claude Code plugin, and
+# `claude plugin update` only sees a new *version*, not new file contents. So:
+#   - on push to main: if the plugin changed and the version did not, bump the
+#     patch number and commit it (with [skip ci], like the coverage badge).
+#   - on pull_request: fail if the plugin changed without a version bump, so the
+#     bump is visible in the PR rather than added by the bot afterwards.
+
+on:
+  push:
+    branches: [main]
+    paths: ["skills/**", ".claude-plugin/**"]
+  pull_request:
+    paths: ["skills/**", ".claude-plugin/**"]
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Did the version change?
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+          else
+            base="${{ github.event.before }}"
+            # First push to a fresh branch has an all-zero "before"; nothing to compare.
+            if ! git cat-file -e "$base" 2>/dev/null; then base="HEAD~1"; fi
+          fi
+          old=$(git show "$base:.claude-plugin/plugin.json" 2>/dev/null | jq -r .version || echo "")
+          new=$(jq -r .version .claude-plugin/plugin.json)
+          echo "old=$old new=$new"
+          echo "bumped=$([ "$old" != "$new" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Require a bump on pull requests
+        if: github.event_name == 'pull_request' && steps.check.outputs.bumped == 'false'
+        run: |
+          echo "::error file=.claude-plugin/plugin.json::The plugin changed but \"version\" did not. Bump it so installed projects pick up the change."
+          exit 1
+
+      - name: Bump the patch version on main
+        if: github.event_name == 'push' && steps.check.outputs.bumped == 'false'
+        run: |
+          cur=$(jq -r .version .claude-plugin/plugin.json)
+          next=$(echo "$cur" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')
+          jq --arg v "$next" '.version = $v' .claude-plugin/plugin.json > plugin.json.tmp
+          mv plugin.json.tmp .claude-plugin/plugin.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .claude-plugin/plugin.json
+          git commit -m "Bump memory plugin to ${next} [skip ci]"
+          # The coverage job may push a badge commit on the same push; rebase over it.
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
