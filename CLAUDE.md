@@ -8,32 +8,17 @@ project that logs to this system.
 > Postgres is the only backend. There is no SQLite path left in the code — don't add
 > one back.
 
-## The tool
+## Where things are
 
-- `agent_memory` — Python package (`src/`). **API-first, Postgres-only.** One async
-  FastAPI service (`server/`, `[server]` extra) is the only thing that touches the DB;
-  the `memory-cli` command (`cli.py`) and the MCP server (`mcp_server.py`, `[mcp]` extra)
-  are thin HTTP clients over `ApiClient` (`client.py`). `memory-cli` on PATH is a shim
-  onto `agent_memory.cli:main`. **Client surface (CLI + MCP + urllib `ApiClient`) is
-  stdlib-only.**
-- `client.py`/`config.py` are the client seam: they resolve an **endpoint + token**
-  (`AGENT_MEMORY_API` env → config `api_url` → `http://127.0.0.1:8099`;
-  `AGENT_MEMORY_API_TOKEN` env → config `api_token`) — never a DB. The server resolves the
-  DSN from `AGENT_MEMORY_DB` (a `postgresql://` URL). The Pydantic contract is identical
-  across CLI, API, and MCP (anti-drift).
-- **Server stack:** SQLAlchemy 2.0 async + asyncpg; `server/models.py` is the schema
-  source of truth; **Alembic** owns DDL (`alembic upgrade head`). FTS is a generated
-  `content_tsv` tsvector + GIN index.
-- Run the server: `AGENT_MEMORY_DB=postgresql://… AGENT_MEMORY_API_TOKEN=… python -m
-  agent_memory.server` (fails closed without a token; host/port via
-  `AGENT_MEMORY_HOST`/`AGENT_MEMORY_PORT`).
-- Docs: `skills/memory/SKILL.md` (logging protocol — the Claude Code skill; this repo
-  is also a plugin marketplace (`.claude-plugin/`) so other projects install it with
-  `claude plugin install memory@agent-memory --scope project`; this repo itself links it
-  at `.claude/skills/memory/SKILL.md`), `ARCHITECTURE.md` (layout + schema + design).
+- `README.md` — install, run, the three surfaces (CLI, API, MCP), the dashboard.
+- `ARCHITECTURE.md` — package layout, the client/server seam, schema, design decisions.
+- `skills/memory/SKILL.md` — the logging protocol, shipped as the `memory` plugin from
+  this repo's marketplace (`.claude-plugin/`). This repo links it at
+  `.claude/skills/memory/SKILL.md`.
+- Command reference is `memory --help`, not markdown.
 - **After cloning, run `git config core.hooksPath .githooks`.** The pre-commit hook bumps
   the plugin version whenever the skill changes; without a bump, installed projects
-  never see the change. Command reference is `memory --help`, not markdown.
+  never see the change.
 
 ## Rules
 
