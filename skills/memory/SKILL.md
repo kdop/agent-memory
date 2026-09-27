@@ -1,6 +1,17 @@
 ---
 name: memory
-description: Persistent cross-session memory for agents via `memory-cli` (the agent-memory service). Use at the start of every session to load context for the current project, and while working to log decisions, lessons, preferences and notes as they happen. Also for querying, searching, updating or deleting past memories, or when the user says "remember", "log this", "what did we decide", or asks what happened in a project. Log only what will still matter in later sessions: durable decisions, lessons, preferences and facts. Do not log diary-style entries of what was done. Every entry must carry the why, not just the what: the reasoning behind a decision, the alternatives rejected, the cause of a lesson. The what is usually visible in git; the why is not, and it is what a future session needs. Never write down anything that can be retrieved from git history.
+description: |
+  Persistent cross-session memory for agents via `memory-cli` (the agent-memory service).
+  Use at the start of every session to load context for the current project, while
+  working to log decisions, lessons, preferences and notes as they happen, and to query,
+  search, update or delete past memories, or when the user says "remember", "log this",
+  "what did we decide", or asks what happened in a project.
+  Rules. Numbers are permanent ids: a deleted rule's number is never reused.
+  1. Log only what will still matter in later sessions: durable decisions, lessons, preferences and facts.
+  2. Do not log diary-style entries of what was done.
+  3. Every entry carries the why, not just the what: the reasoning behind a decision, the alternatives rejected, the cause of a lesson.
+  4. Never write down anything that can be retrieved from git history.
+  5. Project facts and data go in the project's own folder, tracked by git, not in the memory DB. Write them the way that project's user has instructed. With no instruction, write them at the project's top level in a folder named `notes/`, one markdown file per ISO week named `<year>_<week>.md` (for example `2026_39.md`).
 ---
 
 # Agent memory
