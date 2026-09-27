@@ -42,10 +42,12 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
 - **Tags** are a JSON array of `{"name", "description"}`; `description` is optional
   and a new tag without one defaults to its own name. Tag liberally — tags are what
   make future searches land.
-- **Log:** decisions, bug fixes, features, and non-obvious things you learn or get
-  wrong, as they happen.
-- **Skip:** anything a future session could reconstruct from `git log` alone
-  ("did X, shipped Y" with no reasoning).
+- **Log:** what will still matter in a later session — decisions with their reasoning
+  and the alternatives rejected, lessons with their cause, stated preferences, a
+  deliberate non-action, an environment gotcha. Log as it happens, not at the end.
+- **Skip:** diary entries. Before adding, ask: could a future session reconstruct this
+  from `git log`? If yes, skip it. "Did X, shipped Y" with no reasoning is git's job.
+  The what is usually in git; the why is not, and the why is what to write down.
 - An agent's own cross-project working rules go under `--project=<agent-name>`.
 - Never write memories to Claude Code's md-file memory (`~/.claude/.../memory/*.md`):
   it is neither shared nor checked in. The DB is the single source of truth.
