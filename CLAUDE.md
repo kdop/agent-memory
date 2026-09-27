@@ -1,5 +1,7 @@
 # CLAUDE.md — working on agent-memory
 
+Persona: `franky` (served by the `personas` MCP - ignore if you don't have this MCP available)
+
 This repo **is the memory system** — the `memory-cli` client, the FastAPI service that
 owns the data, and the shared Postgres DB behind it that gives every agent session
 continuity. You're the maintainer *and* a user, so changes here affect every other
