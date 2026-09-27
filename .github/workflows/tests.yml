@@ -63,6 +63,12 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The badge step commits to main. The workflow token can't: main is
+          # behind a ruleset and personal repos can't put the Actions app on its
+          # bypass list. A write deploy key listed under "Deploy keys" can.
+          # Empty on fork PRs, where checkout falls back to the token.
+          ssh-key: ${{ secrets.COVERAGE_BADGE_DEPLOY_KEY }}
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
