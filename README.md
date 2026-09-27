@@ -151,3 +151,19 @@ Postgres is the only backend. The server reads its DSN from `AGENT_MEMORY_DB`
 **Alembic** (`alembic upgrade head`) with the SQLAlchemy models as the source of truth.
 The database is **live and shared** across all agent sessions — back it up out-of-band.
 Clients never see the DSN; they only ever talk to the API.
+
+### Working on a copy
+
+Never develop against the live database. `scripts/db_copy.sh` gives you a copy in a
+podman container named `memcopy` (Postgres 16 on `127.0.0.1:5434`, data in the volume
+`memcopy-data`). `up` starts it, `load <source-dsn>` dumps the source into it and
+prints the row counts of `memories`, `tags` and `memory_tags` from both sides (exit 1
+if they differ), `verify <source-dsn>` repeats the count check, and `down` removes the
+container and the volume. The source is only ever read. Point `AGENT_MEMORY_DB` at the
+DSN the script prints and work there.
+
+```bash
+./scripts/db_copy.sh up
+./scripts/db_copy.sh load "$AGENT_MEMORY_DB"      # the live DSN, read only
+./scripts/db_copy.sh down
+```
