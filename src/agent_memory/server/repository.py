@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from .embedding import Embedder
 from .models import Memory, MemoryTag, Tag
 
 # ts_headline markers match the old snippet() output so clients render identically.
@@ -36,7 +37,17 @@ def _as_dt(v):
     return datetime.fromisoformat(str(v))
 
 
+def _embed(embedder: Embedder | None, content: str) -> tuple[list[float] | None, str | None]:
+    """The vector and model name to store for `content`. Both are None when there
+    is no embedder or it has no model (a `NullEmbedder`), so a server without the
+    model still writes memories, just without vectors."""
+    if embedder is None or embedder.model_name is None:
+        return None, None
+    return embedder.embed([content])[0], embedder.model_name
+
+
 def _dump(m: Memory, snippet: str | None = None) -> dict:
+    # `embedding` and `embedding_model` stay out on purpose: they are internal.
     return {
         "id": m.id,
         "timestamp": m.timestamp.isoformat(sep=" ", timespec="seconds") if m.timestamp else None,
@@ -67,8 +78,10 @@ async def _get_or_create_tag(session: AsyncSession, name: str, description: str 
 
 
 # ---- operations -----------------------------------------------------------
-async def add(session, content, agent, project, tags, mtype) -> int:
-    m = Memory(content=content, agent=agent, project=project, type=mtype)
+async def add(session, content, agent, project, tags, mtype, embedder=None) -> int:
+    embedding, model = _embed(embedder, content)
+    m = Memory(content=content, agent=agent, project=project, type=mtype,
+               embedding=embedding, embedding_model=model)
     session.add(m)  # add before wiring tags so the back-reference resolves cleanly
     for spec in tags:
         m.tags.append(await _get_or_create_tag(session, spec.name, spec.description))
@@ -136,7 +149,8 @@ async def get(session, mid: int) -> dict | None:
 
 
 async def update(session, mid, *, content=None, project=None, mtype=None,
-                 set_tags=None, add_tags=None, remove_tags=None) -> list[str] | None:
+                 set_tags=None, add_tags=None, remove_tags=None,
+                 embedder=None) -> list[str] | None:
     m = (
         await session.execute(
             select(Memory).options(selectinload(Memory.tags)).where(Memory.id == mid)
@@ -148,6 +162,9 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
 
     if content is not None and content != m.content:
         m.content = content
+        # New text, new vector. Without a model this clears the old one, since a
+        # vector of the old text would be wrong for the new one.
+        m.embedding, m.embedding_model = _embed(embedder, content)
         changes.append("content")
     if project is not None:
         m.project = project or None

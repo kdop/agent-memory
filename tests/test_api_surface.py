@@ -152,3 +152,46 @@ def test_add_clean_entry_has_empty_warnings(client):
     )
     assert resp.status_code == 201
     assert resp.json()["warnings"] == []
+
+
+# ── embedding on write ──────────────────────────────────────────────────────
+async def _stored_vector(mid):
+    """Read the two internal columns straight from the table; no route returns them."""
+    from sqlalchemy import select
+
+    from agent_memory.server.models import Memory
+
+    engine = make_test_engine()
+    try:
+        async with engine.connect() as conn:
+            stmt = select(Memory.embedding, Memory.embedding_model).where(Memory.id == mid)
+            return (await conn.execute(stmt)).one()
+    finally:
+        await engine.dispose()
+
+
+async def test_routes_embed_on_add_and_content_update(live_server):
+    # The live server runs with FakeEmbedder, so POST must store a vector and
+    # PATCH of the content must replace it, while PATCH of tags keeps it.
+    from conftest import FakeEmbedder
+
+    url, _ = live_server
+    async with httpx.AsyncClient(base_url=url, timeout=30) as c:
+        body = (await c.post("/memories", json={"content": "sent over http", "agent": "t"},
+                             headers=_auth())).json()
+        mid = body["id"]
+        assert "embedding" not in body
+        vec, model = await _stored_vector(mid)
+        assert model == "fake"
+        assert vec == pytest.approx(FakeEmbedder().embed(["sent over http"])[0], abs=1e-6)
+
+        await c.patch(f"/memories/{mid}", json={"add_tags": [{"name": "x"}]}, headers=_auth())
+        assert (await _stored_vector(mid))[0] == pytest.approx(vec, abs=1e-6)
+
+        await c.patch(f"/memories/{mid}", json={"content": "changed over http"}, headers=_auth())
+        vec2, model2 = await _stored_vector(mid)
+        assert model2 == "fake"
+        assert vec2 == pytest.approx(FakeEmbedder().embed(["changed over http"])[0], abs=1e-6)
+
+        got = (await c.get(f"/memories/{mid}", headers=_auth())).json()
+        assert "embedding" not in got and "embedding_model" not in got

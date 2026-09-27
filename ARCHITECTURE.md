@@ -129,7 +129,10 @@ expressed with SQLAlchemy `func`, not string SQL.
 **Add** — insert a `Memory`; for each `{"name", "description"}` tag, reuse the existing
 row (updating its descriptor only if a new non-blank one is given) or create it
 (defaulting a new tag's descriptor to its own name), then link in `memory_tags`;
-`content_tsv` is generated automatically. **Query** — build a `SELECT` with
+`content_tsv` is generated automatically. When the server has an embedding model, `add` also
+stores the content's vector in `embedding` and the model's name in `embedding_model`;
+an update that changes the content recomputes both, any other update leaves them alone.
+With no model both stay NULL. **Query** — build a `SELECT` with
 `selectinload(tags)` and `WHERE` clauses from the filters (date window, project, agent,
 type, `tags.any(lower(name)=…)`), `ORDER BY timestamp DESC`. **Search** — as above under
 Full-text search. One `AsyncSession` per request, committed if the handler returns and
