@@ -73,7 +73,7 @@ memory show 42
 memory tags ; memory projects ; memory stats
 ```
 
-`query` returns up to 100 by default, `search` 20; raise with `--limit`.
+`query` returns up to 100 by default, `search` 20, and the footer says when more exist; `--all` (or `--limit 0`) returns every match.
 
 ## Fix or remove
 

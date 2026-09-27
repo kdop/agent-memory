@@ -196,3 +196,26 @@ def test_offline_api_prints_clean_error(cli):
     assert "cannot reach the memory API" in proc.stderr
     assert "Traceback" not in proc.stderr
     assert "Traceback" not in proc.stdout
+
+
+# ── --all / truncation footer ────────────────────────────────────────────────
+def test_query_footer_says_when_truncated(cli):
+    for i in range(3):
+        cli.raw("add", f"m{i}")
+    out = cli.raw("query", "--limit", "2").stdout
+    assert "Found 2 of 3 memories (use --all or --limit to see more)" in out
+
+
+def test_query_all_flag_returns_everything(cli):
+    for i in range(3):
+        cli.raw("add", f"m{i}")
+    out = cli.raw("query", "--all", "--limit", "1").stdout   # --all wins
+    assert "Found 3 memories" in out
+
+
+def test_search_footer_says_when_limit_reached(cli):
+    for i in range(3):
+        cli.raw("add", f"needle {i}")
+    out = cli.raw("search", "needle", "--limit", "2").stdout
+    assert "Found 2 matches (limit reached; use --all or --limit to see more)" in out
+    assert "Found 3 matches" in cli.raw("search", "needle", "--all").stdout

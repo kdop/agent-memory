@@ -56,10 +56,16 @@ def add_memory(args, client):
     print(f"✓ Memory #{mid} added ({agent})")
 
 
+def _effective_limit(args):
+    """--all wins over --limit; limit 0 means no limit on the server."""
+    return 0 if getattr(args, "all", False) else args.limit
+
+
 def query_memories(args, client):
-    rows = client.query(since_days=args.since_days, since=args.since, until=args.until,
-                        project=args.project, agent=args.agent, tag=args.tag,
-                        mtype=args.type, limit=args.limit)
+    rows, total = client.query_with_total(
+        since_days=args.since_days, since=args.since, until=args.until,
+        project=args.project, agent=args.agent, tag=args.tag,
+        mtype=args.type, limit=_effective_limit(args))
     if not rows:
         print("No memories found.")
         return
@@ -68,12 +74,16 @@ def query_memories(args, client):
         _print_meta(row)
         print(f"\n{row['content']}")
     print(f"\n{FOOT}")
-    print(f"Found {len(rows)} memories")
+    if total > len(rows):
+        print(f"Found {len(rows)} of {total} memories (use --all or --limit to see more)")
+    else:
+        print(f"Found {len(rows)} memories")
 
 
 def search_memories(args, client):
+    limit = _effective_limit(args)
     rows = client.search(args.query, project=args.project, agent=args.agent,
-                         since=args.since, tag=args.tag, limit=args.limit)
+                         since=args.since, tag=args.tag, limit=limit)
     if not rows:
         print(f"No memories found for: {args.query}")
         return
@@ -83,7 +93,10 @@ def search_memories(args, client):
         _print_meta(row)
         print(f"\n{row['snippet']}\n")
     print(f"{FOOT}")
-    print(f"Found {len(rows)} matches")
+    if limit and len(rows) >= limit:
+        print(f"Found {len(rows)} matches (limit reached; use --all or --limit to see more)")
+    else:
+        print(f"Found {len(rows)} matches")
 
 
 def list_tags(args, client):
@@ -238,7 +251,8 @@ def main():
     query_parser.add_argument("--agent", help="Filter by agent")
     query_parser.add_argument("--tag", help="Filter by tag")
     query_parser.add_argument("--type", help="Filter by type")
-    query_parser.add_argument("--limit", type=int, help="Limit results")
+    query_parser.add_argument("--limit", type=int, help="Limit results (default 100; 0 = all)")
+    query_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     query_parser.set_defaults(func=query_memories)
 
     search_parser = subparsers.add_parser("search", help="Full-text search")
@@ -247,7 +261,8 @@ def main():
     search_parser.add_argument("--agent", help="Filter by agent")
     search_parser.add_argument("--tag", help="Filter by tag")
     search_parser.add_argument("--since", help="Since date (YYYY-MM-DD)")
-    search_parser.add_argument("--limit", type=int, default=20, help="Limit results")
+    search_parser.add_argument("--limit", type=int, default=20, help="Limit results (default 20; 0 = all)")
+    search_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     search_parser.set_defaults(func=search_memories)
 
     tags_parser = subparsers.add_parser("tags", help="List all tags")
