@@ -148,6 +148,12 @@ class ApiClient:
         _, data = self._call("GET", "/stats")
         return data
 
+    def reindex(self):
+        """Ask the server to give every memory a vector from its current model.
+        Returns the number of rows updated."""
+        _, data = self._call("POST", "/admin/reindex")
+        return data["updated"]
+
 
 def get_client():
     """The resolved API client for CLI/MCP."""

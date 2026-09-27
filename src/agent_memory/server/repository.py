@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import delete as sql_delete
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -163,7 +163,9 @@ async def search_semantic(session, embedder: Embedder, text, *, project=None, ag
     stmt = (
         select(Memory)
         .options(selectinload(Memory.tags))
-        .where(Memory.embedding.is_not(None))
+        # Only vectors from the running model: another model's vector may have a
+        # different width, and cosine of two widths is an error, not a low score.
+        .where(Memory.embedding.is_not(None), Memory.embedding_model == embedder.model_name)
     )
     stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag)
     rows = (await session.execute(stmt)).scalars().all()
@@ -439,3 +441,33 @@ async def detach_tag(session, name, memory_ids=None) -> dict | None:
         stmt = stmt.where(MemoryTag.memory_id.in_(list(memory_ids)))
     res = await session.execute(stmt)
     return {"detached": res.rowcount}
+
+
+# ---- reindex: fill in missing or stale vectors -----------------------------
+async def reindex(session, embedder: Embedder | None, batch: int = 64) -> int:
+    """Give every row a vector from the current model.
+
+    Picks rows with no vector, or with a vector from another model, in id
+    order, `batch` rows at a time; embeds each batch with one call; writes the
+    vectors back. Returns the number of rows updated. Does nothing and returns
+    0 when there is no embedder or it has no model."""
+    if embedder is None or embedder.model_name is None:
+        return 0
+    model = embedder.model_name
+    stale = or_(Memory.embedding.is_(None), Memory.embedding_model.is_distinct_from(model))
+    updated = 0
+    last_id = 0
+    while True:
+        # Walk by id, not by offset: rows already done drop out of the filter,
+        # so an offset would skip rows.
+        stmt = (select(Memory).where(stale, Memory.id > last_id)
+                .order_by(Memory.id).limit(int(batch)))
+        rows = (await session.execute(stmt)).scalars().all()
+        if not rows:
+            return updated
+        vectors = embedder.embed([m.content for m in rows])
+        for m, vec in zip(rows, vectors):
+            m.embedding, m.embedding_model = vec, model
+        await session.flush()
+        updated += len(rows)
+        last_id = rows[-1].id
