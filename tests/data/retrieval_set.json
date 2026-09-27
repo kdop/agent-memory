@@ -1,0 +1,212 @@
+{
+  "about": [
+    "A fixed retrieval test set: memories with known answers to a fixed list of questions.",
+    "All projects, people and events here are invented.",
+    "Each question lists the indexes (0-based) of the memories that answer it.",
+    "Questions marked paraphrase use different words than their answer, so word search alone cannot find them."
+  ],
+  "memories": [
+    {
+      "project": "orchard",
+      "type": "decision",
+      "content": "Picked Postgres over MySQL for the orchard order store. We need row-level locking for stock counts and the team already runs Postgres for two other services. MySQL was rejected because nobody here has run it in production.",
+      "tags": [{"name": "database", "description": "storage engine choices"}, {"name": "orders"}]
+    },
+    {
+      "project": "orchard",
+      "type": "decision",
+      "content": "Stock counts are decremented inside the same transaction that creates the order line. A separate reserve step was tried first and left ghost reservations whenever the client dropped mid-flow.",
+      "tags": [{"name": "orders"}, {"name": "transactions", "description": "database transaction boundaries"}]
+    },
+    {
+      "project": "orchard",
+      "type": "lesson",
+      "content": "The nightly reindex on the orders table caused a four minute outage because it ran with a full table lock. Cause: the index was rebuilt with plain REINDEX instead of CONCURRENTLY. Always use the concurrent form on live tables.",
+      "tags": [{"name": "database"}, {"name": "outage", "description": "incidents that took a service down"}]
+    },
+    {
+      "project": "orchard",
+      "type": "preference",
+      "content": "The owner wants order ids shown to customers as short base32 strings, never raw integers. Sequential numbers leak how many orders exist.",
+      "tags": [{"name": "ids"}, {"name": "ux"}]
+    },
+    {
+      "project": "orchard",
+      "type": "note",
+      "content": "Order export runs as a cron job at 02:00 and writes one CSV per warehouse to the shared bucket. Files older than 30 days are pruned by the same job.",
+      "tags": [{"name": "export"}, {"name": "cron", "description": "scheduled jobs"}]
+    },
+    {
+      "project": "orchard",
+      "type": "decision",
+      "content": "Prices are stored as integer cents in a BIGINT column, not as floats or NUMERIC. Floats round wrong and NUMERIC made the reporting queries twice as slow in our benchmark.",
+      "tags": [{"name": "money", "description": "how amounts are stored and shown"}, {"name": "database"}]
+    },
+    {
+      "project": "orchard",
+      "type": "lesson",
+      "content": "A refund was issued twice because the webhook from the payment provider was delivered twice and the handler was not idempotent. Fix: store the provider event id in a unique column and ignore repeats.",
+      "tags": [{"name": "payments"}, {"name": "webhooks"}, {"name": "idempotency", "description": "safe to repeat"}]
+    },
+    {
+      "project": "orchard",
+      "type": "preference",
+      "content": "Keep API error bodies in the shape {error: {code, message}}. The owner rejected free-form strings because the mobile client parses the code field.",
+      "tags": [{"name": "api"}, {"name": "errors"}]
+    },
+    {
+      "project": "lantern",
+      "type": "decision",
+      "content": "Lantern renders the log view with a virtual list that only draws the visible rows. Drawing every line made the browser freeze on files over 50 MB. A paged view was rejected because people scroll through logs, they do not page.",
+      "tags": [{"name": "frontend"}, {"name": "performance", "description": "speed and memory use"}]
+    },
+    {
+      "project": "lantern",
+      "type": "lesson",
+      "content": "Timestamps in mixed time zones made the merged view sort wrong. Cause: two agents wrote local time without an offset. Now every log line is normalised to UTC when it is parsed, and lines without a zone are assumed UTC and flagged.",
+      "tags": [{"name": "time", "description": "clocks, zones and timestamps"}, {"name": "parsing"}]
+    },
+    {
+      "project": "lantern",
+      "type": "preference",
+      "content": "Command-line flags use kebab-case and every flag has a one-line help string. Short forms only for the five most common flags; the owner found a cluttered help screen hard to read.",
+      "tags": [{"name": "cli"}, {"name": "style"}]
+    },
+    {
+      "project": "lantern",
+      "type": "note",
+      "content": "The colour theme is read from the theme.toml file in the user config folder. If the file is missing the built-in dark theme is used and no warning is printed.",
+      "tags": [{"name": "config"}, {"name": "theme"}]
+    },
+    {
+      "project": "lantern",
+      "type": "decision",
+      "content": "Search inside a log file uses a plain substring scan with a small in-memory index of line offsets, not a full regex engine on every keystroke. Regex on each keystroke was rejected as too slow on large files; a regex mode is available behind a toggle.",
+      "tags": [{"name": "search"}, {"name": "performance"}]
+    },
+    {
+      "project": "lantern",
+      "type": "lesson",
+      "content": "Reading a log file that is still being written to returned half lines. Cause: the reader treated end-of-file as end-of-line. Now a trailing partial line is held back until a newline arrives.",
+      "tags": [{"name": "parsing"}, {"name": "tail", "description": "following a growing file"}]
+    },
+    {
+      "project": "lantern",
+      "type": "decision",
+      "content": "Lantern is shipped as a single static binary with no runtime dependencies. Users install it on servers where they cannot add packages; a Python distribution was rejected for that reason.",
+      "tags": [{"name": "packaging"}, {"name": "distribution"}]
+    },
+    {
+      "project": "tidepool",
+      "type": "decision",
+      "content": "Pipeline jobs are idempotent and keyed by the day they process. Re-running a day replaces that day's output rather than appending. This was chosen so a failed night can be re-run without a cleanup step.",
+      "tags": [{"name": "pipeline"}, {"name": "idempotency"}]
+    },
+    {
+      "project": "tidepool",
+      "type": "lesson",
+      "content": "The daily aggregate was off by one day for a week after the clocks changed. Cause: the job used local midnight to cut the day. Days are now cut at UTC midnight and the report labels say so.",
+      "tags": [{"name": "time"}, {"name": "bug"}]
+    },
+    {
+      "project": "tidepool",
+      "type": "note",
+      "content": "Raw input files land in the inbox bucket under year/month/day prefixes. The loader picks up anything under yesterday's prefix and ignores files whose name does not end in .jsonl.",
+      "tags": [{"name": "ingest"}, {"name": "storage"}]
+    },
+    {
+      "project": "tidepool",
+      "type": "preference",
+      "content": "Do not add a new pipeline stage without a sample input file checked in next to it. The owner wants every stage runnable on its own from a fixture.",
+      "tags": [{"name": "testing"}, {"name": "pipeline"}]
+    },
+    {
+      "project": "tidepool",
+      "type": "decision",
+      "content": "The scheduler stays a plain cron entry rather than a workflow engine. There are four jobs with a fixed order; a workflow engine would add a service to run and watch for very little gain. Revisit if the job count passes ten.",
+      "tags": [{"name": "scheduling"}, {"name": "tooling", "description": "tools we chose or turned down"}]
+    },
+    {
+      "project": "tidepool",
+      "type": "lesson",
+      "content": "Out-of-memory crashes on the join stage came from loading both sides fully. The fix was to sort both inputs by key and stream them as a merge join; memory use went from 12 GB to under 1 GB.",
+      "tags": [{"name": "performance"}, {"name": "memory"}]
+    },
+    {
+      "project": "tidepool",
+      "type": "note",
+      "content": "Job output goes to the warehouse table daily_metrics. Each row carries the pipeline version that produced it so bad runs can be found and dropped later.",
+      "tags": [{"name": "warehouse"}, {"name": "versioning"}]
+    },
+    {
+      "project": "tidepool",
+      "type": "decision",
+      "content": "Secrets for the pipeline are read from environment variables set by the runner, never from a file in the repo. A checked-in encrypted file was rejected because rotating a key would need a commit.",
+      "tags": [{"name": "secrets"}, {"name": "security"}]
+    },
+    {
+      "project": "kestrel",
+      "type": "decision",
+      "content": "Push notifications are queued in a table and sent by a worker, not sent inline from the request handler. Inline sending made request latency depend on the push provider, which was slow at peak.",
+      "tags": [{"name": "notifications"}, {"name": "queue"}]
+    },
+    {
+      "project": "kestrel",
+      "type": "lesson",
+      "content": "Users got the same notification three times after a worker restart. Cause: the worker marked rows as sent only after the provider call, and a crash between the two left rows unmarked. Now the row is claimed with a lease before the call.",
+      "tags": [{"name": "notifications"}, {"name": "reliability"}]
+    },
+    {
+      "project": "kestrel",
+      "type": "preference",
+      "content": "Notification text is at most 120 characters and never contains the user's name. The owner wants messages readable on a lock screen and safe if someone else sees the phone.",
+      "tags": [{"name": "notifications"}, {"name": "privacy"}]
+    },
+    {
+      "project": "kestrel",
+      "type": "note",
+      "content": "Device tokens that the provider reports as invalid are deleted right away. A cleanup job also drops tokens not seen for 90 days.",
+      "tags": [{"name": "devices"}, {"name": "cleanup"}]
+    },
+    {
+      "project": "kestrel",
+      "type": "decision",
+      "content": "Rate limiting is per user per hour, enforced in the worker rather than at the API edge. Edge limiting was rejected because one user can trigger a burst from many endpoints and only the worker sees the total.",
+      "tags": [{"name": "rate-limit"}, {"name": "notifications"}]
+    },
+    {
+      "project": "kestrel",
+      "type": "lesson",
+      "content": "Login sessions expired at the wrong time on devices with a wrong clock. Cause: expiry was compared against device time. The server now returns a time-to-live in seconds and the client counts down from receipt.",
+      "tags": [{"name": "auth"}, {"name": "time"}]
+    },
+    {
+      "project": "kestrel",
+      "type": "decision",
+      "content": "The kestrel backend logs in JSON, one object per line, with a request id on every line. Plain text logs were dropped because following a request across the worker and the API was too slow by hand.",
+      "tags": [{"name": "logging"}, {"name": "observability"}]
+    }
+  ],
+  "questions": [
+    {"question": "Why Postgres over MySQL for the order store?", "answers": [0], "paraphrase": false},
+    {"question": "What caused the outage during the nightly reindex of the orders table?", "answers": [2], "paraphrase": false},
+    {"question": "Why does search inside a log file use a substring scan and not a regex engine?", "answers": [12], "paraphrase": false},
+    {"question": "Why is lantern shipped as a single static binary?", "answers": [14], "paraphrase": false},
+    {"question": "Why are pipeline jobs idempotent and keyed by day?", "answers": [15], "paraphrase": false},
+    {"question": "Why does the scheduler stay a plain cron entry and not a workflow engine?", "answers": [19], "paraphrase": false},
+    {"question": "Why are push notifications queued in a table and sent by a worker?", "answers": [23], "paraphrase": false},
+    {"question": "Why was the same notification sent three times after a worker restart?", "answers": [24], "paraphrase": false},
+    {"question": "What is the most characters a notification text can contain?", "answers": [25], "paraphrase": false},
+    {"question": "How does the kestrel backend log, JSON or plain text?", "answers": [29], "paraphrase": false},
+    {"question": "Why is inventory reduced at the moment a purchase is written, and not reserved first?", "answers": [1], "paraphrase": true},
+    {"question": "Why do buyers see a scrambled code instead of a counter for their purchase?", "answers": [3], "paraphrase": true},
+    {"question": "How is money represented in the orchard schema?", "answers": [5], "paraphrase": true},
+    {"question": "What stops a payment provider callback from being handled more than once?", "answers": [6], "paraphrase": true},
+    {"question": "Why does the log viewer stay responsive on very large files?", "answers": [8], "paraphrase": true},
+    {"question": "What went wrong when daylight saving time ended?", "answers": [16], "paraphrase": true},
+    {"question": "How is the join step kept from running out of memory?", "answers": [20], "paraphrase": true},
+    {"question": "Where do the pipeline's credentials come from?", "answers": [22], "paraphrase": true},
+    {"question": "How does the mobile backend spread out a flood of alerts from one person?", "answers": [27], "paraphrase": true},
+    {"question": "Which problems were caused by clocks and time zones?", "answers": [9, 16, 28], "paraphrase": true}
+  ]
+}
