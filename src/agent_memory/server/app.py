@@ -123,7 +123,18 @@ def create_app(
 
     @app.post("/memories", response_model=AddResult, status_code=201, dependencies=guard)
     async def add_memory(body: MemoryIn, session: AsyncSession = SessionDep,
-                         embedder: Embedder | None = EmbedderDep):
+                         embedder: Embedder | None = EmbedderDep,
+                         force: bool = Query(default=False,
+                                             description="Store even when a near-duplicate exists")):
+        # A memory that already exists in this project is refused, not stored
+        # twice. `force=true` skips the check; a server without a model never
+        # refuses, since it has no vectors to compare.
+        if not force:
+            dup = await repo.find_duplicate(session, embedder, body.content, body.project)
+            if dup is not None:
+                existing_id, score = dup
+                raise HTTPException(status_code=409, detail={
+                    "reason": "duplicate", "existing_id": existing_id, "score": score})
         mid = await repo.add(session, body.content, body.agent or "unknown",
                              body.project, body.tags, body.type, embedder=embedder)
         # Stored either way; the warnings only tell the writer what the entry lacks.

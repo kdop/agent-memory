@@ -14,7 +14,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import ApiClient
+from .client import ApiClient, DuplicateMemory
 from .config import get_agent_name
 
 
@@ -29,13 +29,19 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
     @mcp.tool()
     def memory_add(content: str, agent: Optional[str] = None,
                    project: Optional[str] = None, tags: Optional[list[dict]] = None,
-                   type: Optional[str] = None) -> dict:
+                   type: Optional[str] = None, force: bool = False) -> dict:
         """Add a memory. `tags` is a list of {"name": str, "description": str (optional)}
         — a brand-new tag with no description auto-defaults to its own name. Returns
         {"id": <new id>, "warnings": [...]}: warnings are rule names the entry breaks
-        (short, no-project, no-reasoning). The memory is stored either way."""
-        mid, warnings = api.add_with_warnings(
-            content, agent or get_agent_name(), project, tags or [], type)
+        (short, no-project, no-reasoning). The memory is stored either way, unless a
+        near-duplicate already exists in the same project: then nothing is stored and
+        the result is {"error": "duplicate", "existing_id": <id>, "score": <cosine>}.
+        Update that memory instead, or pass force=true to store this one anyway."""
+        try:
+            mid, warnings = api.add_with_warnings(
+                content, agent or get_agent_name(), project, tags or [], type, force=force)
+        except DuplicateMemory as e:
+            return {"error": "duplicate", "existing_id": e.existing_id, "score": e.score}
         return {"id": mid, "warnings": warnings}
 
     @mcp.tool()

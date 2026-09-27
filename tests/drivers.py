@@ -128,7 +128,8 @@ class CliDriver:
         )
 
     # ---- semantic operations --------------------------------------------
-    def add(self, content, *, project=None, tags=None, type=None, agent=None):
+    def add(self, content, *, project=None, tags=None, type=None, agent=None, force=False):
+        """Returns the new id, or None when the add was refused (a duplicate)."""
         args = ["add", content]
         if project:
             args += ["--project", project]
@@ -139,6 +140,8 @@ class CliDriver:
             args += ["--type", type]
         if agent:
             args += ["--agent", agent]
+        if force:
+            args += ["--force"]
         m = re.search(r"Memory #(\d+) added", self.raw(*args).stdout)
         return int(m.group(1)) if m else None
 
@@ -337,12 +340,14 @@ class ApiDriver:
         )
 
     # ---- semantic operations --------------------------------------------
-    def add(self, content, *, project=None, tags=None, type=None, agent=None):
+    def add(self, content, *, project=None, tags=None, type=None, agent=None, force=False):
+        """Returns the new id, or None when the add was refused (a duplicate)."""
         body = {
             "content": content, "project": project, "type": type,
             "agent": agent or self.agent, "tags": _normalize_tags(tags) or [],
         }
-        resp = self._client.post("/memories", json=body)
+        params = {"force": "true"} if force else {}
+        resp = self._client.post("/memories", json=body, params=params)
         return resp.json()["id"] if resp.status_code == 201 else None
 
     def query(self, **filters):
@@ -459,9 +464,12 @@ class McpDriver:
         )
 
     # ---- semantic operations --------------------------------------------
-    def add(self, content, *, project=None, tags=None, type=None, agent=None):
-        return self._call("memory_add", content=content, agent=agent or self.agent,
-                          project=project, tags=_normalize_tags(tags) or [], type=type)["id"]
+    def add(self, content, *, project=None, tags=None, type=None, agent=None, force=False):
+        """Returns the new id, or None when the add was refused (a duplicate)."""
+        data = self._call("memory_add", content=content, agent=agent or self.agent,
+                          project=project, tags=_normalize_tags(tags) or [], type=type,
+                          force=force or None)
+        return data.get("id")
 
     def query(self, **filters):
         data = self._call(

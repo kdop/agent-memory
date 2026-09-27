@@ -9,7 +9,7 @@ import argparse
 import json
 import sys
 
-from .client import ApiClient, ApiUnreachable
+from .client import ApiClient, ApiUnreachable, DuplicateMemory
 from .config import config_path, get_agent_name, load_config, save_config
 
 # Box-drawing separators used in the rendered output.
@@ -52,7 +52,14 @@ def _print_meta(row):
 def add_memory(args, client):
     agent = args.agent or get_agent_name()
     tags = _parse_tags_json(args.tags, "--tags") or []
-    mid, warnings = client.add_with_warnings(args.content, agent, args.project, tags, args.type)
+    try:
+        mid, warnings = client.add_with_warnings(args.content, agent, args.project, tags,
+                                                 args.type, force=args.force)
+    except DuplicateMemory as e:
+        # Nothing was stored. Exit 3 so a script can tell this apart from an error.
+        print(f"✗ Duplicate of memory #{e.existing_id} (score {e.score:.2f}). "
+              f"Use 'memory update {e.existing_id}' or --force.")
+        sys.exit(3)
     print(f"✓ Memory #{mid} added ({agent})")
     # One line per rule the entry breaks. The memory is stored either way.
     for w in warnings:
@@ -249,6 +256,9 @@ def main():
         help='JSON array of tag objects, e.g. \'[{"name":"auth","description":"authentication flow"},{"name":"db"}]\'. '
              "description is optional (a new tag with none defaults to its own name).")
     add_parser.add_argument("--type", help="Memory type (decision, lesson, note, preference)")
+    add_parser.add_argument("--force", action="store_true",
+                            help="Store even when a near-duplicate exists in the project "
+                                 "(without it, a duplicate is refused with exit code 3)")
     add_parser.set_defaults(func=add_memory)
 
     query_parser = subparsers.add_parser("query", help="Query memories")
