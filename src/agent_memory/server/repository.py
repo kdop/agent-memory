@@ -25,6 +25,11 @@ _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, 
 # a duplicate. Cosine on unit vectors: 1.0 is the same text, 0.92 is a rewording.
 DUPLICATE_THRESHOLD = 0.92
 
+# Reciprocal rank fusion constant. A hit at rank r adds 1 / (RRF_K + r) to a
+# memory's fused score. 60 is the value from the original paper; it keeps the
+# top ranks from crushing everything below them.
+RRF_K = 60
+
 
 def _since_days_window(n: int) -> tuple[datetime, None]:
     """Rolling window: everything from the start of the day N days ago through now
@@ -208,6 +213,39 @@ async def search_semantic(session, embedder: Embedder, text, *, project=None, ag
     if limit:
         scored = scored[: int(limit)]
     return [_dump(m, score=score) for score, m in scored]
+
+
+async def search_hybrid(session, embedder: Embedder, text, *, project=None, agent=None,
+                        since=None, tag=None, limit=None) -> list[dict]:
+    """Search by words and by meaning at once, fused by rank.
+
+    Runs `search` and `search_semantic` with the same filters and no limit,
+    then fuses the two lists with reciprocal rank fusion: each memory scores
+    the sum, over the lists it appears in, of `1 / (RRF_K + rank)`, rank
+    starting at 1. A memory found by both lists outranks one found by only
+    one. Ranks, not raw scores, are fused, because ts_rank and cosine live on
+    different scales and adding them would mean nothing.
+
+    Best fused score first, ties broken by id, newest first. `limit` of 0 or
+    None means all rows. `score` is the fused score; `snippet` comes from the
+    keyword hit when there is one, else None."""
+    filters = dict(project=project, agent=agent, since=since, tag=tag, limit=0)
+    by_words = await search(session, text, **filters)
+    by_meaning = await search_semantic(session, embedder, text, **filters)
+
+    fused: dict[int, dict] = {}
+    for hits in (by_words, by_meaning):
+        for rank, hit in enumerate(hits, start=1):
+            row = fused.get(hit["id"])
+            if row is None:
+                # The first list to name a memory supplies its fields. The
+                # keyword list goes first, so its snippet wins when both hit.
+                row = fused[hit["id"]] = dict(hit, score=0.0)
+            row["score"] += 1.0 / (RRF_K + rank)
+    rows = sorted(fused.values(), key=lambda r: (-r["score"], -r["id"]))
+    if limit:
+        rows = rows[: int(limit)]
+    return rows
 
 
 async def get(session, mid: int) -> dict | None:

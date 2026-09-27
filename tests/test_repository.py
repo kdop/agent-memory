@@ -435,6 +435,117 @@ async def test_search_keyword_carries_rank_as_score(session):
     assert (await repo.get(session, hits[0]["id"]))["score"] is None
 
 
+# ── hybrid search ────────────────────────────────────────────────────────────
+# FakeEmbedder vectors come from a hash of the text, so a memory whose content
+# equals the query is the top semantic hit (cosine 1.0). Content that carries
+# the query's words also hits keyword search, so such a memory is in both lists.
+def _rrf(*ranks):
+    return sum(1.0 / (repo.RRF_K + r) for r in ranks)
+
+
+async def test_search_hybrid_both_lists_outrank_one(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    query = "the cat sat on the mat"
+    await _add_many(session, ["a dog in the yard", "rain on the window", "coffee before code"], emb)
+    both = await repo.add(session, query, "t", None, _tags(), None, embedder=emb)
+
+    hits = await repo.search_hybrid(session, emb, query)
+    assert len(hits) == 4
+    assert hits[0]["id"] == both
+    # First in both lists: two rank-1 contributions. The rest hit semantic only.
+    assert hits[0]["score"] == pytest.approx(_rrf(1, 1))
+    for h in hits[1:]:
+        assert h["score"] < _rrf(1, 1)
+    scores = [h["score"] for h in hits]
+    assert scores == sorted(scores, reverse=True)
+
+
+async def test_search_hybrid_score_matches_the_formula(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    query = "the cat sat on the mat"
+    await _add_many(session, ["a dog in the yard", "the cat sat on the mat", "rain on the window",
+                              "a cat sat on a mat once", "coffee before code"], emb)
+
+    by_words = await repo.search(session, query, limit=0)
+    by_meaning = await repo.search_semantic(session, emb, query, limit=0)
+    assert len(by_words) == 2 and len(by_meaning) == 5
+
+    expected = {}
+    for hits in (by_words, by_meaning):
+        for rank, h in enumerate(hits, start=1):
+            expected[h["id"]] = expected.get(h["id"], 0.0) + 1.0 / (repo.RRF_K + rank)
+
+    fused = await repo.search_hybrid(session, emb, query)
+    assert {h["id"]: h["score"] for h in fused} == pytest.approx(expected)
+    assert [h["id"] for h in fused] == sorted(expected, key=lambda i: (-expected[i], -i))
+
+
+async def test_search_hybrid_carries_snippet_from_the_keyword_hit(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    query = "the cat sat on the mat"
+    words = await repo.add(session, query, "t", None, _tags(), None, embedder=emb)
+    meaning = await repo.add(session, "a dog in the yard", "t", None, _tags(), None, embedder=emb)
+
+    by_id = {h["id"]: h for h in await repo.search_hybrid(session, emb, query)}
+    assert by_id[words]["snippet"] == (await repo.search(session, query))[0]["snippet"]
+    assert "→cat←" in by_id[words]["snippet"]
+    assert by_id[meaning]["snippet"] is None
+
+
+async def test_search_hybrid_includes_keyword_hits_without_a_vector(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    no_vec = await repo.add(session, "the cat sat on the mat", "t", None, _tags(), None)
+    with_vec = await repo.add(session, "a dog in the yard", "t", None, _tags(), None, embedder=emb)
+
+    hits = await repo.search_hybrid(session, emb, "the cat sat on the mat")
+    # Equal scores (rank 1 in one list each); the newer id comes first.
+    assert [h["id"] for h in hits] == [with_vec, no_vec]
+    assert hits[0]["score"] == pytest.approx(_rrf(1))
+    assert hits[1]["score"] == pytest.approx(_rrf(1))
+
+
+async def test_search_hybrid_applies_limit(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    await _add_many(session, ["one", "two", "three", "four"], emb)
+    everything = await repo.search_hybrid(session, emb, "q")
+    assert len(everything) == 4
+    assert len(await repo.search_hybrid(session, emb, "q", limit=0)) == 4
+    assert len(await repo.search_hybrid(session, emb, "q", limit=None)) == 4
+    top2 = await repo.search_hybrid(session, emb, "q", limit=2)
+    assert [h["id"] for h in top2] == [h["id"] for h in everything[:2]]
+
+
+async def test_search_hybrid_applies_filters(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    a = await repo.add(session, "alpha thing", "ann", "alpha", _tags("x"), None, embedder=emb)
+    b = await repo.add(session, "beta thing", "bob", "beta", _tags("y"), None, embedder=emb)
+    c = await repo.add(session, "alpha other", "bob", "alpha", _tags("y"), None, embedder=emb)
+
+    async def ids(**filters):
+        return {h["id"] for h in await repo.search_hybrid(session, emb, "thing", **filters)}
+
+    assert await ids(project="alpha") == {a, c}
+    assert await ids(agent="bob") == {b, c}
+    assert await ids(tag="X") == {a}
+    assert await ids(since="2999-01-01") == set()
+
+
+def test_rrf_k_value():
+    assert repo.RRF_K == 60
+
+
 # ── reindex ──────────────────────────────────────────────────────────────────
 async def _set_model(session, mid, model):
     """Pretend the row was embedded by another model, without touching the vector."""

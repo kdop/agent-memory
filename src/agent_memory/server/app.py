@@ -173,6 +173,7 @@ def create_app(
 
     @app.get("/memories/search", response_model=list[MemoryOut], dependencies=guard)
     async def search_memories(
+        response: Response,
         session: AsyncSession = SessionDep,
         embedder: Embedder | None = EmbedderDep,
         q: str = "",
@@ -186,10 +187,16 @@ def create_app(
         filters = dict(project=project, agent=agent, since=since, tag=tag, limit=limit)
         if mode == "keyword":
             return await repo.search(session, q, **filters)
+        # The other two modes need a real model. A NullEmbedder knows why it has none.
+        has_model = embedder is not None and embedder.model_name is not None
         if mode == "hybrid":
-            raise HTTPException(status_code=400, detail="hybrid mode is not available yet")
-        # Semantic search needs a real model. A NullEmbedder knows why it has none.
-        if embedder is None or embedder.model_name is None:
+            if has_model:
+                return await repo.search_hybrid(session, embedder, q, **filters)
+            # Hybrid without a model is just its keyword half. Serve that, and
+            # say so in a header, so the caller can tell the results were not fused.
+            response.headers["X-Search-Fallback"] = "keyword"
+            return await repo.search(session, q, **filters)
+        if not has_model:
             reason = getattr(embedder, "reason", "the embedding model is off or not installed")
             raise HTTPException(
                 status_code=400,
