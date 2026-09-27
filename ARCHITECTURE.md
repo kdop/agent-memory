@@ -33,6 +33,7 @@ src/agent_memory/
     repository.py      #   async data-access functions over an AsyncSession
     schemas.py         #   Pydantic v2 request/response models (the HTTP contract)
     auth.py            #   bearer-token guard (constant-time)
+    embedding.py       #   Embedder interface; local fastembed model — [embed] extra, optional
     __main__.py        #   `python -m agent_memory.server` (uvicorn launcher)
 alembic/               # migrations; env.py autogenerates from models.Base.metadata
 memory-cli             # thin shim on PATH -> agent_memory.cli:main (rule #5)

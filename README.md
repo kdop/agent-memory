@@ -74,6 +74,7 @@ new tag with no description defaults to its own name. Full command reference:
 | **CLI client** | `memory-cli` — a presentation layer over `ApiClient`. Stdlib-only, never opens a DB. | none |
 | **MCP client** | Same `ApiClient`, exposed as MCP tools over stdio. | `[mcp]` |
 | **Dashboard** | Vue 3 + Quasar single-page app, served by the API service under `/app`. | `web/` (Node) |
+| **Embeddings** | A small local model (`BAAI/bge-small-en-v1.5`, 384 dims) run in the API service through fastembed. Optional: without it the service runs with no vectors. `AGENT_MEMORY_EMBED_MODEL=off` disables it; `AGENT_MEMORY_EMBED_CACHE` sets where model files land (default `.cache/fastembed`). | `[embed]` |
 
 ### Endpoint & auth resolution (clients)
 
