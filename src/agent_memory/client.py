@@ -31,6 +31,11 @@ class ApiClient:
     def _call(self, method, path, *, params=None, body=None):
         """Returns (status, parsed_json | None). 404 is handed back to the caller;
         an unreachable server raises ApiUnreachable; other HTTP errors raise."""
+        status, _, data = self._request(method, path, params=params, body=body)
+        return status, data
+
+    def _request(self, method, path, *, params=None, body=None):
+        """Like _call but also returns the response headers: (status, headers, data)."""
         url = self.base_url + path
         if params:
             clean = {k: v for k, v in params.items() if v is not None}
@@ -47,10 +52,10 @@ class ApiClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read()
-                return resp.status, (json.loads(raw) if raw else None)
+                return resp.status, resp.headers, (json.loads(raw) if raw else None)
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                return 404, None
+                return 404, e.headers, None
             detail = e.read().decode(errors="replace")
             raise RuntimeError(f"{method} {path} → HTTP {e.code}: {detail}") from e
         except urllib.error.URLError as e:
@@ -70,11 +75,22 @@ class ApiClient:
 
     def query(self, *, since_days=None, since=None, until=None, project=None,
               agent=None, tag=None, mtype=None, limit=None):
-        _, data = self._call("GET", "/memories", params={
+        """Rows only. `limit=0` returns everything; None uses the server default."""
+        rows, _ = self.query_with_total(
+            since_days=since_days, since=since, until=until, project=project,
+            agent=agent, tag=tag, mtype=mtype, limit=limit)
+        return rows
+
+    def query_with_total(self, *, since_days=None, since=None, until=None, project=None,
+                         agent=None, tag=None, mtype=None, limit=None):
+        """(rows, total): total is the match count ignoring the limit."""
+        _, headers, data = self._request("GET", "/memories", params={
             "since_days": since_days, "since": since, "until": until,
             "project": project, "agent": agent, "tag": tag, "type": mtype, "limit": limit,
         })
-        return data or []
+        rows = data or []
+        total = int((headers or {}).get("X-Total-Count") or len(rows))
+        return rows, total
 
     def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None):
         _, data = self._call("GET", "/memories/search", params={

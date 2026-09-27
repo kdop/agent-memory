@@ -255,8 +255,9 @@ async def _ts(session, agg):
 async def list_memories(session, *, q=None, tags=(), project=None, agent=None, mtype=None,
                         since_days=None, since=None, until=None, order="date_desc",
                         limit=100, offset=0) -> tuple[list[dict], int]:
-    """The dashboard's one list endpoint: full-text (`q`) + AND multi-tag + filters +
-    order + pagination. Returns (items, total) where total ignores limit/offset."""
+    """The one list endpoint: full-text (`q`) + multi-tag + filters + order +
+    pagination. `limit=0` means no limit. Returns (items, total) where total ignores
+    limit/offset."""
     if since_days is not None:
         since, until = _since_days_window(since_days)
 
@@ -285,7 +286,9 @@ async def list_memories(session, *, q=None, tags=(), project=None, agent=None, m
         stmt = (select(Memory, snippet.label("snippet"))
                 .options(selectinload(Memory.tags)).where(*conds)
                 .order_by(func.ts_rank(Memory.content_tsv, tsquery).desc(), Memory.id.desc())
-                .limit(limit).offset(offset))
+                .offset(offset))
+        if limit:  # 0 = no limit
+            stmt = stmt.limit(limit)
         rows = (await session.execute(stmt)).all()
         items = [_dump(m, snippet=s) for m, s in rows]
     else:
@@ -296,7 +299,9 @@ async def list_memories(session, *, q=None, tags=(), project=None, agent=None, m
         col = cols.get(field, Memory.timestamp)
         ordered = col.asc() if direction == "asc" else col.desc()
         # Stable tiebreak on id so pages don't shuffle within equal sort keys.
-        stmt = base.order_by(ordered, Memory.id.desc()).limit(limit).offset(offset)
+        stmt = base.order_by(ordered, Memory.id.desc()).offset(offset)
+        if limit:  # 0 = no limit
+            stmt = stmt.limit(limit)
         items = [_dump(m) for m in (await session.execute(stmt)).scalars().all()]
     return items, total
 
