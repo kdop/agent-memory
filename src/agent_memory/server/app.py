@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
@@ -162,15 +163,29 @@ def create_app(
     @app.get("/memories/search", response_model=list[MemoryOut], dependencies=guard)
     async def search_memories(
         session: AsyncSession = SessionDep,
+        embedder: Embedder | None = EmbedderDep,
         q: str = "",
+        mode: Literal["keyword", "semantic", "hybrid"] = "keyword",
         project: str | None = None,
         agent: str | None = None,
         since: str | None = None,
         tag: str | None = None,
         limit: int = Query(default=20, ge=0, description="0 = no limit"),
     ):
-        return await repo.search(session, q, project=project, agent=agent,
-                                 since=since, tag=tag, limit=limit)
+        filters = dict(project=project, agent=agent, since=since, tag=tag, limit=limit)
+        if mode == "keyword":
+            return await repo.search(session, q, **filters)
+        if mode == "hybrid":
+            raise HTTPException(status_code=400, detail="hybrid mode is not available yet")
+        # Semantic search needs a real model. A NullEmbedder knows why it has none.
+        if embedder is None or embedder.model_name is None:
+            reason = getattr(embedder, "reason", "the embedding model is off or not installed")
+            raise HTTPException(
+                status_code=400,
+                detail=f"semantic search is not available: {reason}. Set "
+                       "AGENT_MEMORY_EMBED_MODEL and install the [embed] extra to enable it.",
+            )
+        return await repo.search_semantic(session, embedder, q, **filters)
 
     @app.get("/memories/{mid}", response_model=MemoryOut, dependencies=guard)
     async def get_memory(mid: int, session: AsyncSession = SessionDep):
