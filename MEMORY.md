@@ -1,17 +1,18 @@
 # MEMORY.md — agent memory protocol
 
-The protocol lives in the top-level **[`SKILL.md`](SKILL.md)**, packaged as a Claude
-Code skill so each project opts in explicitly, in its own tree, with no reference to
-this checkout:
+The protocol lives in **[`skills/memory/SKILL.md`](skills/memory/SKILL.md)**, packaged
+as a Claude Code plugin so each project installs it explicitly, at project scope, with
+no reference to this checkout:
 
 ```bash
-mkdir -p <project>/.claude/skills/memory
-cp /path/to/agent-memory/SKILL.md <project>/.claude/skills/memory/
+cd <project>
+claude plugin marketplace add kdop/agent-memory
+claude plugin install memory@agent-memory --scope project
 ```
 
-Commit the copy with the project. It loads on demand there — when the task matches its
-description or via `/memory`.
+Commit the resulting `.claude/settings.json` change with the project. It loads on
+demand there — when the task matches its description or via `/memory`.
 
 This file is kept only so existing `@~/workspace/agent-memory/MEMORY.md` imports in other
-repos' `CLAUDE.md` don't break silently; migrate those to a copied skill and drop the
+repos' `CLAUDE.md` don't break silently; migrate those to the plugin and drop the
 import.

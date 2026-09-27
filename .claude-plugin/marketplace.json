@@ -1,0 +1,14 @@
+{
+  "name": "agent-memory",
+  "owner": {
+    "name": "kdop"
+  },
+  "description": "Skills for the agent-memory service: persistent cross-session memory for agents.",
+  "plugins": [
+    {
+      "name": "memory",
+      "source": "./",
+      "description": "Persistent cross-session memory for agents via memory-cli (the agent-memory service)."
+    }
+  ]
+}
