@@ -55,9 +55,9 @@ project that logs to this system.
 6. **Memories live in the DB, never in md files.** Never write to Claude Code's
    md-file memory (`~/.claude/.../memory/*.md`). An agent's own working rules go in the
    DB under `--project=<agent-name>` (cross-project preferences); project work under
-   `--project=agent-memory`. The DB is the single source of truth for memory — dogfood it.
+   `--project=agent-memory`. The DB is the single source of truth for memory.
 
-## Dogfood it
+## Logging from this repo
 
 This repo logs to the memory system like any other project, under the same rules —
 what to log and what to skip is in `skills/memory/SKILL.md`, not here.
