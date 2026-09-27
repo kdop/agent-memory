@@ -11,6 +11,7 @@ description: |
   2. Do not log diary-style entries of what was done.
   3. Every entry carries the why, not just the what: the reasoning behind a decision, the alternatives rejected, the cause of a lesson.
   4. Never write down anything that can be retrieved from git history.
+  5. Project facts and data go in the project's own folder, tracked by git, not in the memory DB. Write them the way that project's user has instructed. With no instruction, write them at the project's top level in a folder named `notes/`, one markdown file per ISO week named `<year>_<week>.md` (for example `2026_39.md`).
 ---
 
 # Agent memory
