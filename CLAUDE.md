@@ -27,7 +27,9 @@ project that logs to this system.
 - Run the server: `AGENT_MEMORY_DB=postgresql://… AGENT_MEMORY_API_TOKEN=… python -m
   agent_memory.server` (fails closed without a token; host/port via
   `AGENT_MEMORY_HOST`/`AGENT_MEMORY_PORT`).
-- Docs: `MEMORY.md` (logging protocol — imported by other repos), `ARCHITECTURE.md`
+- Docs: top-level `SKILL.md` (logging protocol — the Claude Code skill other projects
+  copy into their `.claude/skills/memory/`; this repo links it at
+  `.claude/skills/memory/SKILL.md`), `ARCHITECTURE.md`
   (layout + schema + design). Command reference is `memory --help`, not markdown.
 
 ## Rules
@@ -58,4 +60,4 @@ Do **not** log "did X, shipped Y" narrative here — git/PR history already is t
 record. Before adding an entry, ask: could a future session reconstruct
 this from `git log`? If yes, skip it. Reserve entries here for durable preferences,
 standing rules, and facts *not* reconstructable from git — a deliberate non-action, an
-environment gotcha, a stated user preference. Full protocol in `MEMORY.md`.
+environment gotcha, a stated user preference. Full protocol in `SKILL.md`.

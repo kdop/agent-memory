@@ -32,6 +32,28 @@ The server serves `dist/` as unauthenticated static assets, with the app routes 
 bearer token to the API. Log in once by pasting the token — it validates against
 `GET /tags` and is remembered in `localStorage`.
 
+## Refreshing the README screenshot
+
+How `docs/dashboard.png` was produced (2026-09-15):
+
+1. Run `npm run dev` in `web/` (MSW mock, 250 seeded memories, any non-empty token is
+   accepted).
+2. Serve a wrapper page from `web/public/` that sets `localStorage`
+   `agent-memory.token` and `mem-dark` = `true`, embeds `/app` in a full-size iframe,
+   and includes an `<img>` from a local HTTP server that sleeps ~8 s before answering.
+   Firefox headless has no delay flag; the slow image holds the page `load` event until
+   the SPA has rendered.
+3. Take the shot:
+
+   ```bash
+   firefox --headless --no-remote --profile $(mktemp -d) --window-size=1440,900 \
+     --screenshot out.png http://127.0.0.1:5173/wrapper.html
+   ```
+
+If the dev server runs from a git worktree, `node_modules` must be a real copy: a
+symlink makes Vite refuse the font files (outside its allow list) and icons render as
+text.
+
 ## Layout
 
 ```
