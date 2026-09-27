@@ -310,10 +310,55 @@ def test_search_semantic_mode_over_http(client):
     assert [h["id"] for h in limited] == [h["id"] for h in hits[:2]]
 
 
-def test_search_hybrid_mode_400_until_implemented(client):
-    resp = client.get("/memories/search", params={"q": "x", "mode": "hybrid"}, headers=_auth())
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "hybrid mode is not available yet"
+def test_search_hybrid_mode_over_http(client):
+    ids = _seed_search(client)
+    query = "the cat sat on the mat"
+    resp = client.get("/memories/search", params={"q": query, "mode": "hybrid"},
+                      headers=_auth())
+    assert resp.status_code == 200
+    assert "X-Search-Fallback" not in resp.headers
+    hits = resp.json()
+    assert len(hits) == 4
+    # The cat memory is rank 1 by words and rank 1 by meaning: 1/61 + 1/61.
+    assert hits[0]["id"] == ids["cat"]
+    assert hits[0]["score"] == pytest.approx(2 / 61)
+    assert "cat" in hits[0]["snippet"]
+    # The others were found by meaning only: no words to highlight.
+    assert all(h["snippet"] is None for h in hits[1:])
+    scores = [h["score"] for h in hits]
+    assert scores == sorted(scores, reverse=True)
+
+    limited = client.get("/memories/search", params={"q": query, "mode": "hybrid", "limit": 2},
+                         headers=_auth()).json()
+    assert [h["id"] for h in limited] == [h["id"] for h in hits[:2]]
+
+
+@pytest.mark.parametrize("embedder", ["null", "none"])
+async def test_search_hybrid_without_model_falls_back_to_keyword(embedder):
+    # No model means no semantic half to fuse. Hybrid then serves the keyword
+    # results and says so in a header, so the caller can tell.
+    from agent_memory.server.app import create_app
+    from agent_memory.server.db import make_sessionmaker
+    from agent_memory.server.embedding import NullEmbedder
+
+    engine = make_test_engine()
+    kwargs = {"embedder": NullEmbedder("fastembed is not installed")} if embedder == "null" else {}
+    app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN, **kwargs)
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            for content in ["the cat sat on the mat", "a cat in the yard", "coffee before code"]:
+                await c.post("/memories", json={"content": content, "agent": "t"}, headers=_auth())
+            hybrid = await c.get("/memories/search", params={"q": "cat", "mode": "hybrid"},
+                                 headers=_auth())
+            keyword = await c.get("/memories/search", params={"q": "cat"}, headers=_auth())
+            assert hybrid.status_code == 200
+            assert hybrid.headers["X-Search-Fallback"] == "keyword"
+            assert len(hybrid.json()) == 2
+            assert hybrid.json() == keyword.json()
+            assert "X-Search-Fallback" not in keyword.headers
+    finally:
+        await engine.dispose()
 
 
 def test_search_unknown_mode_422(client):
