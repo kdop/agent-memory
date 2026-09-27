@@ -32,7 +32,7 @@ same API.
 
 ```bash
 memory query --project=<name> --limit=10     # recent timeline; empty is fine for new projects
-memory search "<topic>" --project=<name>     # specifics, full text
+memory search "<topic>" --project=<name> --mode hybrid     # specifics, by words and by meaning
 ```
 
 `<name>` is the repo / project you're working in. Also read your own standing rules:
@@ -59,6 +59,14 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
 - **Skip:** diary entries. Before adding, ask: could a future session reconstruct this
   from `git log`? If yes, skip it. "Did X, shipped Y" with no reasoning is git's job.
   The what is usually in git; the why is not, and the why is what to write down.
+- **Warnings:** `add` may print `warning: short`, `warning: no-project` or
+  `warning: no-reasoning` after the id. The memory is stored; the line says what the
+  entry lacks (under 40 characters, no `--project`, a decision or lesson with no why).
+  If the warning is right, fix the entry with `memory update <id>`.
+- **Duplicate refusal:** `add` refuses an entry whose meaning is nearly the same as one
+  already in the project. Nothing is stored; the message names the existing id and the
+  exit code is 3. Update that memory instead. Use `--force` only when the new entry is
+  a deliberate separate record, for example a reversal of a decision.
 - An agent's own cross-project working rules go under `--project=<agent-name>`.
 - Never write memories to Claude Code's md-file memory (`~/.claude/.../memory/*.md`):
   it is neither shared nor checked in. The DB is the single source of truth.
@@ -68,7 +76,8 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
 ```bash
 memory query --project=<name> --since-days 7            # rolling window (0=today); also --since/--until YYYY-MM-DD
 memory query --project=<name> --tag=bugfix --type=decision
-memory search "auth flow" --project=<name>              # --tag=, --since= optional
+memory search "auth flow" --project=<name> --mode hybrid   # by words and by meaning; --tag=, --since= optional
+memory search "auth flow" --project=<name>                # by words only (the default)
 memory show 42
 memory tags ; memory projects ; memory stats
 ```
@@ -83,6 +92,7 @@ memory delete 49 --yes          # without --yes it's a dry run; takes multiple I
 ```
 
 When a logged decision is reversed, add a new `decision` that says so and why, rather
-than editing history — the timeline is the point.
+than editing history — the timeline is the point. If that add is refused as a
+duplicate, `--force` is the right call here.
 
 Full command reference: `memory --help`.
