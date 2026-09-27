@@ -56,8 +56,5 @@ project that logs to this system.
 
 ## Dogfood it
 
-Do **not** log "did X, shipped Y" narrative here — git/PR history already is that
-record. Before adding an entry, ask: could a future session reconstruct
-this from `git log`? If yes, skip it. Reserve entries here for durable preferences,
-standing rules, and facts *not* reconstructable from git — a deliberate non-action, an
-environment gotcha, a stated user preference. Full protocol in `skills/memory/SKILL.md`.
+This repo logs to the memory system like any other project, under the same rules —
+what to log and what to skip is in `skills/memory/SKILL.md`, not here.
