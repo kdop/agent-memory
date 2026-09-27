@@ -275,3 +275,96 @@ async def test_update_content_without_model_clears_vector(session):
     await repo.update(session, mid, content="new text", embedder=NullEmbedder())
     await session.flush()
     assert await _stored_vector(session, mid) == (None, None)
+
+
+# ── semantic search ──────────────────────────────────────────────────────────
+async def _add_many(session, texts, embedder):
+    return [await repo.add(session, t, "t", None, _tags(), None, embedder=embedder)
+            for t in texts]
+
+
+async def test_search_semantic_orders_by_cosine(session):
+    from agent_memory.server.embedding import cosine
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    query = "the cat sat on the mat"
+    await _add_many(session, ["a dog in the yard", "rain on the window", "coffee before code"], emb)
+    exact = await repo.add(session, query, "t", None, _tags(), None, embedder=emb)
+
+    hits = await repo.search_semantic(session, emb, query)
+    assert len(hits) == 4
+    # The memory that says the same thing as the query is the closest one.
+    assert hits[0]["id"] == exact
+    assert hits[0]["score"] == pytest.approx(1.0, abs=1e-6)
+    assert hits[0]["snippet"] is None
+    # The rest come in falling order of cosine, and the scores are the real cosines.
+    scores = [h["score"] for h in hits]
+    assert scores == sorted(scores, reverse=True)
+    qv = emb.embed([query])[0]
+    for h in hits[1:]:
+        assert h["score"] == pytest.approx(cosine(qv, emb.embed([h["content"]])[0]), abs=1e-6)
+
+
+async def test_search_semantic_breaks_ties_by_id_descending(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    # Same text, same vector, same score: the newer row wins.
+    ids = await _add_many(session, ["twin", "twin"], emb)
+    hits = await repo.search_semantic(session, emb, "twin")
+    assert [h["id"] for h in hits] == sorted(ids, reverse=True)
+    assert hits[0]["score"] == pytest.approx(hits[1]["score"])
+
+
+async def test_search_semantic_applies_filters(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    a = await repo.add(session, "alpha thing", "ann", "alpha", _tags("x"), None, embedder=emb)
+    b = await repo.add(session, "beta thing", "bob", "beta", _tags("y"), None, embedder=emb)
+    c = await repo.add(session, "alpha other", "bob", "alpha", _tags("y"), None, embedder=emb)
+
+    async def ids(**filters):
+        return {h["id"] for h in await repo.search_semantic(session, emb, "q", **filters)}
+
+    assert await ids(project="alpha") == {a, c}
+    assert await ids(agent="bob") == {b, c}
+    assert await ids(tag="X") == {a}
+    assert await ids(project="alpha", agent="bob") == {c}
+    assert await ids(since="2999-01-01") == set()
+
+
+async def test_search_semantic_skips_rows_without_a_vector(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    with_vec = await repo.add(session, "has a vector", "t", None, _tags(), None, embedder=emb)
+    await repo.add(session, "has no vector", "t", None, _tags(), None)
+    hits = await repo.search_semantic(session, emb, "vector")
+    assert [h["id"] for h in hits] == [with_vec]
+
+
+async def test_search_semantic_applies_limit(session):
+    from conftest import FakeEmbedder
+
+    emb = FakeEmbedder()
+    await _add_many(session, ["one", "two", "three", "four"], emb)
+    everything = await repo.search_semantic(session, emb, "q")
+    assert len(everything) == 4
+    assert len(await repo.search_semantic(session, emb, "q", limit=0)) == 4
+    assert len(await repo.search_semantic(session, emb, "q", limit=None)) == 4
+    top2 = await repo.search_semantic(session, emb, "q", limit=2)
+    assert [h["id"] for h in top2] == [h["id"] for h in everything[:2]]
+
+
+async def test_search_keyword_carries_rank_as_score(session):
+    await repo.add(session, "fox fox fox", "t", None, _tags(), None)
+    await repo.add(session, "one fox among many other words here", "t", None, _tags(), None)
+    hits = await repo.search(session, "fox")
+    assert len(hits) == 2
+    assert all(isinstance(h["score"], float) and h["score"] > 0 for h in hits)
+    assert hits[0]["score"] >= hits[1]["score"]
+    assert hits[0]["snippet"] is not None
+    # Rows from a plain read carry no score.
+    assert (await repo.get(session, hits[0]["id"]))["score"] is None

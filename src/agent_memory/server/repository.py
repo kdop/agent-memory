@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .embedding import Embedder
+from .embedding import Embedder, cosine
 from .models import Memory, MemoryTag, Tag
 
 # ts_headline markers match the old snippet() output so clients render identically.
@@ -46,7 +46,7 @@ def _embed(embedder: Embedder | None, content: str) -> tuple[list[float] | None,
     return embedder.embed([content])[0], embedder.model_name
 
 
-def _dump(m: Memory, snippet: str | None = None) -> dict:
+def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> dict:
     # `embedding` and `embedding_model` stay out on purpose: they are internal.
     return {
         "id": m.id,
@@ -57,6 +57,7 @@ def _dump(m: Memory, snippet: str | None = None) -> dict:
         "type": m.type,
         "tags": [t.name for t in m.tags],
         "snippet": snippet,
+        "score": score,
     }
 
 
@@ -114,16 +115,8 @@ async def query(session, *, since_days=None, since=None, until=None, project=Non
     return [_dump(m) for m in rows]
 
 
-async def search(session, text, *, project=None, agent=None, since=None, tag=None, limit=None) -> list[dict]:
-    tsquery = func.plainto_tsquery("english", text)
-    snippet = func.ts_headline("english", Memory.content, tsquery, _HEADLINE)
-    rank = func.ts_rank(Memory.content_tsv, tsquery)
-
-    stmt = (
-        select(Memory, snippet.label("snippet"))
-        .options(selectinload(Memory.tags))
-        .where(Memory.content_tsv.op("@@")(tsquery))
-    )
+def _search_filters(stmt, *, project=None, agent=None, since=None, tag=None):
+    """The WHERE clauses every search mode shares."""
     if project:
         stmt = stmt.where(Memory.project == project)
     if agent:
@@ -132,11 +125,54 @@ async def search(session, text, *, project=None, agent=None, since=None, tag=Non
         stmt = stmt.where(Memory.timestamp >= _as_dt(since))
     if tag:
         stmt = stmt.where(Memory.tags.any(func.lower(Tag.name) == func.lower(tag)))
+    return stmt
+
+
+async def search(session, text, *, project=None, agent=None, since=None, tag=None, limit=None) -> list[dict]:
+    """Keyword search: rows whose words match `text`, best ts_rank first. Each
+    row carries its rank as `score` and a highlighted `snippet`."""
+    tsquery = func.plainto_tsquery("english", text)
+    snippet = func.ts_headline("english", Memory.content, tsquery, _HEADLINE)
+    rank = func.ts_rank(Memory.content_tsv, tsquery)
+
+    stmt = (
+        select(Memory, snippet.label("snippet"), rank.label("score"))
+        .options(selectinload(Memory.tags))
+        .where(Memory.content_tsv.op("@@")(tsquery))
+    )
+    stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag)
     stmt = stmt.order_by(rank.desc())
     if limit:
         stmt = stmt.limit(int(limit))
     rows = (await session.execute(stmt)).all()
-    return [_dump(m, snippet=snip) for m, snip in rows]
+    return [_dump(m, snippet=snip, score=float(score)) for m, snip, score in rows]
+
+
+async def search_semantic(session, embedder: Embedder, text, *, project=None, agent=None,
+                          since=None, tag=None, limit=None) -> list[dict]:
+    """Search by meaning: rows closest to `text` in vector space, best first.
+
+    Takes the same filters as `search`, but only rows that have a vector can
+    match. The whole candidate set is loaded and scored in Python with `cosine`;
+    that is fine at the sizes this system holds, and it needs no extension in
+    Postgres. Ties are broken by id, newest first. `limit` of 0 or None means
+    all rows. Each row carries the cosine as `score`; `snippet` is None, since
+    there are no matched words to highlight."""
+    query_vec = embedder.embed([text])[0]
+
+    stmt = (
+        select(Memory)
+        .options(selectinload(Memory.tags))
+        .where(Memory.embedding.is_not(None))
+    )
+    stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag)
+    rows = (await session.execute(stmt)).scalars().all()
+
+    scored = [(cosine(query_vec, m.embedding), m) for m in rows]
+    scored.sort(key=lambda pair: (-pair[0], -pair[1].id))
+    if limit:
+        scored = scored[: int(limit)]
+    return [_dump(m, score=score) for score, m in scored]
 
 
 async def get(session, mid: int) -> dict | None:
