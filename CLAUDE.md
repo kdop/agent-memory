@@ -30,7 +30,10 @@ project that logs to this system.
 - Docs: `skills/memory/SKILL.md` (logging protocol — the Claude Code skill; this repo
   is also a plugin marketplace (`.claude-plugin/`) so other projects install it with
   `claude plugin install memory@agent-memory --scope project`; this repo itself links it
-  at `.claude/skills/memory/SKILL.md`), `ARCHITECTURE.md` (layout + schema + design). Command reference is `memory --help`, not markdown.
+  at `.claude/skills/memory/SKILL.md`), `ARCHITECTURE.md` (layout + schema + design).
+- **After cloning, run `git config core.hooksPath .githooks`.** The pre-commit hook bumps
+  the plugin version whenever the skill changes; without a bump, installed projects
+  never see the change. Command reference is `memory --help`, not markdown.
 
 ## Rules
 

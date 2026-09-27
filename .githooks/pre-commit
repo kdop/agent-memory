@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Bump the memory plugin's patch version whenever a commit changes the plugin
+# (skills/ or .claude-plugin/) without bumping it by hand. `claude plugin update`
+# only notices a new version number, never new file contents.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+set -euo pipefail
+manifest=.claude-plugin/plugin.json
+
+staged=$(git diff --cached --name-only -- skills .claude-plugin)
+[ -n "$staged" ] || exit 0
+
+old=$(git show "HEAD:$manifest" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])' || echo "")
+new=$(python3 -c 'import json; print(json.load(open("'"$manifest"'"))["version"])')
+[ "$old" = "$new" ] || exit 0   # already bumped by hand
+
+python3 - "$manifest" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+major, minor, patch = data["version"].split(".")
+data["version"] = f"{major}.{minor}.{int(patch) + 1}"
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+print(f"pre-commit: memory plugin {major}.{minor}.{patch} -> {data['version']}")
+PY
+git add "$manifest"
