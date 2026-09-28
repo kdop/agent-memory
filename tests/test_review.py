@@ -158,7 +158,7 @@ def test_make_reviewer_is_off_by_default(monkeypatch, caplog):
 
 
 def test_make_reviewer_warn_without_url_is_off(monkeypatch, caplog):
-    monkeypatch.setenv("AGENT_MEMORY_REVIEW", "warn")
+    monkeypatch.setenv("AGENT_MEMORY_REVIEW", "flag")
     monkeypatch.delenv("AGENT_MEMORY_REVIEW_URL", raising=False)
     with caplog.at_level(logging.INFO, logger="agent_memory.server.review"):
         r = make_reviewer()
@@ -175,8 +175,8 @@ def test_make_reviewer_unknown_mode_is_off(monkeypatch):
     assert "'block'" in r.reason
 
 
-def test_make_reviewer_warn_with_url_uses_the_defaults(monkeypatch):
-    monkeypatch.setenv("AGENT_MEMORY_REVIEW", " Warn ")
+def test_make_reviewer_flag_with_url_uses_the_defaults(monkeypatch):
+    monkeypatch.setenv("AGENT_MEMORY_REVIEW", " Flag ")
     monkeypatch.setenv("AGENT_MEMORY_REVIEW_URL", "http://ollama:11434/")
     for var in ("AGENT_MEMORY_REVIEW_MODEL", "AGENT_MEMORY_REVIEW_TIMEOUT"):
         monkeypatch.delenv(var, raising=False)
@@ -188,7 +188,7 @@ def test_make_reviewer_warn_with_url_uses_the_defaults(monkeypatch):
 
 
 def test_make_reviewer_reads_model_and_timeout(monkeypatch):
-    monkeypatch.setenv("AGENT_MEMORY_REVIEW", "warn")
+    monkeypatch.setenv("AGENT_MEMORY_REVIEW", "flag")
     monkeypatch.setenv("AGENT_MEMORY_REVIEW_URL", "http://ollama:11434")
     monkeypatch.setenv("AGENT_MEMORY_REVIEW_MODEL", "llama3:8b")
     monkeypatch.setenv("AGENT_MEMORY_REVIEW_TIMEOUT", "5")
@@ -198,7 +198,7 @@ def test_make_reviewer_reads_model_and_timeout(monkeypatch):
 
 
 def test_make_reviewer_bad_timeout_falls_back_to_default(monkeypatch, caplog):
-    monkeypatch.setenv("AGENT_MEMORY_REVIEW", "warn")
+    monkeypatch.setenv("AGENT_MEMORY_REVIEW", "flag")
     monkeypatch.setenv("AGENT_MEMORY_REVIEW_URL", "http://ollama:11434")
     monkeypatch.setenv("AGENT_MEMORY_REVIEW_TIMEOUT", "soon")
     with caplog.at_level(logging.WARNING, logger="agent_memory.server.review"):

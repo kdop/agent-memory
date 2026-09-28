@@ -498,7 +498,7 @@ async def test_no_loop_when_the_poll_is_zero_or_less(interval):
     await _unverified("one")
     async with _App(reviewer=fake, review_poll=interval) as a:
         async with a.app.router.lifespan_context(a.app):
-            assert a.app.state.review_mode == "warn"
+            assert a.app.state.review_mode == "flag"
             await asyncio.sleep(0.05)
             assert _poll_task() is None
             assert a.app.state.review_model == "off"
@@ -628,7 +628,7 @@ async def test_repository_update_of_tags_or_project_only_keeps_the_status():
 async def test_api_update_with_new_content_sends_the_memory_back_to_the_catch_up():
     fake = PollReviewer(up=True)
     async with _App(reviewer=fake) as a:
-        # Warn mode: the verdict lands after the add.
+        # Flag mode: the verdict lands after the add.
         mid = (await a.add("the old text", tags=["a"]))["id"]
         assert (await a.get(mid))["review_status"] == "verified"
         assert len(fake.calls) == 1
