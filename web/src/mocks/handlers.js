@@ -21,8 +21,9 @@ function unauthorized(request) {
 
 const parseTs = (ts) => new Date(String(ts).replace(' ', 'T'))
 
-/** Project a stored memory into MemoryOut (snippet only when searching). */
-function toMemoryOut(m, q) {
+/** Project a stored memory into MemoryOut (snippet only when searching;
+ *  `score` only when the caller passes one). */
+function toMemoryOut(m, q, score = null) {
   let snippet = null
   if (q) {
     const idx = m.content.toLowerCase().indexOf(q.toLowerCase())
@@ -44,8 +45,41 @@ function toMemoryOut(m, q) {
     type: m.type ?? null,
     tags: [...m.tags].sort(),
     snippet,
+    score,
+    review: m.review ?? null,
+    review_status: m.review_status ?? 'unverified',
+    supersedes: m.supersedes ?? null,
+    superseded_by: m.superseded_by ?? null,
   }
 }
+
+/** Keep to one review status and/or hide the superseded rows. */
+function statusFilters(rows, sp) {
+  const status = sp.get('status')
+  const current = sp.get('current')
+  if (status) rows = rows.filter((m) => (m.review_status ?? 'unverified') === status)
+  if (current === 'true' || current === '1') rows = rows.filter((m) => !m.superseded_by)
+  return rows
+}
+
+/** Mock verdict for the review routes: alternate approve / reject / rewrite. */
+function mockVerdict(m) {
+  const n = m.id % 3
+  if (n === 0) {
+    return { verdict: 'approve', rule: null, reason: 'A durable decision with its reason.',
+             rewrite: null, duplicate_of: null, tags: [], supersedes: null }
+  }
+  if (n === 1) {
+    return { verdict: 'reject', rule: 2, reason: 'A diary line: git history already has it.',
+             rewrite: null, duplicate_of: null, tags: [], supersedes: null }
+  }
+  return { verdict: 'rewrite', rule: 3, reason: 'Says what was done, not why.',
+           rewrite: `${m.content}: kept because it halved the cold-start time.`,
+           duplicate_of: null, tags: m.tags.slice(0, 2), supersedes: null }
+}
+
+// Mock review model state and the one-at-a-time catch-up flag.
+let catchUpRunning = false
 
 /** Sorted TagCount[] with live counts. */
 function tagCounts() {
@@ -58,7 +92,7 @@ function tagCounts() {
 
 export const handlers = [
   // ---- GET /health (no auth) ----
-  http.get('/health', () => HttpResponse.json({ status: 'ok' })),
+  http.get('/health', () => HttpResponse.json({ status: 'ok', review_model: 'reachable' })),
 
   // ---- GET /memories/bulk (before /memories/:id) ----
   http.get('/memories/bulk', ({ request }) => {
@@ -70,6 +104,102 @@ export const handlers = [
       .filter((m) => ids.includes(m.id))
       .map((m) => ({ id: m.id, agent: m.agent, project: m.project ?? null, type: m.type ?? null, content: m.content }))
     return HttpResponse.json(rows)
+  }),
+
+  // ---- GET /memories/search (ranked; keyword / semantic / hybrid) ----
+  http.get('/memories/search', ({ request }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    const sp = new URL(request.url).searchParams
+    const q = sp.get('q') || ''
+    const mode = sp.get('mode') || 'keyword'
+    const limit = Math.max(0, parseInt(sp.get('limit') ?? '20', 10) || 0)
+    const project = sp.get('project')
+    const agent = sp.get('agent')
+    const tag = sp.get('tag')
+    let rows = db.memories.slice()
+    if (project != null) rows = rows.filter((m) => (m.project ?? '') === project)
+    if (agent != null) rows = rows.filter((m) => m.agent === agent)
+    if (tag) rows = rows.filter((m) => m.tags.includes(tag))
+    rows = statusFilters(rows, sp)
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean)
+    // Score: keyword = share of words present; semantic/hybrid = the same plus
+    // a little for shared letters, so the ranked list differs a bit.
+    const scored = rows
+      .map((m) => {
+        const text = m.content.toLowerCase()
+        const hits = words.filter((w) => text.includes(w)).length
+        let score = words.length ? hits / words.length : 0
+        if (mode !== 'keyword' && words.length) {
+          // A stand-in for a cosine: the word share plus a fixed per-row part.
+          score = 0.55 * score + 0.45 * (((m.id * 37) % 100) / 100)
+        }
+        return [score, m]
+      })
+      .filter(([score, m]) => (mode === 'keyword' ? words.every((w) => m.content.toLowerCase().includes(w)) : score > 0.35))
+      .sort((a, b) => b[0] - a[0] || b[1].id - a[1].id)
+    const page = (limit ? scored.slice(0, limit) : scored)
+      .map(([score, m]) => toMemoryOut(m, mode === 'semantic' ? '' : q, Number(score.toFixed(4))))
+    // The mock has a model, so hybrid is served as asked; ?fallback=1 shows
+    // the fallback note the real server sends when it has none.
+    const headers = sp.get('fallback') ? { 'X-Search-Fallback': 'keyword' } : {}
+    return HttpResponse.json(page, { headers })
+  }),
+
+  // ---- GET /memories/flagged (reject / rewrite, newest review first) ----
+  http.get('/memories/flagged', ({ request }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    const sp = new URL(request.url).searchParams
+    const verdict = sp.get('verdict')
+    const status = sp.get('status')
+    const project = sp.get('project')
+    const limit = Math.max(0, parseInt(sp.get('limit') ?? '100', 10) || 0)
+    let rows = db.memories.slice()
+    if (project != null) rows = rows.filter((m) => (m.project ?? '') === project)
+    if (status) rows = rows.filter((m) => (m.review_status ?? 'unverified') === status)
+    else rows = rows.filter((m) => m.review && ['reject', 'rewrite'].includes(m.review.verdict))
+    if (verdict) rows = rows.filter((m) => m.review?.verdict === verdict)
+    rows.sort((a, b) => b.id - a.id)
+    const total = rows.length
+    const page = (limit ? rows.slice(0, limit) : rows).map((m) => toMemoryOut(m, ''))
+    return HttpResponse.json(page, { headers: { 'X-Total-Count': String(total) } })
+  }),
+
+  // ---- POST /admin/review (catch-up) ----
+  http.post('/admin/review', ({ request }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    if (catchUpRunning) return HttpResponse.json({ scheduled: 0, running: true })
+    const sp = new URL(request.url).searchParams
+    const limit = Math.max(0, parseInt(sp.get('limit') ?? '50', 10) || 0)
+    const pending = db.memories.filter((m) => (m.review_status ?? 'unverified') === 'unverified')
+    const ids = (limit ? pending.slice(0, limit) : pending).map((m) => m.id)
+    if (ids.length) {
+      catchUpRunning = true
+      // Verdicts land one by one, a little later, as on the real server.
+      setTimeout(() => {
+        for (const id of ids) {
+          const m = db.memories.find((x) => x.id === id)
+          if (!m) continue
+          m.review = mockVerdict(m)
+          m.review_status = m.review.verdict === 'approve' ? 'verified' : 'flagged'
+        }
+        catchUpRunning = false
+      }, 1500)
+    }
+    return HttpResponse.json({ scheduled: ids.length })
+  }),
+
+  // ---- POST /admin/review/:id (review one memory now) ----
+  http.post('/admin/review/:id', ({ request, params }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    const m = db.memories.find((x) => x.id === Number(params.id))
+    if (!m) return HttpResponse.json({ detail: 'Not found' }, { status: 404 })
+    m.review = mockVerdict(m)
+    m.review_status = m.review.verdict === 'approve' ? 'verified' : 'flagged'
+    return HttpResponse.json(m.review)
   }),
 
   // ---- GET /memories (list / search / filter, paginated) ----
@@ -98,6 +228,7 @@ export const handlers = [
     if (project != null) rows = rows.filter((m) => (m.project ?? '') === project)
     if (agent != null) rows = rows.filter((m) => m.agent === agent)
     if (type != null) rows = rows.filter((m) => (m.type ?? '') === type)
+    rows = statusFilters(rows, sp)
 
     if (sinceDays != null && sinceDays !== '') {
       // Single calendar day N days ago (UTC). Overrides since/until.
@@ -152,8 +283,12 @@ export const handlers = [
       content: body.content,
       type: body.type ?? null,
       tags: inTags.map((t) => t.name).sort(),
+      review_status: 'unverified',
+      review: null,
+      supersedes: null,
+      superseded_by: null,
     })
-    return HttpResponse.json({ id }, { status: 201 })
+    return HttpResponse.json({ id, warnings: [] }, { status: 201 })
   }),
 
   // ---- GET /memories/:id ----
@@ -174,7 +309,14 @@ export const handlers = [
     const body = await request.json()
     const changes = []
 
-    if (typeof body.content === 'string') { m.content = body.content; changes.push('content') }
+    if (typeof body.content === 'string') {
+      m.content = body.content
+      changes.push('content')
+      // New text, new check: the verdict was about the old text.
+      m.review = null
+      m.review_status = 'unverified'
+      m.supersedes = null
+    }
     if (typeof body.project === 'string') { m.project = body.project === '' ? null : body.project; changes.push('project') }
     if (typeof body.type === 'string') { m.type = body.type === '' ? null : body.type; changes.push('type') }
 
