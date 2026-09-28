@@ -69,6 +69,9 @@ class ReviewOut(BaseModel):
     reason: str = ""
     rewrite: str | None = None
     duplicate_of: int | None = None
+    # Tags suggested for the rewrite, from the tags that existed at the time.
+    # Empty unless the verdict is rewrite.
+    tags: list[str] = []
 
 
 class MemoryOut(BaseModel):

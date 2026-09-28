@@ -59,7 +59,7 @@ class FakeReviewer:
         self.verdict = verdict
         self.calls = []
 
-    def review(self, memory, neighbours):
+    def review(self, memory, neighbours, tags=()):
         self.calls.append((memory, neighbours))
         return self.verdict
 
@@ -82,7 +82,7 @@ def test_rules_match_the_skill_file_word_for_word():
 def test_system_prompt_lists_every_rule_and_the_answer_shape():
     for n, rule in RULES:
         assert f"{n}. {rule}" in review_mod.SYSTEM_PROMPT
-    for key in ("verdict", "rule", "reason", "rewrite", "duplicate_of"):
+    for key in ("verdict", "rule", "reason", "rewrite", "duplicate_of", "tags"):
         assert f'"{key}"' in review_mod.SYSTEM_PROMPT
 
 
@@ -98,7 +98,7 @@ def test_parse_verdict_reads_the_full_shape():
     v = parse_verdict(_answer(verdict="rewrite", rule=3, rewrite="better text"))
     assert v == Verdict("rewrite", 3, "diary", "better text", None)
     assert v.as_dict() == {"verdict": "rewrite", "rule": 3, "reason": "diary",
-                           "rewrite": "better text", "duplicate_of": None}
+                           "rewrite": "better text", "duplicate_of": None, "tags": []}
 
 
 def test_parse_verdict_keeps_a_duplicate_of_a_listed_neighbour():
@@ -412,7 +412,7 @@ async def test_null_reviewer_is_never_asked():
     class CountingNull(NullReviewer):
         calls = 0
 
-        def review(self, memory, neighbours):
+        def review(self, memory, neighbours, tags=()):
             CountingNull.calls += 1
             return None
 
@@ -431,7 +431,7 @@ async def test_app_without_a_reviewer_and_no_lifespan_still_adds():
 
 async def test_failing_reviewer_leaves_no_row_and_the_add_succeeds(caplog):
     class Broken(FakeReviewer):
-        def review(self, memory, neighbours):
+        def review(self, memory, neighbours, tags=()):
             raise RuntimeError("model blew up")
 
     with caplog.at_level(logging.WARNING, logger="agent_memory.server.app"):

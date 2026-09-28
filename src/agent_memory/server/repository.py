@@ -17,7 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from .embedding import Embedder, cosine
 from .models import Memory, MemoryReview, MemoryTag, Tag
-from .review import NEIGHBOUR_COUNT, Verdict
+from .review import NEIGHBOUR_COUNT, TAG_COUNT, Verdict
 
 # ts_headline markers match the old snippet() output so clients render identically.
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
@@ -65,7 +65,8 @@ def _dump_review(r: MemoryReview | None) -> dict | None:
     if r is None:
         return None
     return {"verdict": r.verdict, "rule": r.rule, "reason": r.reason,
-            "rewrite": r.rewrite, "duplicate_of": r.duplicate_of}
+            "rewrite": r.rewrite, "duplicate_of": r.duplicate_of,
+            "tags": list(r.tags or [])}
 
 
 def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> dict:
@@ -625,10 +626,33 @@ async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
     row.reason = verdict.reason
     row.rewrite = verdict.rewrite
     row.duplicate_of = verdict.duplicate_of
+    row.tags = list(verdict.tags) or None
     row.model = model
     row.created_at = datetime.now(timezone.utc)
     await session.flush()
     return _dump_review(row)
+
+
+async def tags_for_review(session, embedder: Embedder | None, content: str,
+                          limit: int = TAG_COUNT) -> list[str]:
+    """The names of the tags the reviewer may suggest for `content`: at most
+    `limit` of the tags in use, best first.
+
+    With a model, best means closest in meaning: each tag's `name: description`
+    and the content are embedded here and now (nothing is stored) and ranked
+    by cosine, ties broken by name. Without a model (no embedder, or a
+    `NullEmbedder`) the most used tags come first, as `list_tags` orders
+    them."""
+    rows = await list_tags(session)
+    if not rows:
+        return []
+    if embedder is None or embedder.model_name is None:
+        return [r["name"] for r in rows[:limit]]
+    texts = [f"{r['name']}: {r['description'] or r['name']}" for r in rows]
+    query_vec, *tag_vecs = embedder.embed([content, *texts])
+    scored = [(cosine(query_vec, vec), r["name"]) for vec, r in zip(tag_vecs, rows)]
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    return [name for _, name in scored[:limit]]
 
 
 # ---- reindex: fill in missing or stale vectors -----------------------------

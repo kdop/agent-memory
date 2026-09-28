@@ -280,7 +280,11 @@ class CliDriver:
         agent = project = type_ = None
         tags = []
         collected = []
+        in_suggestion = False
         for line in body.split("\n"):
+            if in_suggestion and line.startswith("    "):
+                continue  # a line of the suggested text
+            in_suggestion = False
             if line.startswith("🕒"):
                 continue
             if line.startswith("👤"):
@@ -298,9 +302,14 @@ class CliDriver:
                 tagstr = re.sub(r"^[^\w]+", "", line.strip())
                 tags = [t.strip() for t in tagstr.split(",") if t.strip()]
                 continue
-            if line.startswith("review: "):
-                # The review model's verdict line sits with the meta lines,
-                # before the content; the drivers compare content only.
+            if line.startswith("review: ") or line.startswith("suggested tags: "):
+                # The review model's verdict line and its suggested tags sit
+                # with the meta lines, before the content; the drivers
+                # compare content only.
+                continue
+            if line == "suggested:":
+                # The suggested text follows, indented; the content is not.
+                in_suggestion = True
                 continue
             if _SEP.match(line.strip()) or line.startswith("Found "):
                 break

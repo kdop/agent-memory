@@ -85,20 +85,23 @@ def _has_model(backend) -> bool:
 async def _review_memory(app: FastAPI, mid: int) -> Verdict | None:
     """Ask the reviewer about memory `mid` and store what it says.
 
-    Reads the memory and its nearest neighbours in one session, closes it,
-    calls the model in a thread (it may take many seconds, and a database
-    connection should not sit idle that long), then writes the verdict in a
-    second session. Returns the verdict, or None when the model gave none;
-    then nothing is written and an earlier verdict, if any, stays. Raises
-    `LookupError` when there is no such memory."""
+    Reads the memory, its nearest neighbours and the tags the model may
+    suggest in one session, closes it, calls the model in a thread (it may
+    take many seconds, and a database connection should not sit idle that
+    long), then writes the verdict in a second session. Returns the verdict,
+    or None when the model gave none; then nothing is written and an earlier
+    verdict, if any, stays. Raises `LookupError` when there is no such
+    memory."""
     reviewer: Reviewer = app.state.reviewer
     sessionmaker = app.state.sessionmaker
+    embedder = getattr(app.state, "embedder", None)
     async with sessionmaker() as session, session.begin():
         found = await repo.review_input(session, mid)
-    if found is None:
-        raise LookupError(f"Memory #{mid} not found")
-    memory, neighbours = found
-    verdict = await asyncio.to_thread(reviewer.review, memory, neighbours)
+        if found is None:
+            raise LookupError(f"Memory #{mid} not found")
+        memory, neighbours = found
+        tags = await repo.tags_for_review(session, embedder, memory["content"])
+    verdict = await asyncio.to_thread(reviewer.review, memory, neighbours, tags)
     if verdict is None:
         return None
     async with sessionmaker() as session, session.begin():
