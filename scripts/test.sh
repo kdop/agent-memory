@@ -5,7 +5,7 @@
 # Python/Node and then calls this.
 #
 # Three stages, each must pass before the next starts:
-#   1. Python test suite (pytest) — unit + cross-surface (cli/api/mcp) + migration.
+#   1. Python test suite (pytest) — repository, routes, the three surfaces, migrations.
 #   2. Frontend build (npm run build) — the dashboard must compile cleanly.
 #   3. Live end-to-end smoke — spawns the REAL `python -m agent_memory.server`
 #      subprocess (reading env vars exactly like production) serving the just-built

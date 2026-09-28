@@ -7,7 +7,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Postgres service backs the `pg` cross-surface tests. Without
+    # Postgres service backs the test suite. Without
     # AGENT_MEMORY_TEST_PG_DSN those tests skip; here it's always present.
     services:
       postgres:

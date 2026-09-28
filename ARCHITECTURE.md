@@ -293,8 +293,9 @@ The client resolves an **endpoint + token**, never a DB target:
 
 The server resolves a **DSN**: `AGENT_MEMORY_DB` (a `postgresql://` URL, normalized to
 `postgresql+asyncpg://`). The CLI, MCP, HTTP API, and repository all round-trip through
-the same Pydantic contract, so behaviour can't drift — the cross-surface suite asserts
-CLI, API, and MCP produce identical results.
+the same Pydantic contract, so behaviour can't drift. The tests check each behaviour
+once, in process, and keep to what differs between CLI, API and MCP (output, error
+shapes, flags, exit codes) in `tests/test_surfaces.py`.
 
 ## Design goals
 
