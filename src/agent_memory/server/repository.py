@@ -135,6 +135,66 @@ async def add(session, content, agent, project, tags, mtype, embedder=None) -> i
     return m.id
 
 
+def _candidates(model: str | None):
+    """The first step of every search by meaning: the id and vector of each
+    row that can be scored, and nothing else. Only rows that have a vector,
+    and only vectors from `model`: another model's vector may have a
+    different width, and cosine of two widths is an error, not a low score.
+    Callers add their own filters."""
+    return (
+        select(Memory.id, Memory.embedding)
+        .where(Memory.embedding.is_not(None), Memory.embedding_model == model)
+    )
+
+
+def _reference(model: str | None, project: str | None):
+    """The candidates the review paths compare with: the verified memories
+    of `project` (no project matches no project) with a vector from `model`.
+    A memory the model has not checked, or has flagged, is never used as
+    reference."""
+    return (
+        _candidates(model)
+        .where(Memory.project.is_not_distinct_from(project))
+        .where(Memory.review_status == VERIFIED)
+    )
+
+
+async def _score(session, stmt, vector, k) -> list[tuple[int, float]]:
+    """Run `stmt`, a `_candidates` statement, score every row against
+    `vector` with `cosine` in Python, and return the best `k` as
+    `(id, score)`, best first, ties broken by id, newest first. `k` of 0 or
+    None means all. Only ids and vectors cross the wire: scoring needs
+    nothing else, and loading whole rows for every candidate would move
+    the tags and text of the whole table for each search."""
+    scored = [(mid, cosine(vector, list(stored))) for mid, stored in await session.execute(stmt)]
+    scored.sort(key=lambda pair: (-pair[1], -pair[0]))
+    if k:
+        scored = scored[: int(k)]
+    return scored
+
+
+async def _scored_ids(session, embedder: Embedder, text, filters, k) -> list[tuple[int, float]]:
+    """The search-by-meaning first step: embed `text`, take the candidates
+    that pass the `_search_filters` in `filters`, and return the best `k`
+    as `(id, score)` (see `_score`)."""
+    query_vec = embedder.embed([text])[0]
+    stmt = _search_filters(_candidates(embedder.model_name), **filters)
+    return await _score(session, stmt, query_vec, k)
+
+
+async def _load_scored(session, scored) -> list[dict]:
+    """The second step: load the rows named in `scored` (a `_score` result)
+    with their tags and reviews in one query, and return them in that same
+    order, each with its score."""
+    if not scored:
+        return []
+    ids = [mid for mid, _ in scored]
+    rows = (await session.execute(select(Memory).options(*_LOAD).where(Memory.id.in_(ids)))
+            ).scalars().all()
+    by_id = {m.id: m for m in rows}
+    return [_dump(by_id[mid], score=score) for mid, score in scored if mid in by_id]
+
+
 async def find_duplicate(session, embedder, content, project) -> tuple[int, float] | None:
     """The memory that `content` would duplicate, as `(id, score)`, or None.
 
@@ -151,20 +211,10 @@ async def find_duplicate(session, embedder, content, project) -> tuple[int, floa
     vector, model = _embed(embedder, content)
     if vector is None:
         return None
-    stmt = (
-        select(Memory.id, Memory.embedding)
-        .where(Memory.project.is_not_distinct_from(project))
-        .where(Memory.review_status == VERIFIED)
-        .where(Memory.embedding.is_not(None))
-        .where(Memory.embedding_model == model)
-    )
-    best: tuple[int, float] | None = None
-    for mid, stored in await session.execute(stmt):
-        score = cosine(vector, list(stored))
-        if best is None or score > best[1]:
-            best = (mid, score)
-    if best is not None and best[1] >= DUPLICATE_THRESHOLD:
-        return best
+    # Only the best id and score are needed, so this is the one query.
+    best = await _score(session, _reference(model, project), vector, 1)
+    if best and best[0][1] >= DUPLICATE_THRESHOLD:
+        return best[0]
     return None
 
 
@@ -246,62 +296,51 @@ async def search_semantic(session, embedder: Embedder, text, *, project=None, ag
     """Search by meaning: rows closest to `text` in vector space, best first.
 
     Takes the same filters as `search`, but only rows that have a vector can
-    match. The whole candidate set is loaded and scored in Python with `cosine`;
-    that is fine at the sizes this system holds, and it needs no extension in
-    Postgres. Ties are broken by id, newest first. `limit` of 0 or None means
-    all rows. Each row carries the cosine as `score`; `snippet` is None, since
-    there are no matched words to highlight."""
-    query_vec = embedder.embed([text])[0]
-
-    stmt = (
-        select(Memory)
-        .options(*_LOAD)
-        # Only vectors from the running model: another model's vector may have a
-        # different width, and cosine of two widths is an error, not a low score.
-        .where(Memory.embedding.is_not(None), Memory.embedding_model == embedder.model_name)
-    )
-    stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag,
-                           current=current)
-    rows = (await session.execute(stmt)).scalars().all()
-
-    scored = [(cosine(query_vec, m.embedding), m) for m in rows]
-    scored.sort(key=lambda pair: (-pair[0], -pair[1].id))
-    if limit:
-        scored = scored[: int(limit)]
-    return [_dump(m, score=score) for score, m in scored]
+    match. Two steps: the id and vector of every candidate are read and
+    scored in Python with `cosine` (no extension in Postgres needed), then
+    only the winning rows are loaded with their tags and reviews. Ties are
+    broken by id, newest first. `limit` of 0 or None means all rows. Each
+    row carries the cosine as `score`; `snippet` is None, since there are no
+    matched words to highlight."""
+    filters = dict(project=project, agent=agent, since=since, tag=tag, current=current)
+    scored = await _scored_ids(session, embedder, text, filters, limit)
+    return await _load_scored(session, scored)
 
 
 async def search_hybrid(session, embedder: Embedder, text, *, project=None, agent=None,
                         since=None, tag=None, current=False, limit=None) -> list[dict]:
     """Search by words and by meaning at once, fused by rank.
 
-    Runs `search` and `search_semantic` with the same filters and no limit,
-    then fuses the two lists with reciprocal rank fusion: each memory scores
-    the sum, over the lists it appears in, of `1 / (RRF_K + rank)`, rank
-    starting at 1. A memory found by both lists outranks one found by only
-    one. Ranks, not raw scores, are fused, because ts_rank and cosine live on
-    different scales and adding them would mean nothing.
+    Runs `search` and the scoring step of `search_semantic` with the same
+    filters and no limit, then fuses the two lists with reciprocal rank
+    fusion: each memory scores the sum, over the lists it appears in, of
+    `1 / (RRF_K + rank)`, rank starting at 1. A memory found by both lists
+    outranks one found by only one. Ranks, not raw scores, are fused,
+    because ts_rank and cosine live on different scales and adding them
+    would mean nothing. The rows that only meaning found are loaded after
+    the fusion, and only the ones within `limit`.
 
     Best fused score first, ties broken by id, newest first. `limit` of 0 or
     None means all rows. `score` is the fused score; `snippet` comes from the
     keyword hit when there is one, else None."""
-    filters = dict(project=project, agent=agent, since=since, tag=tag, current=current, limit=0)
-    by_words = await search(session, text, **filters)
-    by_meaning = await search_semantic(session, embedder, text, **filters)
+    filters = dict(project=project, agent=agent, since=since, tag=tag, current=current)
+    by_words = await search(session, text, **filters, limit=0)
+    by_meaning = await _scored_ids(session, embedder, text, filters, 0)
 
-    fused: dict[int, dict] = {}
-    for hits in (by_words, by_meaning):
-        for rank, hit in enumerate(hits, start=1):
-            row = fused.get(hit["id"])
-            if row is None:
-                # The first list to name a memory supplies its fields. The
-                # keyword list goes first, so its snippet wins when both hit.
-                row = fused[hit["id"]] = dict(hit, score=0.0)
-            row["score"] += 1.0 / (RRF_K + rank)
-    rows = sorted(fused.values(), key=lambda r: (-r["score"], -r["id"]))
+    fused: dict[int, float] = {}
+    for ids in ([h["id"] for h in by_words], [mid for mid, _ in by_meaning]):
+        for rank, mid in enumerate(ids, start=1):
+            fused[mid] = fused.get(mid, 0.0) + 1.0 / (RRF_K + rank)
+    order = sorted(fused, key=lambda mid: (-fused[mid], -mid))
     if limit:
-        rows = rows[: int(limit)]
-    return rows
+        order = order[: int(limit)]
+
+    # The keyword hit supplies a memory's fields when there is one, so its
+    # snippet wins when both lists hit; the rest are loaded now, in one query.
+    rows = {h["id"]: h for h in by_words}
+    loaded = await _load_scored(session, [(mid, None) for mid in order if mid not in rows])
+    rows.update((h["id"], h) for h in loaded)
+    return [dict(rows[mid], score=fused[mid]) for mid in order if mid in rows]
 
 
 async def get(session, mid: int) -> dict | None:
@@ -632,20 +671,11 @@ async def _nearest(session, vector, model, project, exclude_id=None) -> list[dic
     unverified or flagged memory is never handed to the model as reference.
     `exclude_id` leaves one memory out: the one being reviewed, when it is
     stored."""
-    stmt = (
-        select(Memory)
-        .options(*_LOAD)
-        .where(Memory.project.is_not_distinct_from(project))
-        .where(Memory.review_status == VERIFIED)
-        .where(Memory.embedding.is_not(None))
-        .where(Memory.embedding_model == model)
-    )
+    stmt = _reference(model, project)
     if exclude_id is not None:
         stmt = stmt.where(Memory.id != exclude_id)
-    rows = (await session.execute(stmt)).scalars().all()
-    scored = [(cosine(vector, list(other.embedding)), other) for other in rows]
-    scored.sort(key=lambda pair: (-pair[0], -pair[1].id))
-    return [_dump(other, score=score) for score, other in scored[:NEIGHBOUR_COUNT]]
+    scored = await _score(session, stmt, vector, NEIGHBOUR_COUNT)
+    return await _load_scored(session, scored)
 
 
 # The verdicts that mark a memory as flagged: the model said no, or said
