@@ -267,3 +267,41 @@ quick check of the script itself.
 python scripts/replay_write_checks.py --dsn postgresql://memory:memory@127.0.0.1:5434/memory
 python scripts/replay_write_checks.py --dsn ... --since 2026-09-01 --until 2026-09-30
 ```
+
+## Releasing
+
+The live service never runs from a working checkout. It runs from a second checkout,
+`~/workspace/agent-memory-live`, that is always on a tag, with its own `.venv` and its
+own `.env`. `scripts/deploy.sh` is the only thing that changes it. To release, tag the
+commit on `main`, push the tag, and deploy it:
+
+```bash
+git tag v0.3.0 && git push origin v0.3.0
+scripts/deploy.sh deploy v0.3.0
+```
+
+`deploy` stops if the release checkout has changed or untracked files. Then it writes a
+`pg_dump` of the database to `backups/` in the release checkout and prints the row
+counts, fetches and checks out the tag, installs `.[server,mcp,embed]` into the release
+`.venv`, runs `alembic upgrade head`, prints the row counts again and stops if they
+changed, restarts the `agent-memory` user unit, waits for `/health`, and prints the
+reindex and poll lines from the log. `scripts/deploy.sh rollback v0.2.0` does the same
+in the other direction: it runs `alembic downgrade` to the schema of that tag first,
+then checks the tag out. `scripts/deploy.sh status` shows the tag the release checkout
+is on, the unit state and the health answer. `--release <path>` and `--unit <name>`
+point at another checkout or unit, `--dsn` names the database when it is not in the
+release `.env`, and `--no-restart` stops after the migration.
+
+The first time, create the release checkout and install the unit:
+
+```bash
+git clone git@github.com:kdop/agent-memory.git ~/workspace/agent-memory-live
+cp .env ~/workspace/agent-memory-live/.env          # the live DSN, token and port
+cp docs/agent-memory.service ~/.config/systemd/user/agent-memory.service
+systemctl --user daemon-reload
+scripts/deploy.sh deploy v0.3.0                      # creates the .venv, migrates, starts the unit
+systemctl --user enable agent-memory
+```
+
+Run the script from a working checkout; it refuses to run from the release checkout
+itself.

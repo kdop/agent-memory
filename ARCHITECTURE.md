@@ -224,7 +224,7 @@ share the same lock.
 ```mermaid
 flowchart LR
     subgraph vm [This machine, fedora]
-        SVC[Live service<br/>systemd user unit<br/>runs from the main checkout, port 8099]
+        SVC[Live service<br/>systemd user unit<br/>runs from the release checkout, on a tag, port 8099]
         TEST[Test instance<br/>scripts/test_instance.sh<br/>runs from a worktree, port 8001]
         COPY[(Copy of the database<br/>podman memcopy, port 5434)]
         MT[(Test database<br/>podman memtest, port 5433)]
@@ -242,9 +242,11 @@ flowchart LR
     PG -. pg_dump, read only .-> COPY
 ```
 
-The live service runs whatever branch the main checkout is on, so that checkout stays
-on `main`; branch work happens in worktrees. The test instance is how new code meets
-real data before anything goes live.
+The live service runs from a release checkout (`~/workspace/agent-memory-live`) that
+is always on a tag; `scripts/deploy.sh` is the only thing that moves it (README,
+"Releasing"). The main checkout and the worktrees are for work and never run the live
+service, so a reboot cannot start it on unreleased code. The test instance is how new
+code meets real data before anything goes live.
 
 ## Package layout
 
