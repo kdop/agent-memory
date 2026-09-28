@@ -187,7 +187,7 @@ Queries return superseded memories unless `current` is asked for.
 flowchart TD
     Q[query text + filters] --> MODE{mode}
     MODE -- keyword --> K[tsvector match<br/>ranked by ts_rank<br/>snippet]
-    MODE -- semantic --> S[vector of the query<br/>cosine against stored vectors<br/>in Python]
+    MODE -- semantic --> S[vector of the query<br/>cosine against stored vectors<br/>in Python, then load the winners]
     MODE -- hybrid --> K2[keyword list, no limit]
     MODE -- hybrid --> S2[semantic list, no limit]
     K2 --> F[fuse by rank:<br/>score = sum of 1 / 60 + rank]
@@ -395,22 +395,29 @@ content computes it again. Two texts that mean the same have vectors that point 
 same way, so their cosine is close to 1.
 
 **No pgvector.** The vector is a plain `REAL[]` column and the comparison runs in
-Python on the server: `search_semantic` loads every row that passes the filters and has
-a vector from the running model, scores each with `cosine`, sorts, cuts to the limit.
-Nothing is installed on the database host, and at this row count a full scan in Python
-takes a few milliseconds. If the table ever grows past that, switching to pgvector and
-an index is one migration; nothing in the API changes.
+Python on the server, in two steps: `search_semantic` reads only the id and the vector
+of every row that passes the filters and has a vector from the running model, scores
+each with `cosine`, sorts, cuts to the limit, then loads the winning rows with their
+tags and reviews in one query, in score order. Scoring needs only the vectors; loading
+whole rows for every candidate would move the text and tags of the whole table per
+search once it grows. The same two steps serve the meaning half of the combined
+search and the neighbours for a review; the duplicate check needs only the best id
+and score, so it stops after the first step. Nothing is installed on the database
+host, and at this row count a scan of the vectors in Python takes a few milliseconds.
+If the table ever grows past that, switching to pgvector and an index is one
+migration; nothing in the API changes.
 
 **Combined search** (`mode=hybrid`, `search_hybrid`) runs the keyword search and the
-search by meaning with the same filters and no limit, then merges the two ranked lists
-by rank, not by score, because `ts_rank` and cosine live on different scales. A memory
-at rank *r* in a list (the first hit is rank 1) adds `1 / (60 + r)` to its combined
-score; a memory in both lists gets the sum of both. So a memory that is first in both
-lists scores `2 / 61`, one that is first in one list only scores `1 / 61`, and a memory
-found both ways always outranks one found one way at the same rank. The constant 60
-(`RRF_K`) keeps the top ranks from crushing everything below them. Rows are sorted by
-that score, ties by newest id, then cut to the limit. The snippet comes from the
-keyword hit when there is one.
+scoring step of the search by meaning with the same filters and no limit, then merges
+the two ranked lists by rank, not by score, because `ts_rank` and cosine live on
+different scales. A memory at rank *r* in a list (the first hit is rank 1) adds
+`1 / (60 + r)` to its combined score; a memory in both lists gets the sum of both. So a
+memory that is first in both lists scores `2 / 61`, one that is first in one list only
+scores `1 / 61`, and a memory found both ways always outranks one found one way at the
+same rank. The constant 60 (`RRF_K`) keeps the top ranks from crushing everything below
+them. Rows are sorted by that score, ties by newest id, then cut to the limit; the rows
+only meaning found are loaded after that cut, so no row outside the limit is read
+whole. The snippet comes from the keyword hit when there is one.
 
 **Without the model** (`[embed]` not installed, or `AGENT_MEMORY_EMBED_MODEL=off`) the
 server runs with a `NullEmbedder`: writes store no vector, `mode=semantic` answers 400
