@@ -226,8 +226,8 @@ def create_app(
         response.headers["X-Total-Count"] = str(total)
         return items
 
-    # `/memories/bulk` and `/memories/search` are declared before `/memories/{mid}`
-    # so the literal paths win the match.
+    # `/memories/bulk`, `/memories/search` and `/memories/flagged` are declared
+    # before `/memories/{mid}` so the literal paths win the match.
     @app.get("/memories/bulk", dependencies=guard)
     async def get_memories_bulk(session: AsyncSession = SessionDep,
                                 ids: list[int] = Query(default=[])):
@@ -267,6 +267,22 @@ def create_app(
                        "AGENT_MEMORY_EMBED_MODEL and install the [embed] extra to enable it.",
             )
         return await repo.search_semantic(session, embedder, q, **filters)
+
+    @app.get("/memories/flagged", response_model=list[MemoryOut], dependencies=guard)
+    async def flagged_memories(
+        response: Response,
+        session: AsyncSession = SessionDep,
+        project: str | None = None,
+        verdict: Literal["reject", "rewrite"] | None = None,
+        limit: int = Query(default=100, ge=0, description="0 = no limit"),
+    ):
+        """The memories the review flagged (verdict reject or rewrite, or only
+        `verdict`), newest review first, each with its review. `X-Total-Count`
+        carries the match count ignoring the limit, as on `GET /memories`."""
+        filters = dict(project=project, verdict=verdict)
+        items = await repo.flagged(session, limit=limit, **filters)
+        response.headers["X-Total-Count"] = str(await repo.count_flagged(session, **filters))
+        return items
 
     @app.get("/memories/{mid}", response_model=MemoryOut, dependencies=guard)
     async def get_memory(mid: int, session: AsyncSession = SessionDep):
@@ -355,6 +371,25 @@ def create_app(
             reason = getattr(embedder, "reason", "the server has no embedding model")
             raise HTTPException(status_code=503, detail=f"Cannot reindex: {reason}")
         return {"updated": await repo.reindex(session, embedder)}
+
+    @app.post("/admin/review", dependencies=guard)
+    async def review_missing(request: Request, background: BackgroundTasks,
+                             session: AsyncSession = SessionDep,
+                             reviewer: Reviewer | None = ReviewerDep,
+                             limit: int = Query(default=50, ge=0, description="0 = no limit")):
+        """Run the review for the memories that have none yet, newest first,
+        up to `limit`. This is how memories written while the model was off
+        get their verdict later. The reviews run one after another in the
+        background, after this response; each one is stored as it comes,
+        and one that fails is a log line, as after an add. Returns how many
+        were scheduled. 503 when the server has no review model."""
+        if not _has_model(reviewer):
+            reason = getattr(reviewer, "reason", "the server has no review model")
+            raise HTTPException(status_code=503, detail=f"Cannot review: {reason}")
+        ids = await repo.without_review(session, limit=limit)
+        for mid in ids:
+            background.add_task(_review_in_background, request.app, mid)
+        return {"scheduled": len(ids)}
 
     @app.post("/admin/review/{mid}", response_model=ReviewOut, dependencies=guard)
     async def review_memory(mid: int, request: Request,

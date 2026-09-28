@@ -1,7 +1,7 @@
 """MCP server exposing the memory API as tools.
 
-Mirrors the CLI surface — memory_add/query/search/show/update/delete/tags/projects/
-stats — each wrapping an `ApiClient` (talks HTTP to the FastAPI service, exactly like
+Mirrors the CLI surface — memory_add/query/search/flagged/show/update/delete/tags/
+projects/stats — each wrapping an `ApiClient` (talks HTTP to the FastAPI service, exactly like
 the CLI). stdio transport. Lives in the [mcp] extra.
 
 Every tool returns a single JSON object (lists wrapped under a key) because FastMCP
@@ -75,6 +75,20 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
         except ApiRefused as e:
             return {"error": str(e)}
         return {"memories": rows}
+
+    @mcp.tool()
+    def memory_flagged(project: Optional[str] = None, verdict: Optional[str] = None,
+                       limit: int = 20) -> dict:
+        """List the memories the review model flagged: those whose review says
+        "reject" or "rewrite", newest review first. `verdict` narrows to one of
+        the two; None lists both. `project` narrows to one project. limit 0
+        returns every match. Returns {"memories": [...]}, the same shape as
+        memory_query, each memory with its `review` (verdict, rule, reason,
+        rewrite, duplicate_of). A `verdict` that is not "reject" or "rewrite"
+        returns {"error": "<why>"}."""
+        if verdict is not None and verdict not in ("reject", "rewrite"):
+            return {"error": f"verdict must be \"reject\" or \"rewrite\" (got {verdict!r})"}
+        return {"memories": api.flagged(project=project, verdict=verdict, limit=limit)}
 
     @mcp.tool()
     def memory_show(id: int) -> dict:

@@ -33,9 +33,10 @@ class DuplicateMemory(RuntimeError):
 
 
 class ApiRefused(RuntimeError):
-    """The server turned the request down and said why (an HTTP 4xx with a
-    plain `detail` string, such as a search mode it cannot serve). `status` is
-    the HTTP code; `str(e)` is the server's message, ready to print."""
+    """The server turned the request down and said why (an HTTP 4xx, or a 503
+    for a model the server does not have, with a plain `detail` string, such
+    as a search mode it cannot serve). `status` is the HTTP code; `str(e)` is
+    the server's message, ready to print."""
 
     def __init__(self, status: int, detail: str):
         self.status = status
@@ -105,7 +106,7 @@ class ApiClient:
                 dup = _duplicate_from(detail)
                 if dup is not None:
                     raise dup from e
-            if 400 <= e.code < 500:
+            if 400 <= e.code < 500 or e.code == 503:
                 message = _detail_from(detail)
                 if message is not None:
                     raise ApiRefused(e.code, message) from e
@@ -213,6 +214,30 @@ class ApiClient:
         Returns the number of rows updated."""
         _, data = self._call("POST", "/admin/reindex")
         return data["updated"]
+
+    def flagged(self, project=None, verdict=None, limit=None):
+        """The memories the review flagged, newest review first, each with its
+        `review`. `verdict` is "reject" or "rewrite"; None lists both. `limit=0`
+        returns everything; None uses the server default."""
+        rows, _ = self.flagged_with_total(project=project, verdict=verdict, limit=limit)
+        return rows
+
+    def flagged_with_total(self, project=None, verdict=None, limit=None):
+        """(rows, total): total is the match count ignoring the limit."""
+        _, headers, data = self._request("GET", "/memories/flagged", params={
+            "project": project, "verdict": verdict, "limit": limit,
+        })
+        rows = data or []
+        total = int((headers or {}).get("X-Total-Count") or len(rows))
+        return rows, total
+
+    def review_missing(self, limit=None):
+        """Ask the server to review the memories that have no review yet,
+        newest first, up to `limit` (None uses the server default, 0 means
+        all). The reviews run in the background; returns how many were
+        scheduled. A server without a review model raises `ApiRefused`."""
+        _, data = self._call("POST", "/admin/review", params={"limit": limit})
+        return data["scheduled"]
 
 
 def get_client():
