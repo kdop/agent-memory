@@ -27,6 +27,7 @@ import os
 import socket
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -161,6 +162,52 @@ def _truncate(_schema):
                     text("TRUNCATE memories, tags, memory_tags, memory_reviews "
                          "RESTART IDENTITY CASCADE")
                 )
+        finally:
+            await eng.dispose()
+
+    asyncio.run(_do())
+
+
+@contextmanager
+def live_app(app):
+    """Run `app` under uvicorn in a background thread for the length of the
+    block; yields its URL. For tests that need a live server with their own
+    reviewer or mode, next to the shared `live_server`."""
+    import uvicorn
+
+    port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20
+    while not server.started:
+        if time.monotonic() > deadline:
+            raise RuntimeError("uvicorn did not start in time")
+        time.sleep(0.02)
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def verify(*ids):
+    """Mark memories as verified the way the server does: plant an approve
+    verdict for each, which sets `review_status` to `verified`. The shared
+    live server runs without a review model, so a test that needs a memory
+    in the reference set (the duplicate check, the neighbours) calls this."""
+    from agent_memory.server import repository as repo
+    from agent_memory.server.db import make_sessionmaker
+    from agent_memory.server.review import Verdict
+
+    approve = Verdict("approve", None, "Fine.", None, None)
+
+    async def _do():
+        eng = make_test_engine()
+        try:
+            async with make_sessionmaker(eng)() as session, session.begin():
+                for mid in ids:
+                    await repo.set_review(session, mid, approve, "planted")
         finally:
             await eng.dispose()
 

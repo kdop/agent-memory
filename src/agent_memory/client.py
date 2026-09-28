@@ -15,6 +15,11 @@ import urllib.request
 
 from .config import resolve_api_token, resolve_api_url
 
+# The values a memory's `review_status` can take, as the server defines them
+# (server/review.py, STATUSES): the client half cannot import the server, so
+# the list is copied here and a test checks the two match.
+REVIEW_STATUSES = ("unverified", "verified", "flagged")
+
 
 class ApiUnreachable(RuntimeError):
     """The memory API could not be reached. Carries a ready-to-print, actionable
@@ -178,19 +183,22 @@ class ApiClient:
         return data["id"], data.get("warnings") or []
 
     def query(self, *, since_days=None, since=None, until=None, project=None,
-              agent=None, tag=None, mtype=None, limit=None):
-        """Rows only. `limit=0` returns everything; None uses the server default."""
+              agent=None, tag=None, mtype=None, status=None, limit=None):
+        """Rows only. `status` keeps to one review status ("unverified",
+        "verified" or "flagged"; None for all). `limit=0` returns everything;
+        None uses the server default."""
         rows, _ = self.query_with_total(
             since_days=since_days, since=since, until=until, project=project,
-            agent=agent, tag=tag, mtype=mtype, limit=limit)
+            agent=agent, tag=tag, mtype=mtype, status=status, limit=limit)
         return rows
 
     def query_with_total(self, *, since_days=None, since=None, until=None, project=None,
-                         agent=None, tag=None, mtype=None, limit=None):
+                         agent=None, tag=None, mtype=None, status=None, limit=None):
         """(rows, total): total is the match count ignoring the limit."""
         _, headers, data = self._request("GET", "/memories", params={
             "since_days": since_days, "since": since, "until": until,
-            "project": project, "agent": agent, "tag": tag, "type": mtype, "limit": limit,
+            "project": project, "agent": agent, "tag": tag, "type": mtype,
+            "status": status, "limit": limit,
         })
         rows = data or []
         total = int((headers or {}).get("X-Total-Count") or len(rows))
@@ -255,29 +263,36 @@ class ApiClient:
         _, data = self._call("POST", "/admin/reindex")
         return data["updated"]
 
-    def flagged(self, project=None, verdict=None, limit=None):
+    def flagged(self, project=None, verdict=None, status=None, limit=None):
         """The memories the review flagged, newest review first, each with its
-        `review`. `verdict` is "reject" or "rewrite"; None lists both. `limit=0`
-        returns everything; None uses the server default."""
-        rows, _ = self.flagged_with_total(project=project, verdict=verdict, limit=limit)
+        `review`. `verdict` is "reject" or "rewrite"; None lists both. With
+        `status` ("unverified", "verified" or "flagged") the memories with
+        that review status instead. `limit=0` returns everything; None uses
+        the server default."""
+        rows, _ = self.flagged_with_total(project=project, verdict=verdict, status=status,
+                                          limit=limit)
         return rows
 
-    def flagged_with_total(self, project=None, verdict=None, limit=None):
+    def flagged_with_total(self, project=None, verdict=None, status=None, limit=None):
         """(rows, total): total is the match count ignoring the limit."""
         _, headers, data = self._request("GET", "/memories/flagged", params={
-            "project": project, "verdict": verdict, "limit": limit,
+            "project": project, "verdict": verdict, "status": status, "limit": limit,
         })
         rows = data or []
         total = int((headers or {}).get("X-Total-Count") or len(rows))
         return rows, total
 
-    def review_missing(self, limit=None):
-        """Ask the server to review the memories that have no review yet,
-        newest first, up to `limit` (None uses the server default, 0 means
-        all). The reviews run in the background; returns how many were
-        scheduled. A server without a review model raises `ApiRefused`."""
+    def review_catch_up(self, limit=None):
+        """The catch-up: ask the server to review the unverified memories,
+        oldest first, one after another, up to `limit` (None uses the server
+        default, 0 means all). The reviews run in the background; returns
+        how many were scheduled. A server without a review model raises
+        `ApiRefused`."""
         _, data = self._call("POST", "/admin/review", params={"limit": limit})
         return data["scheduled"]
+
+    # The old name, kept for callers that still use it.
+    review_missing = review_catch_up
 
 
 def get_client():

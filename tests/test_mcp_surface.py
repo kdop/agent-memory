@@ -8,6 +8,7 @@ Every test drives the real FastMCP server over an in-memory session, wrapping an
 
 import pytest
 
+from conftest import verify
 from drivers import McpDriver
 
 
@@ -25,6 +26,7 @@ def _add(mcp, content, **kw):
 def test_memory_add_duplicate_returns_error_shape(mcp):
     first = _add(mcp, "dup me", project="proj")
     assert set(first) == {"id", "warnings"}
+    verify(first["id"])   # only a verified memory counts as reference
 
     again = _add(mcp, "dup me", project="proj")
     assert set(again) == {"error", "existing_id", "score"}
@@ -36,6 +38,7 @@ def test_memory_add_duplicate_returns_error_shape(mcp):
 
 def test_memory_add_force_stores_the_duplicate(mcp):
     _add(mcp, "dup me", project="proj")
+    verify(1)
     forced = _add(mcp, "dup me", project="proj", force=True)
     assert set(forced) == {"id", "warnings"}
     assert forced["id"] == 2

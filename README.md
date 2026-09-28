@@ -105,7 +105,12 @@ on any Ollama server: `AGENT_MEMORY_REVIEW_URL` is its address, for example
 `search`, for example `review: reject, rule 2: <reason>`; a rewrite adds the suggested
 text under `suggested:` and a `suggested tags:` line. `memory review` lists the memories
 with a reject or rewrite verdict, newest first (`--project`, `--verdict`, `--limit`,
-`--all`); `memory review --missing` reviews the memories written while the model was off.
+`--all`); `memory review --catch-up` reviews the memories written while the model was
+off, oldest first, one after another. Every memory also carries a review status, printed
+right after its id as `status: unverified` (until the model has checked it), `verified`
+(approved) or `flagged` (rejected, or a rewrite suggested), and `--status` on `query` and
+`review` filters by it; only verified memories serve as reference for the duplicate check
+and for the neighbours the model sees, so an unchecked entry can never vouch for another.
 In enforce mode a reject or rewrite refuses the write and nothing is stored: the API
 answers `422` with the verdict and the suggestion, the CLI prints `✗ Review: rewrite,
 rule 3: <reason>`, the suggestion, and `Fix the entry, or pass --force to store it as

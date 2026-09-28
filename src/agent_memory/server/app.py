@@ -46,6 +46,10 @@ from .schemas import (
 
 log = logging.getLogger(__name__)
 
+# The `status` query parameter: one of review.STATUSES. Spelled out so FastAPI
+# answers 422 for anything else; a test checks the two lists match.
+ReviewStatus = Literal["unverified", "verified", "flagged"]
+
 
 async def get_session(request: Request) -> AsyncSession:
     sm: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
@@ -171,6 +175,16 @@ async def _review_in_background(app: FastAPI, mid: int) -> None:
         log.warning("review of memory #%d failed: %s: %s", mid, type(e).__name__, e)
 
 
+async def _review_in_order(app: FastAPI, ids: list[int]) -> None:
+    """The catch-up as one background task: review `ids` one after another,
+    in the order given. Each verdict is stored (and the memory's status set)
+    before the next memory is read, so a memory verified here is already
+    part of the reference set for the ones after it. A review that fails is
+    one log line, and the rest still run."""
+    for mid in ids:
+        await _review_in_background(app, mid)
+
+
 async def _reindex_at_startup(app: FastAPI) -> None:
     """Fill in vectors for rows that have none, or one from another model, once
     at server start. A failure here is logged and must not stop the server: the
@@ -251,8 +265,9 @@ def create_app(
                              description="Store even when a near-duplicate exists, or "
                                          "when the review model would refuse the entry")):
         # A memory that already exists in this project is refused, not stored
-        # twice. `force=true` skips the check; a server without a model never
-        # refuses, since it has no vectors to compare.
+        # twice. Only verified memories (ones the model approved) count as
+        # reference. `force=true` skips the check; a server without a model
+        # never refuses, since it has no vectors to compare.
         if not force:
             dup = await repo.find_duplicate(session, embedder, body.content, body.project)
             if dup is not None:
@@ -268,16 +283,19 @@ def create_app(
             verdict = await _review_before_store(session, reviewer, embedder, body)
             if verdict is not None and verdict.verdict != "approve":
                 raise HTTPException(status_code=422, detail=_refusal(verdict))
+        # Stored as `unverified`; the verdict, when one lands, sets the status.
         mid = await repo.add(session, body.content, body.agent or "unknown",
                              body.project, body.tags, body.type, embedder=embedder)
         if verdict is not None:
-            # The approve from just now is the review: no second model call.
+            # The approve from just now is the review: no second model call,
+            # and the memory is `verified` from the start.
             await repo.set_review(session, mid, verdict, reviewer.model_name)
         elif _has_model(reviewer) and not enforced:
             # Warn mode, or a forced write: the review runs after the response
             # is sent, so the writer never waits for it. The session above
             # commits before the response goes out, so the task sees the new
-            # row in its own session.
+            # row in its own session. The memory stays `unverified` until
+            # the verdict is stored.
             background.add_task(_review_in_background, request.app, mid)
         # Stored either way; the warnings only tell the writer what the entry lacks.
         return {"id": mid, "warnings": warnings_for(body)}
@@ -294,13 +312,14 @@ def create_app(
         project: str | None = None,
         agent: str | None = None,
         type: str | None = None,
+        status: ReviewStatus | None = None,
         order: str = "date_desc",
         limit: int = Query(default=100, ge=0, description="0 = no limit"),
         offset: int = Query(default=0, ge=0),
     ):
         items, total = await repo.list_memories(
             session, q=q, tags=tag, project=project, agent=agent, mtype=type,
-            since_days=since_days, since=since, until=until,
+            status=status, since_days=since_days, since=since, until=until,
             order=order, limit=limit, offset=offset)
         response.headers["X-Total-Count"] = str(total)
         return items
@@ -353,12 +372,15 @@ def create_app(
         session: AsyncSession = SessionDep,
         project: str | None = None,
         verdict: Literal["reject", "rewrite"] | None = None,
+        status: ReviewStatus | None = None,
         limit: int = Query(default=100, ge=0, description="0 = no limit"),
     ):
         """The memories the review flagged (verdict reject or rewrite, or only
-        `verdict`), newest review first, each with its review. `X-Total-Count`
-        carries the match count ignoring the limit, as on `GET /memories`."""
-        filters = dict(project=project, verdict=verdict)
+        `verdict`), newest review first, each with its review. With `status`,
+        the memories with that review status instead, so `status=unverified`
+        lists what the model has not checked yet. `X-Total-Count` carries the
+        match count ignoring the limit, as on `GET /memories`."""
+        filters = dict(project=project, verdict=verdict, status=status)
         items = await repo.flagged(session, limit=limit, **filters)
         response.headers["X-Total-Count"] = str(await repo.count_flagged(session, **filters))
         return items
@@ -452,22 +474,23 @@ def create_app(
         return {"updated": await repo.reindex(session, embedder)}
 
     @app.post("/admin/review", dependencies=guard)
-    async def review_missing(request: Request, background: BackgroundTasks,
-                             session: AsyncSession = SessionDep,
-                             reviewer: Reviewer | None = ReviewerDep,
-                             limit: int = Query(default=50, ge=0, description="0 = no limit")):
-        """Run the review for the memories that have none yet, newest first,
-        up to `limit`. This is how memories written while the model was off
-        get their verdict later. The reviews run one after another in the
-        background, after this response; each one is stored as it comes,
-        and one that fails is a log line, as after an add. Returns how many
+    async def review_catch_up(request: Request, background: BackgroundTasks,
+                              session: AsyncSession = SessionDep,
+                              reviewer: Reviewer | None = ReviewerDep,
+                              limit: int = Query(default=50, ge=0, description="0 = no limit")):
+        """The catch-up: review the unverified memories, oldest first, up to
+        `limit`. This is how memories written while the model was off get
+        their verdict later. The reviews run one after another, in that
+        order, in one background task after this response, so each verdict
+        is stored before the next memory is compared; one that fails is a
+        log line, as after an add, and the rest still run. Returns how many
         were scheduled. 503 when the server has no review model."""
         if not _has_model(reviewer):
             reason = getattr(reviewer, "reason", "the server has no review model")
             raise HTTPException(status_code=503, detail=f"Cannot review: {reason}")
-        ids = await repo.without_review(session, limit=limit)
-        for mid in ids:
-            background.add_task(_review_in_background, request.app, mid)
+        ids = await repo.unverified_ids(session, limit=limit)
+        if ids:
+            background.add_task(_review_in_order, request.app, ids)
         return {"scheduled": len(ids)}
 
     @app.post("/admin/review/{mid}", response_model=ReviewOut, dependencies=guard)

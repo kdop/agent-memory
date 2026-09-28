@@ -95,6 +95,8 @@ class Memory:
     content: str = ""
     snippet: str | None = None
     score: float | None = None
+    # The review status the surface reported: unverified, verified or flagged.
+    status: str | None = None
 
 
 class CliDriver:
@@ -150,7 +152,7 @@ class CliDriver:
         args = ["query"]
         if filters.get("since_days") is not None:
             args += ["--since-days", str(filters["since_days"])]
-        for flag in ("since", "until", "project", "agent", "tag", "type"):
+        for flag in ("since", "until", "project", "agent", "tag", "type", "status"):
             if filters.get(flag):
                 args += [f"--{flag}", str(filters[flag])]
         if filters.get("limit") is not None:
@@ -265,18 +267,21 @@ class CliDriver:
     def _parse_memories(self, text, snippet=False):
         if "No memories found" in text:
             return []
-        # Each header is `━━━ #<id> [score <n>] ━━━…`; keep the rest of the line
-        # so the score can be read out of it.
+        # Each header is `━━━ #<id> status: <status> [score <n>] ━━━…`; keep
+        # the rest of the line so the status and the score can be read out of it.
         parts = re.split(r"━+ #(\d+)([^\n]*)\n", text)
         out = []
         it = iter(parts[1:])  # parts[0] is the preamble before the first block
         for mid, header, body in zip(it, it, it):
             sm = re.search(r"score (-?\d+\.\d+)", header)
             score = float(sm.group(1)) if sm else None
-            out.append(self._parse_block(int(mid), body, snippet=snippet, score=score))
+            st = re.search(r"status: (\w+)", header)
+            status = st.group(1) if st else None
+            out.append(self._parse_block(int(mid), body, snippet=snippet, score=score,
+                                         status=status))
         return out
 
-    def _parse_block(self, mid, body, snippet=False, score=None):
+    def _parse_block(self, mid, body, snippet=False, score=None, status=None):
         agent = project = type_ = None
         tags = []
         collected = []
@@ -320,6 +325,7 @@ class CliDriver:
             content="" if snippet else text_body,
             snippet=text_body if snippet else None,
             score=score,
+            status=status,
         )
 
 
@@ -359,6 +365,7 @@ class ApiDriver:
             content="" if snippet else (d.get("content") or ""),
             snippet=d.get("snippet") if snippet else None,
             score=d.get("score"),
+            status=d.get("review_status"),
         )
 
     # ---- semantic operations --------------------------------------------
@@ -379,7 +386,7 @@ class ApiDriver:
             since=filters.get("since"), until=filters.get("until"),
             project=filters.get("project"), agent=filters.get("agent"),
             tag=filters.get("tag"), type=filters.get("type"),
-            limit=filters.get("limit"),
+            status=filters.get("status"), limit=filters.get("limit"),
         )
         return [self._to_memory(d) for d in resp.json()]
 
@@ -484,6 +491,7 @@ class McpDriver:
             content="" if snippet else (d.get("content") or ""),
             snippet=d.get("snippet") if snippet else None,
             score=d.get("score"),
+            status=d.get("review_status"),
         )
 
     # ---- semantic operations --------------------------------------------
@@ -501,7 +509,7 @@ class McpDriver:
             since=filters.get("since"), until=filters.get("until"),
             project=filters.get("project"), agent=filters.get("agent"),
             tag=filters.get("tag"), type=filters.get("type"),
-            limit=filters.get("limit"),
+            status=filters.get("status"), limit=filters.get("limit"),
         )
         return [self._to_memory(d) for d in data["memories"]]
 

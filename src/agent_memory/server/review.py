@@ -59,6 +59,22 @@ RULES: tuple[tuple[int, str], ...] = (
 
 VERDICTS = ("approve", "reject", "rewrite")
 
+# What a memory's `review_status` says about the model's check of it:
+# `unverified` (not checked yet, or the model gave no answer), `verified`
+# (approved) or `flagged` (rejected, or a rewrite was suggested). Only
+# verified memories serve as reference when another memory is checked.
+STATUSES = ("unverified", "verified", "flagged")
+UNVERIFIED, VERIFIED, FLAGGED = STATUSES
+
+
+def status_for(verdict: str) -> str:
+    """The status a memory gets when `verdict` is stored for it: approve
+    gives `verified`, reject or rewrite gives `flagged`."""
+    if verdict not in VERDICTS:
+        raise ValueError(f"verdict must be one of {', '.join(VERDICTS)} (got {verdict!r})")
+    return VERIFIED if verdict == "approve" else FLAGGED
+
+
 # The values AGENT_MEMORY_REVIEW may take. `off` means no model is asked;
 # `warn` stores the verdict after the write; `enforce` refuses a write the
 # model rejects or wants rewritten.

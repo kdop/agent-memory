@@ -10,6 +10,7 @@ import re
 
 import pytest
 
+from conftest import verify
 from drivers import CliDriver
 
 
@@ -99,7 +100,7 @@ def test_search_defaults_to_keyword(cli):
 def test_search_keyword_prints_score_in_header(cli):
     _seed_search(cli)
     out = cli.raw("search", "cat").stdout
-    assert re.search(r"^━━━ #1 score -?\d\.\d\d ━+$", out, re.M)
+    assert re.search(r"^━━━ #1 status: unverified score -?\d\.\d\d ━+$", out, re.M)
 
 
 def test_search_semantic_prints_score_and_ranks_exact_text_first(cli):
@@ -108,7 +109,7 @@ def test_search_semantic_prints_score_and_ranks_exact_text_first(cli):
     assert proc.returncode == 0
     out = proc.stdout
     # Every stored memory comes back, best first, with a two-decimal score.
-    headers = re.findall(r"^━━━ #(\d+) score (-?\d\.\d\d) ━+$", out, re.M)
+    headers = re.findall(r"^━━━ #(\d+) status: \w+ score (-?\d\.\d\d) ━+$", out, re.M)
     assert len(headers) == 4
     assert headers[0] == ("1", "1.00")
     scores = [float(sc) for _id, sc in headers]
@@ -132,7 +133,7 @@ def test_search_hybrid_returns_fused_results(cli):
     cli.raw("add", "a dog in the yard")
     proc = cli.raw("search", "the cat sat on the mat", "--mode", "hybrid")
     assert proc.returncode == 0, proc.stderr
-    assert "#1 score 0.03" in proc.stdout
+    assert "#1 status: unverified score 0.03" in proc.stdout
     assert proc.stdout.index("#1 ") < proc.stdout.index("#2 ")
 
 
@@ -270,6 +271,7 @@ def test_delete_none_found_exits_1(cli):
 # ── duplicate refusal ────────────────────────────────────────────────────────
 def test_add_duplicate_exits_3_with_hint(cli):
     assert "✓ Memory #1 added" in cli.raw("add", "dup me", "--project", "proj").stdout
+    verify(1)   # only a verified memory counts as reference
     proc = cli.raw("add", "dup me", "--project", "proj")
     assert proc.returncode == 3
     assert proc.stdout.strip() == (
@@ -280,6 +282,7 @@ def test_add_duplicate_exits_3_with_hint(cli):
 
 def test_add_force_stores_the_duplicate(cli):
     cli.raw("add", "dup me", "--project", "proj")
+    verify(1)
     proc = cli.raw("add", "dup me", "--project", "proj", "--force")
     assert proc.returncode == 0
     assert "✓ Memory #2 added (tester)" in proc.stdout

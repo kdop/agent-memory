@@ -97,13 +97,18 @@ CREATE TABLE memories (
     -- The meaning vector of `content` and the name of the model that made it.
     -- Both NULL until a model has seen the row. Neither is ever returned by the API.
     embedding       REAL[],
-    embedding_model TEXT
+    embedding_model TEXT,
+    -- Whether the review model has checked the row: unverified until a verdict is
+    -- stored, then verified (approve) or flagged (reject or rewrite).
+    review_status   TEXT NOT NULL DEFAULT 'unverified'
+                    CHECK (review_status IN ('unverified', 'verified', 'flagged'))
 );
 CREATE INDEX idx_content_tsv ON memories USING gin (content_tsv);
 CREATE INDEX ix_memories_timestamp ON memories (timestamp);
 CREATE INDEX ix_memories_agent     ON memories (agent);
 CREATE INDEX ix_memories_project   ON memories (project);
 CREATE INDEX ix_memories_type      ON memories (type);
+CREATE INDEX ix_memories_review_status ON memories (review_status);
 
 -- Canonical tags: case-insensitive-unique name + a required descriptor.
 CREATE TABLE tags (
@@ -223,7 +228,11 @@ have the same length.
   same entry gets the same verdict; and `num_ctx: 8192`, so the rules, the entry and
   five neighbours fit. The verdict is stored in `memory_reviews` (schema above), one
   row per memory; `set_review` replaces it on a re-review, and every read carries it
-  as `review` next to the tags.
+  as `review` next to the tags. The memory's `review_status` follows the verdict
+  (`unverified` until one is stored, `verified` on approve, `flagged` on reject or
+  rewrite; every read carries it too), and only verified memories are reference for
+  `find_duplicate` and `_nearest`, so an entry the model has not checked can never
+  vouch for another.
 
   `AGENT_MEMORY_REVIEW` picks how the review runs (`review_mode`, `make_reviewer`):
   `off` (the default, also for an unknown value or a missing `AGENT_MEMORY_REVIEW_URL`)
@@ -246,12 +255,13 @@ have the same length.
   **The fallback rule, in every mode:** a model that is off, unreachable, slow (past
   `AGENT_MEMORY_REVIEW_TIMEOUT`, default 30 s) or answering with something that is not
   the expected JSON never blocks a write. The memory is stored, no row is written, and
-  the server logs one line. `POST /admin/review` (`memory review --missing`) reviews the
-  memories that have no row yet, newest first, in the background, so memories written
-  while the model was off or down get their verdict later; `POST /admin/review/{id}`
-  reviews one memory now and replaces its row. `GET /memories/flagged`
-  (`memory review`, MCP `memory_flagged`) lists the memories whose verdict is `reject`
-  or `rewrite`, newest review first.
+  the server logs one line. `POST /admin/review` (`memory review --catch-up`) reviews
+  the unverified memories, oldest first, one after another in one background task, so
+  each verdict is stored before the next memory is compared and memories written while
+  the model was off or down get their verdict later; `POST /admin/review/{id}` reviews
+  one memory now and replaces its row. `GET /memories/flagged` (`memory review`, MCP
+  `memory_flagged`) lists the memories whose verdict is `reject` or `rewrite`, newest
+  review first, or with `status` the memories with that review status.
 
 Before a check goes live, `scripts/replay_write_checks.py` runs the duplicate check and
 the warnings over a copy of the database in write order and prints what each would
@@ -291,7 +301,7 @@ Three ways in beyond the CLI:
   `GET /memories` (query), `GET /memories/search`, `GET /memories/{id}`,
   `GET /memories/bulk`, `GET /memories/flagged`, `PATCH /memories/{id}`,
   `DELETE /memories`, `GET /tags`, `GET /projects`, `GET /stats`, `POST /admin/reindex`,
-  `POST /admin/review` (review the memories that have no verdict yet),
+  `POST /admin/review` (the catch-up: review the unverified memories, oldest first),
   `POST /admin/review/{id}` (review one memory now). Bearer auth via `AGENT_MEMORY_API_TOKEN`;
   `GET /health` is unauthenticated. Call it with any HTTP client, or reuse
   `agent_memory.client.ApiClient`.
@@ -302,7 +312,7 @@ Three ways in beyond the CLI:
   is plain async functions over an `AsyncSession` (`add`, `find_duplicate`, `query`,
   `search`, `search_semantic`, `search_hybrid`, `get`, `update`, `get_many`, `delete`,
   `list_tags`, `list_projects`, `stats`, `reindex`, `review_input`, `neighbours_for`,
-  `tags_for_review`, `set_review`, `flagged`, `count_flagged`, `without_review`).
+  `tags_for_review`, `set_review`, `flagged`, `count_flagged`, `unverified_ids`).
 
 A minimal client using the packaged wrapper:
 

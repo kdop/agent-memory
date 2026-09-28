@@ -14,8 +14,16 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import ApiClient, ApiRefused, DuplicateMemory, ReviewRefused
+from .client import REVIEW_STATUSES, ApiClient, ApiRefused, DuplicateMemory, ReviewRefused
 from .config import get_agent_name
+
+
+def _bad_status(status):
+    """The error result for a `status` that is not one of the three, or None
+    when it is fine."""
+    if status is None or status in REVIEW_STATUSES:
+        return None
+    return {"error": f"status must be one of {', '.join(REVIEW_STATUSES)} (got {status!r})"}
 
 
 def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
@@ -60,14 +68,21 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
                      since: Optional[str] = None, until: Optional[str] = None,
                      project: Optional[str] = None, agent: Optional[str] = None,
                      tag: Optional[str] = None, type: Optional[str] = None,
-                     limit: Optional[int] = None) -> dict:
-        """Query memories by time/project/agent/tag/type. since_days is a rolling
-        window: everything since the start of the day N days ago (0=today,
-        7=past week). limit defaults to 100 on the server; pass 0 for every match.
-        Returns {"memories": [...]}."""
+                     status: Optional[str] = None, limit: Optional[int] = None) -> dict:
+        """Query memories by time/project/agent/tag/type/status. since_days is a
+        rolling window: everything since the start of the day N days ago (0=today,
+        7=past week). `status` keeps to one review status: "unverified" (the
+        review model has not checked the memory), "verified" (approved) or
+        "flagged" (rejected, or a rewrite suggested); every memory carries its
+        own as `review_status`. limit defaults to 100 on the server; pass 0 for
+        every match. Returns {"memories": [...]}; a `status` that is not one of
+        the three returns {"error": "<why>"}."""
+        bad = _bad_status(status)
+        if bad is not None:
+            return bad
         return {"memories": api.query(
-            since_days=since_days, since=since, until=until,
-            project=project, agent=agent, tag=tag, mtype=type, limit=limit)}
+            since_days=since_days, since=since, until=until, project=project,
+            agent=agent, tag=tag, mtype=type, status=status, limit=limit)}
 
     @mcp.tool()
     def memory_search(q: str, project: Optional[str] = None, agent: Optional[str] = None,
@@ -89,17 +104,24 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
 
     @mcp.tool()
     def memory_flagged(project: Optional[str] = None, verdict: Optional[str] = None,
-                       limit: int = 20) -> dict:
+                       status: Optional[str] = None, limit: int = 20) -> dict:
         """List the memories the review model flagged: those whose review says
         "reject" or "rewrite", newest review first. `verdict` narrows to one of
-        the two; None lists both. `project` narrows to one project. limit 0
-        returns every match. Returns {"memories": [...]}, the same shape as
-        memory_query, each memory with its `review` (verdict, rule, reason,
-        rewrite, duplicate_of). A `verdict` that is not "reject" or "rewrite"
-        returns {"error": "<why>"}."""
+        the two; None lists both. `status` lists the memories with that review
+        status instead ("unverified", "verified" or "flagged"), so
+        status="unverified" gives the memories the model has not checked yet.
+        `project` narrows to one project. limit 0 returns every match. Returns
+        {"memories": [...]}, the same shape as memory_query, each memory with
+        its `review` (verdict, rule, reason, rewrite, duplicate_of) and its
+        `review_status`. A `verdict` that is not "reject" or "rewrite", or a
+        `status` that is not one of the three, returns {"error": "<why>"}."""
         if verdict is not None and verdict not in ("reject", "rewrite"):
             return {"error": f"verdict must be \"reject\" or \"rewrite\" (got {verdict!r})"}
-        return {"memories": api.flagged(project=project, verdict=verdict, limit=limit)}
+        bad = _bad_status(status)
+        if bad is not None:
+            return bad
+        return {"memories": api.flagged(project=project, verdict=verdict, status=status,
+                                        limit=limit)}
 
     @mcp.tool()
     def memory_show(id: int) -> dict:
