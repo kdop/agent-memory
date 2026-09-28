@@ -316,6 +316,8 @@ async def _with_lifespan(monkeypatch, env, **kwargs):
     for var, value in env.items():
         monkeypatch.setenv(var, value)
     monkeypatch.setenv("AGENT_MEMORY_EMBED_MODEL", "off")
+    # No poll: it would check the made-up server address.
+    monkeypatch.setenv("AGENT_MEMORY_REVIEW_POLL", "0")
     engine = make_test_engine()
     app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN, **kwargs)
     try:
@@ -371,7 +373,8 @@ def enforcing_server(_schema):
     fake = FakeReviewer(REJECT)
     engine = make_test_engine()
     app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN,
-                     embedder=FakeEmbedder(), reviewer=fake, review_mode="enforce")
+                     embedder=FakeEmbedder(), reviewer=fake, review_mode="enforce",
+                     review_poll=0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)

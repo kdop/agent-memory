@@ -28,7 +28,8 @@ def _auth():
 def test_health_needs_no_auth(client):
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    # The shared server runs without a review model, so no poll: `off`.
+    assert resp.json() == {"status": "ok", "review_model": "off"}
 
 
 def test_protected_route_without_token_401(client):

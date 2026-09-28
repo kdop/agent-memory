@@ -263,6 +263,26 @@ have the same length.
   `memory_flagged`) lists the memories whose verdict is `reject` or `rewrite`, newest
   review first, or with `status` the memories with that review status.
 
+  **The poll.** The model runs on a machine that is off at times, and a catch-up run
+  by hand can wait hours, or falls to whoever writes next. So when the review is on
+  and `AGENT_MEMORY_REVIEW_POLL` (`review_poll`, default 300 s; `create_app(review_poll=...)`
+  overrides it; 0 or less means no poll) is above zero, the lifespan starts one
+  asyncio task, `_review_poll`, and cancels it at shutdown. Each tick calls
+  `reviewer.reachable()` in a thread (`OllamaReviewer`: `GET /api/tags` with a 2 s
+  timeout; `NullReviewer`: False), stores the answer on `app.state.review_model`
+  (`reachable` or `unreachable`; `off` when no poll runs) and, when the model answers,
+  runs the catch-up the route uses: `_begin_catch_up` takes the one `asyncio.Lock`
+  the poll and `POST /admin/review` share, without waiting for it, and picks the
+  unverified ids; `_run_catch_up` reviews them in order and releases the lock. A
+  tick or a route call that finds the lock taken does nothing (the route answers
+  `{"scheduled": 0, "running": true}`), so one catch-up runs at a time. A check that
+  raises counts as unreachable, any other error in a tick is one log line, and the
+  loop goes on; the log also says when the loop starts, when a catch-up starts (with
+  the count) and when it ends. `GET /health` returns `review_model`. `update` with new
+  content sets the memory back to `unverified` and deletes its review row (the verdict
+  was about the old text), so the next catch-up reads it again; a change of tags,
+  project or type alone keeps both.
+
 Before a check goes live, `scripts/replay_write_checks.py` runs the duplicate check and
 the warnings over a copy of the database in write order and prints what each would
 have said (see README).
@@ -303,7 +323,8 @@ Three ways in beyond the CLI:
   `DELETE /memories`, `GET /tags`, `GET /projects`, `GET /stats`, `POST /admin/reindex`,
   `POST /admin/review` (the catch-up: review the unverified memories, oldest first),
   `POST /admin/review/{id}` (review one memory now). Bearer auth via `AGENT_MEMORY_API_TOKEN`;
-  `GET /health` is unauthenticated. Call it with any HTTP client, or reuse
+  `GET /health` is unauthenticated and says whether the review model answered the
+  last check (`review_model`). Call it with any HTTP client, or reuse
   `agent_memory.client.ApiClient`.
 - **The MCP server** — `python -m agent_memory.mcp_server` (needs `[mcp]`); tools
   `memory_add/query/search/flagged/show/update/delete/tags/projects/stats` over stdio,

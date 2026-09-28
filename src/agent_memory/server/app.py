@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -28,6 +28,7 @@ from .db import make_engine, make_sessionmaker
 from .embedding import Embedder, make_embedder
 from .review import Reviewer, Verdict, make_reviewer
 from .review import review_mode as review_mode_from_env
+from .review import review_poll as review_poll_from_env
 from .schemas import (
     AddResult,
     AgentCount,
@@ -49,6 +50,10 @@ log = logging.getLogger(__name__)
 # The `status` query parameter: one of review.STATUSES. Spelled out so FastAPI
 # answers 422 for anything else; a test checks the two lists match.
 ReviewStatus = Literal["unverified", "verified", "flagged"]
+
+# What `GET /health` says about the review model, as `review_model`: `off`
+# when the review or the poll is off, else what the poll's last check found.
+REVIEW_MODEL_STATES = ("off", "reachable", "unreachable")
 
 
 async def get_session(request: Request) -> AsyncSession:
@@ -185,6 +190,93 @@ async def _review_in_order(app: FastAPI, ids: list[int]) -> None:
         await _review_in_background(app, mid)
 
 
+def _catch_up_lock(app: FastAPI) -> asyncio.Lock:
+    """The one lock the poll and `POST /admin/review` share, so one catch-up
+    runs at a time. Made on first use, so an app whose lifespan never ran
+    has one too."""
+    lock = getattr(app.state, "catch_up_lock", None)
+    if lock is None:
+        lock = app.state.catch_up_lock = asyncio.Lock()
+    return lock
+
+
+async def _begin_catch_up(app: FastAPI, session: AsyncSession,
+                          limit: int | None = None) -> list[int] | None:
+    """Start a catch-up: take the lock and pick the unverified memories,
+    oldest first, up to `limit` (None or 0 means all). Returns their ids
+    with the lock held; the caller hands them to `_run_catch_up`, which
+    releases it. Returns an empty list, with the lock released, when there
+    is nothing to review, and None, without touching anything, when a
+    catch-up is already running. The lock is never waited for: a caller
+    that finds it taken does nothing."""
+    lock = _catch_up_lock(app)
+    if lock.locked():
+        return None
+    # Free, and nothing else ran between the check and here, so this
+    # returns at once.
+    await lock.acquire()
+    try:
+        ids = await repo.unverified_ids(session, limit=limit)
+    except BaseException:
+        lock.release()
+        raise
+    if not ids:
+        lock.release()
+    return ids
+
+
+async def _run_catch_up(app: FastAPI, ids: list[int]) -> None:
+    """One catch-up, under the lock `_begin_catch_up` took: review `ids` in
+    order, then release the lock, whatever happened. One log line at the
+    start, with the count, and one at the end."""
+    log.info("catch-up started: %d unverified memories to review", len(ids))
+    done = False
+    try:
+        await _review_in_order(app, ids)
+        done = True
+    finally:
+        _catch_up_lock(app).release()
+        log.info("catch-up %s", "finished" if done else "stopped")
+
+
+async def _review_tick(app: FastAPI) -> None:
+    """One check of the poll: ask the reviewer whether the model answers,
+    note the answer on `app.state.review_model`, and when it does, run the
+    catch-up for the unverified memories, unless one is already running. A
+    reviewer whose check raises counts as unreachable, with one log line."""
+    reviewer: Reviewer = app.state.reviewer
+    try:
+        up = await asyncio.to_thread(reviewer.reachable)
+    except Exception as e:
+        log.warning("review poll: the check failed: %s: %s", type(e).__name__, e)
+        up = False
+    state = "reachable" if up else "unreachable"
+    if state != getattr(app.state, "review_model", None):
+        log.info("review model %s: %s", state, reviewer.model_name)
+    app.state.review_model = state
+    if not up:
+        return
+    async with app.state.sessionmaker() as session, session.begin():
+        ids = await _begin_catch_up(app, session)
+    if ids:
+        await _run_catch_up(app, ids)
+
+
+async def _review_poll(app: FastAPI, interval: float) -> None:
+    """The loop the lifespan runs while the review is on: one check now,
+    then one every `interval` seconds, until the task is cancelled at
+    shutdown. Whatever a check raises is one log line, and the loop goes
+    on. This is how memories written while the model was off get their
+    verdict without anyone running `memory review --catch-up`."""
+    log.info("review poll started: checking the model every %g s", interval)
+    while True:
+        try:
+            await _review_tick(app)
+        except Exception as e:
+            log.warning("review poll: %s: %s", type(e).__name__, e)
+        await asyncio.sleep(interval)
+
+
 async def _reindex_at_startup(app: FastAPI) -> None:
     """Fill in vectors for rows that have none, or one from another model, once
     at server start. A failure here is logged and must not stop the server: the
@@ -203,6 +295,7 @@ def create_app(
     embedder: Embedder | None = None,
     reviewer: Reviewer | None = None,
     review_mode: str | None = None,
+    review_poll: float | None = None,
 ) -> FastAPI:
     """Build the app. In production (`sessionmaker` omitted) the lifespan builds a
     pooled engine from AGENT_MEMORY_DB and disposes it on shutdown; tests inject a
@@ -214,7 +307,13 @@ def create_app(
     (a `NullReviewer` unless AGENT_MEMORY_REVIEW is warn or enforce and a
     server is set). `app.state.review_mode` says how the review runs: `off`
     without a model; else `enforce` when `review_mode` (or, when it is
-    omitted, AGENT_MEMORY_REVIEW) says so, and `warn` otherwise."""
+    omitted, AGENT_MEMORY_REVIEW) says so, and `warn` otherwise. When the
+    review is on, the lifespan also runs the poll (`_review_poll`): every
+    `review_poll` seconds (or, when it is omitted, AGENT_MEMORY_REVIEW_POLL,
+    default 300; 0 or less means no poll) it checks whether the model
+    answers and, when it does, reviews the unverified memories.
+    `app.state.review_model` holds what the last check found (`off`,
+    `reachable` or `unreachable`; `GET /health` reports it)."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -232,9 +331,20 @@ def create_app(
         app.state.review_mode = _mode_for(app.state.reviewer, wanted)
         if app.state.embedder.model_name is not None:
             await _reindex_at_startup(app)
+        app.state.review_model = "off"
+        interval = review_poll if review_poll is not None else review_poll_from_env()
+        poll = None
+        if app.state.review_mode != "off" and interval > 0:
+            # Nothing is known until the first check answers.
+            app.state.review_model = "unreachable"
+            poll = asyncio.create_task(_review_poll(app, interval), name="review-poll")
         try:
             yield
         finally:
+            if poll is not None:
+                poll.cancel()
+                with suppress(asyncio.CancelledError):
+                    await poll
             if engine is not None:
                 await engine.dispose()
 
@@ -251,8 +361,12 @@ def create_app(
     guard = [Depends(require_token)]
 
     @app.get("/health")
-    async def health():
-        return {"status": "ok"}
+    async def health(request: Request):
+        """Open to all. `review_model` is what the poll's last check found:
+        `reachable`, `unreachable`, or `off` when the review or the poll
+        is off (and for an app whose lifespan never ran)."""
+        return {"status": "ok",
+                "review_model": getattr(request.app.state, "review_model", "off")}
 
     @app.post("/memories", response_model=AddResult, status_code=201, dependencies=guard)
     async def add_memory(body: MemoryIn, request: Request, background: BackgroundTasks,
@@ -480,17 +594,22 @@ def create_app(
                               limit: int = Query(default=50, ge=0, description="0 = no limit")):
         """The catch-up: review the unverified memories, oldest first, up to
         `limit`. This is how memories written while the model was off get
-        their verdict later. The reviews run one after another, in that
+        their verdict later; the poll runs the same catch-up on its own when
+        it finds the model back. The reviews run one after another, in that
         order, in one background task after this response, so each verdict
         is stored before the next memory is compared; one that fails is a
         log line, as after an add, and the rest still run. Returns how many
-        were scheduled. 503 when the server has no review model."""
+        were scheduled; `{"scheduled": 0, "running": true}` when a catch-up
+        (this route's or the poll's) is already running, since only one runs
+        at a time. 503 when the server has no review model."""
         if not _has_model(reviewer):
             reason = getattr(reviewer, "reason", "the server has no review model")
             raise HTTPException(status_code=503, detail=f"Cannot review: {reason}")
-        ids = await repo.unverified_ids(session, limit=limit)
+        ids = await _begin_catch_up(request.app, session, limit=limit)
+        if ids is None:
+            return {"scheduled": 0, "running": True}
         if ids:
-            background.add_task(_review_in_order, request.app, ids)
+            background.add_task(_run_catch_up, request.app, ids)
         return {"scheduled": len(ids)}
 
     @app.post("/admin/review/{mid}", response_model=ReviewOut, dependencies=guard)

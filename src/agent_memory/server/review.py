@@ -19,10 +19,17 @@ Settings, read once when `make_reviewer()` runs at server start:
     AGENT_MEMORY_REVIEW_URL      an Ollama server, for example http://host:11434
     AGENT_MEMORY_REVIEW_MODEL    the model to ask (default qwen3:14b)
     AGENT_MEMORY_REVIEW_TIMEOUT  seconds to wait for an answer (default 30)
+    AGENT_MEMORY_REVIEW_POLL     seconds between checks whether the model is back
+                                 (default 300; 0 turns the check off)
 
-The Ollama call uses urllib from the standard library, so the server needs no
-new package. The caller runs it in a thread (`asyncio.to_thread`) so the event
-loop stays free while the model thinks.
+The Ollama calls use urllib from the standard library, so the server needs no
+new package. The caller runs them in a thread (`asyncio.to_thread`) so the
+event loop stays free while the model thinks.
+
+The model may be off for hours (it runs on a machine that is switched off at
+times). `reachable()` is one cheap request that says whether it answers now;
+the server asks every AGENT_MEMORY_REVIEW_POLL seconds and, when the model is
+back, reviews the memories written while it was away.
 """
 
 from __future__ import annotations
@@ -38,6 +45,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "qwen3:14b"
 DEFAULT_TIMEOUT = 30.0
+DEFAULT_POLL = 300.0
+# How long `reachable()` waits for the model server to answer.
+REACHABLE_TIMEOUT = 2.0
 NEIGHBOUR_COUNT = 5
 TAG_COUNT = 10
 
@@ -111,12 +121,17 @@ class Reviewer:
     new memory and its nearest neighbours as dicts with at least `id`,
     `project`, `type`, `tags` and `content`, and the names of the existing
     tags the model may suggest for a rewrite, and returns a `Verdict`, or None
-    when the model gave no usable answer. It may block: call it in a thread."""
+    when the model gave no usable answer. `reachable` says whether the model
+    answers right now, with one cheap request. Both may block: call them in
+    a thread."""
 
     model_name: str | None
 
     def review(self, memory: dict, neighbours: list[dict],
                tags: list[str] = ()) -> Verdict | None:
+        raise NotImplementedError
+
+    def reachable(self) -> bool:
         raise NotImplementedError
 
 
@@ -132,6 +147,9 @@ class NullReviewer(Reviewer):
     def review(self, memory: dict, neighbours: list[dict],
                tags: list[str] = ()) -> Verdict | None:
         return None
+
+    def reachable(self) -> bool:
+        return False
 
 
 class OllamaReviewer(Reviewer):
@@ -161,6 +179,16 @@ class OllamaReviewer(Reviewer):
             log.warning("review of memory %s failed: %s gave no usable JSON: %.200s",
                         _label(memory), self.model_name, text)
         return verdict
+
+    def reachable(self) -> bool:
+        """Whether the Ollama server answers now: one `GET /api/tags`, which
+        costs it nothing, with a short timeout (`REACHABLE_TIMEOUT`). False
+        when it does not answer in time, for whatever reason."""
+        try:
+            with urllib.request.urlopen(self.url + "/api/tags", timeout=REACHABLE_TIMEOUT):
+                return True
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return False
 
     def request_body(self, memory: dict, neighbours: list[dict],
                      tags: list[str] = ()) -> dict:
@@ -342,6 +370,21 @@ def review_mode() -> str:
     server address too."""
     mode = os.environ.get("AGENT_MEMORY_REVIEW", "off").strip().lower()
     return mode if mode in MODES else "off"
+
+
+def review_poll() -> float:
+    """How many seconds AGENT_MEMORY_REVIEW_POLL puts between two checks
+    whether the model is back: `DEFAULT_POLL` when unset or blank, and also
+    (with one log line) when the value is not a number. 0 or less means no
+    check at all."""
+    raw = os.environ.get("AGENT_MEMORY_REVIEW_POLL", "").strip()
+    if not raw:
+        return DEFAULT_POLL
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("AGENT_MEMORY_REVIEW_POLL=%r is not a number; using %s", raw, DEFAULT_POLL)
+        return DEFAULT_POLL
 
 
 def make_reviewer() -> Reviewer:
