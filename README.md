@@ -225,7 +225,23 @@ the built assets under `/app`, so it needs no separate host. Log in once with th
 token. See [web/README.md](web/README.md) for the dev setup (runs against an in-browser
 mock, no backend needed) and the build.
 
+Every memory shows its review status (unverified, verified, flagged) and, once the
+model has read it, the verdict with the rule and the reason; a rewrite shows the
+suggested text and tags, and a "Review again" button asks the model once more.
+`supersedes #id` and `superseded by #id` are links to the other memory. The search box
+has the three modes (keyword, semantic, hybrid) and shows each hit's score; the right
+rail filters by status and can hide superseded memories. The **Flagged** view lists what
+the review rejected or wants rewritten, and its **Catch up** button reviews the
+memories written while the model was off. The top bar shows whether the review model is
+reachable.
+
 ![dashboard](docs/dashboard.png)
+
+The Flagged view and a hybrid search with scores:
+
+![flagged view](docs/dashboard-flagged.png)
+
+![hybrid search](docs/dashboard-search.png)
 
 ## PostgreSQL
 

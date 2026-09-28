@@ -25,7 +25,23 @@ and validates it on login by calling `GET /tags`.
   "content": "…",
   "type": "decision",                           // may be null
   "tags": ["auth", "db"],                       // tag NAMES, alphabetical
-  "snippet": "→match← …"                        // only present on search (q=), else null
+  "snippet": "→match← …",                       // only present on search (q=), else null
+  "score": 0.42,                                // only on GET /memories/search, else null
+  "review_status": "unverified",                // unverified | verified | flagged
+  "review": ReviewOut,                          // null until the review model has answered
+  "supersedes": 12,                             // older memory this one replaces, or null
+  "superseded_by": 57                           // newer memory that replaces this one, or null
+}
+
+// ReviewOut — what the review model said about the memory
+{
+  "verdict": "rewrite",                         // approve | reject | rewrite
+  "rule": 3,                                    // the rule it breaks; null for approve
+  "reason": "…",                                // one sentence
+  "rewrite": "…",                               // suggested text; only for rewrite, else null
+  "duplicate_of": 40,                           // the memory this one repeats, or null
+  "tags": ["auth"],                             // suggested tags; empty unless rewrite
+  "supersedes": 12                              // same value as the memory's supersedes
 }
 
 // TagCount
@@ -47,6 +63,8 @@ Query params (all optional):
 | `project` | string | exact |
 | `agent` | string | exact |
 | `type` | string | exact |
+| `status` | `unverified`\|`verified`\|`flagged` | one review status |
+| `current` | bool | `true` hides the memories a newer one supersedes |
 | `since_days` | int | rolling window: since the start of the day N days ago (0=today, 7=past week); overrides since/until |
 | `since` / `until` | string | ISO date/datetime bounds |
 | `order` | `date_desc`\|`date_asc` | default `date_desc` (ignored when `q` set → rank order) |
@@ -61,9 +79,32 @@ GET /memories?tag=auth&tag=db&order=date_desc&limit=100&offset=0
 [ {MemoryOut}, … ]
 ```
 
+### `GET /memories/search` — ranked search in one mode
+Query params: `q` (required), `mode` = `keyword`|`semantic`|`hybrid` (default `keyword`),
+`project`, `agent`, `since`, `tag` (**one** tag), `current` (bool), `limit` (default 20,
+0 = all). No `offset`, no `X-Total-Count`: the whole ranked list comes back at once.
+
+**Response `200`**: `MemoryOut[]`, best first, each with `score` (ts_rank for keyword,
+cosine for semantic, the fused rank for hybrid). Keyword hits also carry `snippet`.
+`semantic` without an embedding model → **`400`** with `detail` saying why. `hybrid`
+without one is served as keyword and says so in the header
+**`X-Search-Fallback: keyword`**; the dashboard shows that as a note under the search box.
+
+The dashboard sends `keyword` mode to `GET /memories?q=` (it has pages and every filter)
+and the other two modes here.
+
+### `GET /memories/flagged` — what the review flagged
+Query params: `project`, `verdict` = `reject`|`rewrite` (only that verdict), `status`
+(that review status instead of the flagged verdicts, so `status=unverified` lists what
+the model has not read yet), `limit` (default 100, 0 = all).
+
+**Response `200`**: `MemoryOut[]` newest review first, each with `review`, plus
+**`X-Total-Count`** ignoring the limit.
+
 ### `POST /memories` — create
 Body: `{ "content": str, "agent"?: str, "project"?: str, "type"?: str, "tags"?: TagIn[] }`
-**`201`** → `{ "id": 42 }`. Empty/blank tag name → `422`.
+**`201`** → `{ "id": 42, "warnings": [] }`. Empty/blank tag name → `422`. In enforce
+mode a review the model refuses → `422` with `detail.reason = "review"` and the verdict.
 
 ### `GET /memories/bulk?ids=1&ids=2` — compact rows
 **`200`** → `[{ "id", "agent", "project", "type", "content" }]`.
@@ -103,15 +144,36 @@ is created if missing and keeps `description` when provided (else its existing o
 Body: `{ "memory_ids"?: int[] }` — omit or `[]` = **all** memories. The tag itself stays.
 **`200`** → `{ "detached": 8 }`; **`404`** if the tag is absent.
 
+## Review
+
+### `POST /admin/review?limit=50` — catch up
+Reviews the unverified memories, oldest first, up to `limit` (0 = all), in one
+background task after the response.
+**`200`** → `{ "scheduled": 12 }`, or `{ "scheduled": 0, "running": true }` when a
+catch-up is already running (only one runs at a time). **`503`** when the server has no
+review model.
+
+### `POST /admin/review/{id}` — review one memory now
+Replaces any earlier verdict. **`200`** → `ReviewOut`; **`404`** if absent; **`502`** when
+the model gave no verdict; **`503`** without a model. The dashboard then re-reads
+`GET /memories/{id}` to refresh the card.
+
 ## Misc (unchanged from the api-first server)
 
 - `GET /projects` → `[{ "project", "count" }]`
+- `GET /agents` → `[{ "agent", "count" }]`
 - `GET /stats` → `{ "total", "agents", "projects", "tags", "today", "week", "oldest", "newest" }`
-- `GET /health` → `{ "status": "ok" }` (no auth)
+- `GET /health` → `{ "status": "ok", "review_model": "reachable" }` (no auth).
+  `review_model` is `reachable`, `unreachable`, or `off` when the review or its poll is
+  off; the dashboard shows it in the top bar when present.
 
 ## Mock seed (for `web/src/mocks/`)
 
 Seed the mock with ~250 memories across agents `alpha`/`beta`, projects
 `agent-memory`/`web-app`/null, types `decision`/`lesson`/`note`/`preference`, and ~40 tags with
 descriptions and realistic counts, timestamps spread over the last ~60 days — enough to
-exercise pagination (3 pages), search, AND-filtering, and tag merge.
+exercise pagination (3 pages), search, AND-filtering, and tag merge. Most memories are
+`verified`, some `flagged` (a mix of `reject` and `rewrite` verdicts), the newest
+`unverified`; a few carry `supersedes` / `superseded_by` links. The mock also serves the
+search modes (with a `score`), `/memories/flagged` and the two review routes, and
+`GET /health` reports `review_model: reachable`.

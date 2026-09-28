@@ -127,7 +127,56 @@ export function buildSeed() {
       content,
       type: pick(TYPES),
       tags: [...memTags].sort(),
+      // Review facts (see CONTRACT.md): most are verified, some are flagged,
+      // the newest are still unverified.
+      review_status: 'unverified',
+      review: null,
+      supersedes: null,
+      superseded_by: null,
     })
+  }
+
+  // Verdicts: every 7th memory is rejected, every 11th gets a rewrite, the
+  // first 4 (newest) are not reviewed yet, the rest are approved.
+  for (const m of memories) {
+    if (m.id <= 4) continue
+    if (m.id % 11 === 0) {
+      m.review_status = 'flagged'
+      m.review = {
+        verdict: 'rewrite',
+        rule: 3,
+        reason: 'Says what was done, not why; the reason belongs in the entry.',
+        rewrite: `${m.content.replace(/ \(#\d+\)\.$/, '')}: chosen because the alternative doubled the cold-start time.`,
+        duplicate_of: null,
+        tags: [m.tags[0], 'why'].filter(Boolean),
+        supersedes: null,
+      }
+    } else if (m.id % 7 === 0) {
+      m.review_status = 'flagged'
+      m.review = {
+        verdict: 'reject',
+        rule: 2,
+        reason: 'A diary line: it records what was done, which git history already has.',
+        rewrite: null,
+        duplicate_of: m.id % 14 === 0 ? m.id + 1 : null,
+        tags: [],
+        supersedes: null,
+      }
+    } else {
+      m.review_status = 'verified'
+      m.review = {
+        verdict: 'approve', rule: null, reason: 'A durable decision with its reason.',
+        rewrite: null, duplicate_of: null, tags: [], supersedes: null,
+      }
+    }
+  }
+  // A few supersedes links: a newer decision replaces an older one.
+  for (const [newer, older] of [[6, 40], [22, 61], [33, 90]]) {
+    const a = memories[newer - 1]
+    const b = memories[older - 1]
+    a.supersedes = older
+    if (a.review) a.review.supersedes = older
+    b.superseded_by = newer
   }
 
   return { memories, tags }

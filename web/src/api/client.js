@@ -75,6 +75,8 @@ export const api = {
    * @param {string} [p.project]
    * @param {string} [p.agent]
    * @param {string} [p.type]
+   * @param {'unverified'|'verified'|'flagged'} [p.status]  one review status
+   * @param {boolean} [p.current]   true hides the memories a newer one supersedes
    * @param {number} [p.since_days]
    * @param {string} [p.since]
    * @param {string} [p.until]
@@ -88,6 +90,41 @@ export const api = {
     const res = await request('GET', '/memories', {
       params: { ...rest, tag }, // `tag` array → repeatable ?tag=a&tag=b
     })
+    const total = Number(res.headers.get('X-Total-Count') ?? res.data.length)
+    return { items: res.data, total }
+  },
+
+  /**
+   * GET /memories/search — ranked search in one of three modes.
+   * @param {object} p
+   * @param {string} p.q
+   * @param {'keyword'|'semantic'|'hybrid'} [p.mode='keyword']
+   * @param {string} [p.project]
+   * @param {string} [p.agent]
+   * @param {string} [p.since]
+   * @param {string} [p.tag]        one tag (the route takes a single one)
+   * @param {boolean} [p.current]
+   * @param {number} [p.limit=20]
+   * @returns {Promise<{items: object[], fallback: string|null}>}
+   *   `fallback` is the X-Search-Fallback header: the mode the server used
+   *   instead of the one asked for (hybrid without a model → "keyword").
+   */
+  async searchMemories(p = {}) {
+    const res = await request('GET', '/memories/search', { params: p })
+    return { items: res.data, fallback: res.headers.get('X-Search-Fallback') || null }
+  },
+
+  /**
+   * GET /memories/flagged — the memories the review flagged, newest review first.
+   * @param {object} p
+   * @param {string} [p.project]
+   * @param {'reject'|'rewrite'} [p.verdict]  only that verdict
+   * @param {'unverified'|'verified'|'flagged'} [p.status]  that status instead
+   * @param {number} [p.limit=100]  0 = all
+   * @returns {Promise<{items: object[], total: number}>} total from X-Total-Count
+   */
+  async flaggedMemories(p = {}) {
+    const res = await request('GET', '/memories/flagged', { params: p })
     const total = Number(res.headers.get('X-Total-Count') ?? res.data.length)
     return { items: res.data, total }
   },
@@ -158,6 +195,30 @@ export const api = {
     return res.data
   },
 
+  // ---- Review ------------------------------------------------------------
+
+  /**
+   * POST /admin/review — review the unverified memories, oldest first.
+   * → { scheduled: n } or { scheduled: 0, running: true } when one is already
+   * running. 503 when the server has no review model.
+   */
+  async reviewCatchUp(limit) {
+    const res = await request('POST', '/admin/review', {
+      params: limit !== undefined ? { limit } : {},
+    })
+    return res.data
+  },
+
+  /**
+   * POST /admin/review/{id} — review one memory now, replacing any earlier
+   * verdict. → ReviewOut. 503 without a model, 404 when absent, 502 when the
+   * model gave no verdict.
+   */
+  async reviewMemory(id) {
+    const res = await request('POST', `/admin/review/${id}`)
+    return res.data
+  },
+
   // ---- Misc --------------------------------------------------------------
 
   /** GET /projects → [{ project, count }]. */
@@ -178,7 +239,8 @@ export const api = {
     return res.data
   },
 
-  /** GET /health → { status } (no auth). */
+  /** GET /health → { status, review_model? } (no auth). `review_model` is
+   *  `reachable`, `unreachable` or `off` when the server reports it. */
   async health() {
     const res = await request('GET', '/health', { auth: false })
     return res.data

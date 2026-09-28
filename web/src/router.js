@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import MainLayout from '@/layouts/MainLayout.vue'
 import MemoriesPage from '@/pages/MemoriesPage.vue'
 import TagsPage from '@/pages/TagsPage.vue'
+import FlaggedPage from '@/pages/FlaggedPage.vue'
 
 // All app routes live under /app, deliberately namespaced away from the backend
 // API's flat paths (/memories, /tags, /projects, ...). Same-origin serving means a
@@ -17,6 +18,7 @@ const routes = [
     children: [
       { path: '', name: 'memories', component: MemoriesPage },
       { path: 'tags', name: 'tags', component: TagsPage },
+      { path: 'flagged', name: 'flagged', component: FlaggedPage },
     ],
   },
   { path: '/', redirect: { name: 'memories' } },
