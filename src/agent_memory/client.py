@@ -32,6 +32,27 @@ class DuplicateMemory(RuntimeError):
         super().__init__(f"duplicate of memory #{existing_id} (score {score:.2f})")
 
 
+class ReviewRefused(RuntimeError):
+    """The server refused an add (HTTP 422) because its review model said
+    the entry breaks the rules: `verdict` is "reject" or "rewrite", `rule`
+    the number of the rule it breaks (None for a repeat, then `duplicate_of`
+    names the memory it repeats), `explanation` the model's one sentence.
+    For a rewrite, `rewrite` is the suggested text and `tags` the suggested
+    tag names (None and [] for a reject). Nothing was stored. Pass
+    `force=True` to store the entry as written."""
+
+    def __init__(self, verdict: str, rule: int | None, explanation: str,
+                 rewrite: str | None = None, tags: list[str] | None = None,
+                 duplicate_of: int | None = None):
+        self.verdict = verdict
+        self.rule = rule
+        self.explanation = explanation
+        self.rewrite = rewrite
+        self.tags = list(tags or [])
+        self.duplicate_of = duplicate_of
+        super().__init__(f"review: {verdict}: {explanation}")
+
+
 class ApiRefused(RuntimeError):
     """The server turned the request down and said why (an HTTP 4xx, or a 503
     for a model the server does not have, with a plain `detail` string, such
@@ -64,6 +85,19 @@ def _duplicate_from(detail: str) -> DuplicateMemory | None:
     if not isinstance(d, dict) or d.get("reason") != "duplicate":
         return None
     return DuplicateMemory(int(d["existing_id"]), float(d["score"]))
+
+
+def _review_refusal_from(detail: str) -> ReviewRefused | None:
+    """Build a ReviewRefused from a 422 body, or None when the body is not
+    the review shape `{"detail": {"reason": "review", ...}}`."""
+    try:
+        d = json.loads(detail).get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(d, dict) or d.get("reason") != "review":
+        return None
+    return ReviewRefused(str(d["verdict"]), d.get("rule"), str(d.get("explanation") or ""),
+                         d.get("rewrite"), d.get("tags"), d.get("duplicate_of"))
 
 
 class ApiClient:
@@ -106,6 +140,10 @@ class ApiClient:
                 dup = _duplicate_from(detail)
                 if dup is not None:
                     raise dup from e
+            if e.code == 422:
+                refusal = _review_refusal_from(detail)
+                if refusal is not None:
+                    raise refusal from e
             if 400 <= e.code < 500 or e.code == 503:
                 message = _detail_from(detail)
                 if message is not None:
@@ -127,8 +165,10 @@ class ApiClient:
     def add_with_warnings(self, content, agent, project, tags, mtype, force=False):
         """(id, warnings): warnings is the list of rule names the entry breaks
         (see server/checks.py). The memory is stored either way, unless the
-        server finds a near-duplicate in the same project: then it raises
-        `DuplicateMemory` and stores nothing. `force=True` skips that check."""
+        server finds a near-duplicate in the same project (then it raises
+        `DuplicateMemory`) or its review model, in enforce mode, rejects the
+        entry or wants it rewritten (then `ReviewRefused`); in both cases
+        nothing is stored. `force=True` skips both checks."""
         body = {
             "content": content, "agent": agent, "project": project,
             "tags": list(tags), "type": mtype,
