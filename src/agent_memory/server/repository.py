@@ -12,9 +12,9 @@ import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import delete as sql_delete
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from .embedding import Embedder, cosine
 from .models import Memory, MemoryReview, MemoryTag, Tag
@@ -23,10 +23,10 @@ from .review import NEIGHBOUR_COUNT, STATUSES, TAG_COUNT, UNVERIFIED, VERIFIED, 
 # ts_headline markers match the old snippet() output so clients render identically.
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
 
-# What every memory read loads with it: its tags, its review and the memories
-# that supersede it, each in one extra query per result set, so `_dump` never
-# triggers a lazy load.
-_LOAD = (selectinload(Memory.tags), selectinload(Memory.review),
+# What every memory read loads with it: its tags, its reviews (newest first;
+# a read shows the first) and the memories that supersede it, each in one
+# extra query per result set, so `_dump` never triggers a lazy load.
+_LOAD = (selectinload(Memory.tags), selectinload(Memory.reviews),
          selectinload(Memory.superseded_by_rows))
 
 # A new memory whose vector scores this close to one already in its project is
@@ -92,6 +92,16 @@ def _dump_review(r: MemoryReview | None, supersedes: int | None = None) -> dict 
     return {"verdict": r.verdict, "rule": r.rule, "reason": r.reason,
             "rewrite": r.rewrite, "duplicate_of": r.duplicate_of,
             "tags": list(r.tags or []), "supersedes": supersedes}
+
+
+def _dump_history(r: MemoryReview) -> dict:
+    """One entry of a memory's review history: the verdict and when it was
+    given. No `supersedes`: the link lives on the memory and follows the
+    newest verdict, so an older entry has none to show."""
+    return {"created_at": r.created_at.isoformat(sep=" ", timespec="seconds"),
+            "verdict": r.verdict, "rule": r.rule, "reason": r.reason,
+            "rewrite": r.rewrite, "duplicate_of": r.duplicate_of,
+            "tags": list(r.tags or [])}
 
 
 def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> dict:
@@ -395,14 +405,14 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
         # New text, new vector. Without a model this clears the old one, since a
         # vector of the old text would be wrong for the new one.
         m.embedding, m.embedding_model = await _embed(embedder, content)
-        # New text, new check too: the verdict was about the old text. The
-        # memory goes back to unverified, and its review row and its
-        # `supersedes` link (which that verdict set) go with it, so the next
-        # catch-up reads the new text and sets the link again if it still
-        # holds. A change of tags or project alone leaves all three as they
-        # are.
+        # New text, new check too: every verdict was about the old text. The
+        # memory goes back to unverified, and its review rows and its
+        # `supersedes` link (which the newest verdict set) go with it, so the
+        # next catch-up reads the new text and sets the link again if it
+        # still holds. A change of tags or project alone leaves all three as
+        # they are.
         m.review_status = UNVERIFIED
-        m.review = None
+        m.reviews.clear()
         m.supersedes = None
         changes.append("content")
     if project is not None:
@@ -714,39 +724,57 @@ async def _nearest(session, vector, model, project, exclude_id=None) -> list[dic
 FLAGGED_VERDICTS = ("reject", "rewrite")
 
 
+def _newest_reviews():
+    """The newest review row of each memory, as a `MemoryReview` alias to
+    join on. One `DISTINCT ON (memory_id)` over the table, newest first by
+    `created_at`, then `id`. The one place a query looks past the memory's
+    own `review_status` into the rows: everything that reads a verdict from
+    the table joins this, so no listing ever sees an older one."""
+    newest = (
+        select(MemoryReview)
+        .distinct(MemoryReview.memory_id)
+        .order_by(MemoryReview.memory_id, MemoryReview.created_at.desc(), MemoryReview.id.desc())
+        .subquery("newest_reviews")
+    )
+    return aliased(MemoryReview, newest)
+
+
 def _flagged_filters(stmt, *, project=None, verdict=None, status=None):
-    """The WHERE clauses of a review listing. Without `status`: joined to the
-    review row and kept to the flagged verdicts (or only `verdict`). With
-    `status`: kept to the memories with that review status (an outer join, so
-    unverified memories, which have no row, are listed too), and to `verdict`
-    when given. `project` narrows either. A `verdict` that is not one of the
-    flagged ones, or a `status` that is not one of `STATUSES`, is a caller's
-    error."""
+    """The WHERE clauses of a review listing, and the alias of the review row
+    they join (see `_newest_reviews`), as `(stmt, review)`. Without `status`:
+    joined to the newest review row and kept to the flagged verdicts (or only
+    `verdict`). With `status`: kept to the memories with that review status
+    (an outer join, so unverified memories, which have no row, are listed
+    too), and to `verdict` when given. `project` narrows either. A `verdict`
+    that is not one of the flagged ones, or a `status` that is not one of
+    `STATUSES`, is a caller's error."""
     if verdict is not None and verdict not in FLAGGED_VERDICTS:
         raise ValueError(f"verdict must be one of {', '.join(FLAGGED_VERDICTS)} (got {verdict!r})")
     _check_status(status)
+    review = _newest_reviews()
+    on = review.memory_id == Memory.id
     if status is None:
         wanted = FLAGGED_VERDICTS if verdict is None else (verdict,)
-        stmt = stmt.join(Memory.review).where(MemoryReview.verdict.in_(wanted))
+        stmt = stmt.join(review, on).where(review.verdict.in_(wanted))
     else:
-        stmt = stmt.outerjoin(Memory.review).where(Memory.review_status == status)
+        stmt = stmt.outerjoin(review, on).where(Memory.review_status == status)
         if verdict is not None:
-            stmt = stmt.where(MemoryReview.verdict == verdict)
+            stmt = stmt.where(review.verdict == verdict)
     if project:
         stmt = stmt.where(Memory.project == project)
-    return stmt
+    return stmt, review
 
 
 async def flagged(session, *, project=None, verdict=None, status=None, limit=None) -> list[dict]:
-    """The memories the review flagged: those whose review says reject or
-    rewrite, or only `verdict` when given, newest review first (ties: newest
-    memory first, then by id). With `status`, the memories with that review
-    status instead (`unverified` ones have no review, so they come newest
-    memory first). Same shape as `query`, the review included. `project`
-    narrows to one project. `limit` of 0 or None means all."""
-    stmt = _flagged_filters(select(Memory).options(*_LOAD), project=project, verdict=verdict,
-                            status=status)
-    stmt = stmt.order_by(MemoryReview.created_at.desc().nulls_last(),
+    """The memories the review flagged: those whose newest review says reject
+    or rewrite, or only `verdict` when given, newest review first (ties:
+    newest memory first, then by id). With `status`, the memories with that
+    review status instead (`unverified` ones have no review, so they come
+    newest memory first). Same shape as `query`, the review included.
+    `project` narrows to one project. `limit` of 0 or None means all."""
+    stmt, review = _flagged_filters(select(Memory).options(*_LOAD), project=project,
+                                    verdict=verdict, status=status)
+    stmt = stmt.order_by(review.created_at.desc().nulls_last(),
                          Memory.timestamp.desc(), Memory.id.desc())
     if limit:
         stmt = stmt.limit(int(limit))
@@ -756,8 +784,8 @@ async def flagged(session, *, project=None, verdict=None, status=None, limit=Non
 
 async def count_flagged(session, *, project=None, verdict=None, status=None) -> int:
     """How many memories `flagged` would list with the same filters and no limit."""
-    stmt = _flagged_filters(select(func.count(Memory.id)), project=project, verdict=verdict,
-                            status=status)
+    stmt, _ = _flagged_filters(select(func.count(Memory.id)), project=project,
+                               verdict=verdict, status=status)
     return (await session.execute(stmt)).scalar()
 
 
@@ -778,14 +806,15 @@ async def unverified_ids(session, *, limit=None) -> list[int]:
 
 
 async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
-    """Store `verdict` as the review of memory `mid`, replacing any earlier
-    one, set the memory's `review_status` from it (`verified` for an
-    approve, `flagged` for a reject or rewrite) and its `supersedes` link
-    from `verdict.supersedes` (None clears an earlier link), and return the
-    API view of the review. `model` names the model that gave it. Raises
-    `LookupError` when there is no such memory, or when the verdict names
-    a memory to supersede that does not exist, and `ValueError` when it
-    names the memory itself."""
+    """Store `verdict` as a new review row of memory `mid`, keeping every
+    earlier one (a verdict is part of the timeline and is never rewritten),
+    set the memory's `review_status` from it (`verified` for an approve,
+    `flagged` for a reject or rewrite) and its `supersedes` link from
+    `verdict.supersedes` (None clears an earlier link), and return the API
+    view of the review. Both follow the newest row, which this one now is.
+    `model` names the model that gave it. Raises `LookupError` when there
+    is no such memory, or when the verdict names a memory to supersede that
+    does not exist, and `ValueError` when it names the memory itself."""
     memory = await session.get(Memory, mid)
     if memory is None:
         raise LookupError(f"Memory #{mid} not found")
@@ -796,20 +825,33 @@ async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
             raise LookupError(f"Memory #{verdict.supersedes} not found")
     memory.review_status = status_for(verdict.verdict)
     memory.supersedes = verdict.supersedes
-    row = await session.get(MemoryReview, mid)
-    if row is None:
-        row = MemoryReview(memory_id=mid)
-        session.add(row)
-    row.verdict = verdict.verdict
-    row.rule = verdict.rule
-    row.reason = verdict.reason
-    row.rewrite = verdict.rewrite
-    row.duplicate_of = verdict.duplicate_of
-    row.tags = list(verdict.tags) or None
-    row.model = model
-    row.created_at = datetime.now(timezone.utc)
+    row = MemoryReview(memory_id=mid, verdict=verdict.verdict, rule=verdict.rule,
+                       reason=verdict.reason, rewrite=verdict.rewrite,
+                       duplicate_of=verdict.duplicate_of, tags=list(verdict.tags) or None,
+                       model=model, created_at=datetime.now(timezone.utc))
+    session.add(row)
+    if "reviews" not in inspect(memory).unloaded:
+        # The memory's rows are loaded in this session: put the new one in
+        # front, where the newest goes, so a read here shows it without
+        # going back to the database.
+        memory.reviews.insert(0, row)
     await session.flush()
     return _dump_review(row, memory.supersedes)
+
+
+async def reviews(session, mid: int) -> list[dict] | None:
+    """Every review row of memory `mid`, newest first: the memory's review
+    history, each entry as `_dump_history` gives it. None when there is no
+    such memory; an empty list when it has not been reviewed."""
+    if await session.get(Memory, mid) is None:
+        return None
+    stmt = (
+        select(MemoryReview)
+        .where(MemoryReview.memory_id == mid)
+        .order_by(MemoryReview.created_at.desc(), MemoryReview.id.desc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [_dump_history(r) for r in rows]
 
 
 async def tags_for_review(session, embedder: Embedder | None, content: str,

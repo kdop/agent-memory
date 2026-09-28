@@ -251,6 +251,22 @@ def list_projects(args, client):
         print(f"  {p['project']:<20} ({p['count']} memories)")
 
 
+def _print_history(rows):
+    """The memory's review history under its content, oldest first, one
+    `review <date>: <verdict>, rule <n>: <reason>` line per verdict, a
+    rewrite followed by its suggested text and tags the way the review line
+    is. `No reviews yet.` when the model has not checked the memory."""
+    print()
+    if not rows:
+        print("No reviews yet.")
+        return
+    for r in reversed(rows):
+        head = _verdict_head(r["verdict"], r.get("rule"), r.get("duplicate_of"))
+        print(f"review {r['created_at']}: {head}: {r.get('reason', '')}")
+        if r["verdict"] == "rewrite":
+            _print_suggestion(r.get("rewrite"), r.get("tags"))
+
+
 def show_memory(args, client):
     row = client.get(args.id)
     if not row:
@@ -259,6 +275,8 @@ def show_memory(args, client):
     print(f"\n{_header(row)}")
     _print_meta(row)
     print(f"\n{row['content']}")
+    if args.reviews:
+        _print_history(client.reviews(args.id) or [])
 
 
 def update_memory(args, client):
@@ -435,6 +453,11 @@ def main():
 
     show_parser = subparsers.add_parser("show", help="Show one memory by ID")
     show_parser.add_argument("id", type=int, help="Memory ID")
+    show_parser.add_argument(
+        "--reviews", action="store_true",
+        help="Also print the memory's review history under it, oldest first: every "
+             "verdict the model gave, with its date (the header and the review line "
+             "show only the newest)")
     show_parser.set_defaults(func=show_memory)
 
     update_parser = subparsers.add_parser("update", help="Update fields of an existing memory by ID")

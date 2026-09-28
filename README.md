@@ -105,7 +105,9 @@ on any Ollama server: `AGENT_MEMORY_REVIEW_URL` is its address, for example
 `qwen3:14b`), and `AGENT_MEMORY_REVIEW_TIMEOUT` is how many seconds to wait for an answer
 (default 30). In warn mode the verdict shows as a `review:` line on `show`, `query` and
 `search`, for example `review: reject, rule 2: <reason>`; a rewrite adds the suggested
-text under `suggested:` and a `suggested tags:` line. `memory review` lists the memories
+text under `suggested:` and a `suggested tags:` line. A memory keeps every verdict it
+ever got (a re-review adds one, never replaces one); `memory show <id> --reviews` prints
+them all under the memory, oldest first, each with its date. `memory review` lists the memories
 with a reject or rewrite verdict, newest first (`--project`, `--verdict`, `--limit`,
 `--all`); `memory review --catch-up` reviews the memories written while the model was
 off, oldest first, one after another. Every memory also carries a review status, printed

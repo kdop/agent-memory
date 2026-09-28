@@ -134,9 +134,16 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
                                         limit=limit)}
 
     @mcp.tool()
-    def memory_show(id: int) -> dict:
-        """Fetch one memory by id. Returns {"memory": {...} | null}."""
-        return {"memory": api.get(id)}
+    def memory_show(id: int, reviews: bool = False) -> dict:
+        """Fetch one memory by id. Returns {"memory": {...} | null}. With
+        `reviews=true` it adds "reviews": the memory's review history, every
+        verdict the model gave on it, newest first, each with `created_at`
+        (the memory's own `review` is only the newest); [] when it has not
+        been reviewed, null when there is no such memory."""
+        out = {"memory": api.get(id)}
+        if reviews:
+            out["reviews"] = api.reviews(id)
+        return out
 
     @mcp.tool()
     def memory_update(id: int, content: Optional[str] = None, project: Optional[str] = None,
