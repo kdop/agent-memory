@@ -104,7 +104,7 @@ erDiagram
     }
 ```
 
-### A write, review in warn mode
+### A write, review in flag mode
 
 ```mermaid
 sequenceDiagram
@@ -133,7 +133,7 @@ sequenceDiagram
 The writer never waits for the model. A model that is off, down, slow or answers badly
 means no row and one log line; the memory stays stored.
 
-### A write, review in enforce mode
+### A write, review in refuse mode
 
 ```mermaid
 sequenceDiagram
@@ -143,25 +143,34 @@ sequenceDiagram
     participant M as Review model
 
     C->>A: POST /memories
-    A->>D: duplicate check against verified memories
-    alt duplicate and not force
-        A-->>C: 409
-    else force
+    alt force
         A->>D: INSERT, status unverified
         A-->>C: 201 (review runs in the background)
     else
-        A->>M: rules + entry + neighbours + tags
-        alt reject or rewrite
-            A-->>C: 422 verdict, rule, explanation, suggested text and tags
-        else approve
-            A->>D: INSERT, status verified, review row
-            A-->>C: 201
-        else no verdict
-            A->>D: INSERT, status unverified
-            A-->>C: 201 (one log line)
+        Note over A,D: one short session, closed before the model is asked
+        A->>D: duplicate check against verified memories
+        alt duplicate
+            A-->>C: 409
+        else
+            A->>D: 5 nearest verified neighbours, 10 candidate tags
+            Note over A,M: no database connection is held while the model thinks
+            A->>M: rules + entry + neighbours + tags
+            alt reject or rewrite
+                A-->>C: 422 verdict, rule, explanation, suggested text and tags
+            else approve
+                A->>D: INSERT, status verified, review row
+                A-->>C: 201
+            else no verdict
+                A->>D: INSERT, status unverified
+                A-->>C: 201 (one log line)
+            end
         end
     end
 ```
+
+The write waits for the model, but the pool does not: the request's session is first
+used for the insert, after the answer, and a session that has run nothing holds no
+connection.
 
 ### The life of a memory's status
 
@@ -503,13 +512,13 @@ have the same length.
   replaces a neighbour (another choice on the same question, an old fact that no longer
   holds) is approved with `supersedes` set to that id; `set_review` stores it in
   `memories.supersedes` (schema above) on the new memory, on every path a verdict is
-  stored (the warn-mode background task, the enforce-mode write, the catch-up, a
+  stored (the flag-mode background task, the refuse-mode write, the catch-up, a
   re-review), and nothing else ever sets it: the request body has no such field. Every
   read carries `supersedes` and `superseded_by`, the newest memory (by timestamp, then
   id) whose link points at this one. An entry that repeats a neighbour and adds to it
   gets a `rewrite` whose text is the old and the new merged, with `duplicate_of` that
-  id and no rule: in warn mode the new memory is stored and flagged with that
-  suggestion like any rewrite; in enforce mode the `422` carries `duplicate_of` and the
+  id and no rule: in flag mode the new memory is stored and flagged with that
+  suggestion like any rewrite; in refuse mode the `422` carries `duplicate_of` and the
   merged text, and the CLI ends with `Apply it with 'memory update <old id>' instead of
   adding.` The timeline rule behind both: a memory is never rewritten or deleted on its
   own. A contradiction keeps both records, with the current one marked; a partial repeat
@@ -519,21 +528,27 @@ have the same length.
 
   `AGENT_MEMORY_REVIEW` picks how the review runs (`review_mode`, `make_reviewer`):
   `off` (the default, also for an unknown value or a missing `AGENT_MEMORY_REVIEW_URL`)
-  gives a `NullReviewer` that is never called. In **warn** mode the add route stores the
+  gives a `NullReviewer` that is never called. The old names `warn` and `enforce`
+  (`OLD_MODE_NAMES`) still mean `flag` and `refuse` for one release; `review_mode`
+  logs one line asking for the new name. In **flag** mode the add route stores the
   memory, the session commits, the answer goes out, and then a FastAPI background task
   runs the review: it reads the memory, its neighbours and the tags on offer in one
   session, closes it, calls the model in a thread, and writes the row in a second
   session, so no database connection sits idle while the model thinks. The writer
-  never waits, and nothing is refused or changed because of a verdict. In **enforce**
-  mode the route builds the entry from the request, finds its neighbours
-  (`neighbours_for`, the same rules as `_nearest` for an entry that has no id yet) and
-  the tags, and calls the model before storing, with the request's session open while
-  the model thinks. A `reject` or `rewrite` answers `422` with
+  never waits, and nothing is refused or changed because of a verdict. In **refuse**
+  mode the route builds the entry from the request and, in one short session of its
+  own, runs the duplicate check and finds the entry's neighbours (`neighbours_for`, the
+  same rules as `_nearest` for an entry that has no id yet) and the tags; it closes that
+  session, calls the model in a thread, and only then uses the request's session, for
+  the insert. A session that has run nothing holds no connection, so no pooled
+  connection waits on the model (before, one write could hold one for the whole
+  `AGENT_MEMORY_REVIEW_TIMEOUT`, 30 s by default, and a few slow writes could keep every
+  other request waiting). A `reject` or `rewrite` answers `422` with
   `{"reason": "review", "verdict", "rule", "explanation", "rewrite", "tags", "duplicate_of"}`
   and stores nothing; an `approve` stores the memory and its row in one go, with no
   second call. The duplicate check comes first (`409` before any model call), and
   `?force=true` skips the review as it skips that check; the review then runs in the
-  background as in warn mode, so the row is still written.
+  background as in flag mode, so the row is still written.
 
   **The fallback rule, in every mode:** a model that is off, unreachable, slow (past
   `AGENT_MEMORY_REVIEW_TIMEOUT`, default 30 s) or answering with something that is not
@@ -573,13 +588,13 @@ have said (see README).
 ## Data flow
 
 **Add** — run the checks above (a duplicate is refused, warnings are collected, in
-enforce mode the model reads the entry first), then insert a `Memory`; for each `{"name", "description"}` tag, reuse the existing
+refuse mode the model reads the entry first), then insert a `Memory`; for each `{"name", "description"}` tag, reuse the existing
 row (updating its descriptor only if a new non-blank one is given) or create it
 (defaulting a new tag's descriptor to its own name), then link in `memory_tags`;
 `content_tsv` is generated automatically. When the server has an embedding model, `add` also
 stores the content's vector in `embedding` and the model's name in `embedding_model`;
 an update that changes the content recomputes both, any other update leaves them alone.
-With no model both stay NULL. In warn mode the review runs after the response and
+With no model both stay NULL. In flag mode the review runs after the response and
 writes its row to `memory_reviews`. **Query** — build a `SELECT` with
 `selectinload(tags)` and `WHERE` clauses from the filters (date window, project, agent,
 type, `tags.any(lower(name)=…)`), `ORDER BY timestamp DESC`. **Search** — `mode`

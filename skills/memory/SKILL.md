@@ -71,8 +71,9 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
   model's verdict on it against the rules above: `reject` names the rule it breaks,
   `rewrite` adds a suggested text under `suggested:`. When the server is set to refuse
   what the model rejects, a refused `add` prints the rule and the suggestion, stores
-  nothing and exits with code 4. Fix the entry, or pass `--force` only when the entry is
-  right as written. The header line of every memory says its status (`unverified` until
+  nothing and exits with code 4. When the verdict is right, fix the entry and add it
+  again. When you believe the entry is right as written, ask the user and pass `--force`
+  only when the user says yes; never on your own. The header line of every memory says its status (`unverified` until
   the model has checked it, `verified` when it approved, `flagged` when it did not), and
   only verified memories count as reference when a new entry is checked. A memory that
   reverses an older one is stored with `supersedes #<old id>` in its header, the old one

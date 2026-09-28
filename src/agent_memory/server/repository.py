@@ -692,7 +692,7 @@ async def review_input(session, mid: int) -> tuple[dict, list[dict]] | None:
 async def neighbours_for(session, embedder: Embedder | None, content: str,
                          project: str | None) -> list[dict]:
     """The neighbours `review_input` would give a memory with this `content`
-    in this `project`, before it is stored: the enforce mode reviews the
+    in this `project`, before it is stored: the refuse mode reviews the
     entry first and writes it only when the model approves. The content is
     embedded here and now, and the same rules apply: same project (no
     project matches no project), verified memories only, same model, best

@@ -174,7 +174,7 @@ class ApiClient:
         """(id, warnings): warnings is the list of rule names the entry breaks
         (see server/checks.py). The memory is stored either way, unless the
         server finds a near-duplicate in the same project (then it raises
-        `DuplicateMemory`) or its review model, in enforce mode, rejects the
+        `DuplicateMemory`) or its review model, in refuse mode, rejects the
         entry or wants it rewritten (then `ReviewRefused`); in both cases
         nothing is stored. `force=True` skips both checks."""
         body = {
