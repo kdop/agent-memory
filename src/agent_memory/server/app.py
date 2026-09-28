@@ -27,6 +27,7 @@ from .checks import warnings_for
 from .db import make_engine, make_sessionmaker
 from .embedding import Embedder, make_embedder
 from .review import Reviewer, Verdict, make_reviewer
+from .review import review_mode as review_mode_from_env
 from .schemas import (
     AddResult,
     AgentCount,
@@ -77,9 +78,61 @@ def get_reviewer(request: Request) -> Reviewer | None:
 ReviewerDep = Depends(get_reviewer)
 
 
+def get_review_mode(request: Request) -> str:
+    """The review mode on `app.state`: `off`, `warn` or `enforce`. `warn`
+    when nothing set it, so an app built for tests with a reviewer and no
+    lifespan behaves as before."""
+    return getattr(request.app.state, "review_mode", "warn")
+
+
+ReviewModeDep = Depends(get_review_mode)
+
+
 def _has_model(backend) -> bool:
     """True when an embedder or reviewer is present and has a real model."""
     return backend is not None and backend.model_name is not None
+
+
+def _mode_for(reviewer: Reviewer | None, wanted: str | None) -> str:
+    """The mode the server runs the review in. `off` without a model, whatever
+    was asked. With one, `enforce` only when asked for; otherwise `warn`, so a
+    reviewer handed to `create_app` is used even when the environment says
+    off."""
+    if not _has_model(reviewer):
+        return "off"
+    return "enforce" if wanted == "enforce" else "warn"
+
+
+def _refusal(verdict: Verdict) -> dict:
+    """The `detail` of the 422 an enforced review answers with. `explanation`
+    is the model's reason; `rewrite` and `tags` carry the suggestion when the
+    verdict is a rewrite (None and [] for a reject)."""
+    return {"reason": "review", "verdict": verdict.verdict, "rule": verdict.rule,
+            "explanation": verdict.reason, "rewrite": verdict.rewrite,
+            "tags": list(verdict.tags), "duplicate_of": verdict.duplicate_of}
+
+
+async def _review_before_store(session: AsyncSession, reviewer: Reviewer,
+                               embedder: Embedder | None, body: MemoryIn) -> Verdict | None:
+    """Ask the reviewer about an entry that is not stored yet. The memory it
+    sees has no id; its neighbours and the tags on offer are found the way
+    the stored path finds them. Returns the verdict, or None when the model
+    gave none or failed: then the caller stores the entry as warn mode would,
+    since an absent model must never block a write. The request's session
+    stays open while the model thinks; enforce mode pays that price so the
+    write can wait for the answer."""
+    memory = {"id": None, "project": body.project, "type": body.type,
+              "tags": [t.name for t in body.tags], "content": body.content}
+    neighbours = await repo.neighbours_for(session, embedder, body.content, body.project)
+    tags = await repo.tags_for_review(session, embedder, body.content)
+    try:
+        verdict = await asyncio.to_thread(reviewer.review, memory, neighbours, tags)
+    except Exception as e:
+        log.warning("review of a new memory failed: %s: %s", type(e).__name__, e)
+        return None
+    if verdict is None:
+        log.warning("review of a new memory gave no verdict; storing it without one")
+    return verdict
 
 
 async def _review_memory(app: FastAPI, mid: int) -> Verdict | None:
@@ -135,6 +188,7 @@ def create_app(
     token: str | None = None,
     embedder: Embedder | None = None,
     reviewer: Reviewer | None = None,
+    review_mode: str | None = None,
 ) -> FastAPI:
     """Build the app. In production (`sessionmaker` omitted) the lifespan builds a
     pooled engine from AGENT_MEMORY_DB and disposes it on shutdown; tests inject a
@@ -143,7 +197,10 @@ def create_app(
     omitted, the lifespan builds one from the environment with `make_embedder()`
     (a `NullEmbedder` when the model is off or not installed). The reviewer
     lands on `app.state.reviewer` the same way, through `make_reviewer()`
-    (a `NullReviewer` unless AGENT_MEMORY_REVIEW=warn and a server is set)."""
+    (a `NullReviewer` unless AGENT_MEMORY_REVIEW is warn or enforce and a
+    server is set). `app.state.review_mode` says how the review runs: `off`
+    without a model; else `enforce` when `review_mode` (or, when it is
+    omitted, AGENT_MEMORY_REVIEW) says so, and `warn` otherwise."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -157,6 +214,8 @@ def create_app(
         # start and an app built for tests stays cheap.
         app.state.embedder = embedder if embedder is not None else make_embedder()
         app.state.reviewer = reviewer if reviewer is not None else make_reviewer()
+        wanted = review_mode if review_mode is not None else review_mode_from_env()
+        app.state.review_mode = _mode_for(app.state.reviewer, wanted)
         if app.state.embedder.model_name is not None:
             await _reindex_at_startup(app)
         try:
@@ -174,6 +233,7 @@ def create_app(
         app.state.embedder = embedder
     if reviewer is not None:
         app.state.reviewer = reviewer
+        app.state.review_mode = _mode_for(reviewer, review_mode)
     guard = [Depends(require_token)]
 
     @app.get("/health")
@@ -185,8 +245,11 @@ def create_app(
                          session: AsyncSession = SessionDep,
                          embedder: Embedder | None = EmbedderDep,
                          reviewer: Reviewer | None = ReviewerDep,
-                         force: bool = Query(default=False,
-                                             description="Store even when a near-duplicate exists")):
+                         mode: str = ReviewModeDep,
+                         force: bool = Query(
+                             default=False,
+                             description="Store even when a near-duplicate exists, or "
+                                         "when the review model would refuse the entry")):
         # A memory that already exists in this project is refused, not stored
         # twice. `force=true` skips the check; a server without a model never
         # refuses, since it has no vectors to compare.
@@ -196,12 +259,25 @@ def create_app(
                 existing_id, score = dup
                 raise HTTPException(status_code=409, detail={
                     "reason": "duplicate", "existing_id": existing_id, "score": score})
+        # In enforce mode the model reads the entry first, and a reject or
+        # rewrite refuses it with the verdict and the suggestion. `force=true`
+        # skips this too. A model that gives no answer refuses nothing.
+        verdict = None
+        enforced = _has_model(reviewer) and mode == "enforce" and not force
+        if enforced:
+            verdict = await _review_before_store(session, reviewer, embedder, body)
+            if verdict is not None and verdict.verdict != "approve":
+                raise HTTPException(status_code=422, detail=_refusal(verdict))
         mid = await repo.add(session, body.content, body.agent or "unknown",
                              body.project, body.tags, body.type, embedder=embedder)
-        # The model's review runs after the response is sent, so the writer
-        # never waits for it. The session above commits before the response
-        # goes out, so the task sees the new row in its own session.
-        if _has_model(reviewer):
+        if verdict is not None:
+            # The approve from just now is the review: no second model call.
+            await repo.set_review(session, mid, verdict, reviewer.model_name)
+        elif _has_model(reviewer) and not enforced:
+            # Warn mode, or a forced write: the review runs after the response
+            # is sent, so the writer never waits for it. The session above
+            # commits before the response goes out, so the task sees the new
+            # row in its own session.
             background.add_task(_review_in_background, request.app, mid)
         # Stored either way; the warnings only tell the writer what the entry lacks.
         return {"id": mid, "warnings": warnings_for(body)}

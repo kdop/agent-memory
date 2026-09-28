@@ -547,18 +547,43 @@ async def review_input(session, mid: int) -> tuple[dict, list[dict]] | None:
         return None
     if m.embedding is None:
         return _dump(m), []
+    neighbours = await _nearest(session, list(m.embedding), m.embedding_model, m.project,
+                                exclude_id=m.id)
+    return _dump(m), neighbours
+
+
+async def neighbours_for(session, embedder: Embedder | None, content: str,
+                         project: str | None) -> list[dict]:
+    """The neighbours `review_input` would give a memory with this `content`
+    in this `project`, before it is stored: the enforce mode reviews the
+    entry first and writes it only when the model approves. The content is
+    embedded here and now, and the same rules apply: same project (no
+    project matches no project), same model, best first, at most
+    `NEIGHBOUR_COUNT`. Without a model there are no neighbours."""
+    vector, model = _embed(embedder, content)
+    if vector is None:
+        return []
+    return await _nearest(session, vector, model, project)
+
+
+async def _nearest(session, vector, model, project, exclude_id=None) -> list[dict]:
+    """The `NEIGHBOUR_COUNT` memories of `project` closest to `vector` by
+    cosine, best first (ties: newest first), each with its `score`. Only
+    vectors from `model` are compared, as in `find_duplicate`. `exclude_id`
+    leaves one memory out: the one being reviewed, when it is stored."""
     stmt = (
         select(Memory)
         .options(*_LOAD)
-        .where(Memory.project.is_not_distinct_from(m.project))
-        .where(Memory.id != m.id)
+        .where(Memory.project.is_not_distinct_from(project))
         .where(Memory.embedding.is_not(None))
-        .where(Memory.embedding_model == m.embedding_model)
+        .where(Memory.embedding_model == model)
     )
+    if exclude_id is not None:
+        stmt = stmt.where(Memory.id != exclude_id)
     rows = (await session.execute(stmt)).scalars().all()
-    scored = [(cosine(m.embedding, list(other.embedding)), other) for other in rows]
+    scored = [(cosine(vector, list(other.embedding)), other) for other in rows]
     scored.sort(key=lambda pair: (-pair[0], -pair[1].id))
-    return _dump(m), [_dump(other, score=score) for score, other in scored[:NEIGHBOUR_COUNT]]
+    return [_dump(other, score=score) for score, other in scored[:NEIGHBOUR_COUNT]]
 
 
 # The verdicts that mark a memory as flagged: the model said no, or said

@@ -4,12 +4,18 @@ The model sees the five rules from the memory skill, the new memory, the
 five memories closest to it in the same project, and the ten existing tags
 closest to it in meaning. It answers approve, reject (with the rule the entry
 breaks) or rewrite (with better text and the tags from that list that fit it).
-The verdict is stored next to the memory and shown with it. It is advice only:
-nothing is refused or changed because of it, and the write never waits for it.
+The verdict is stored next to the memory and shown with it.
+
+In `warn` mode it is advice only: nothing is refused or changed because of
+it, and the write never waits for it. In `enforce` mode the model reads the
+entry before it is stored, and a reject or rewrite verdict refuses the write
+(HTTP 422 with the verdict and the suggestion); `force=true` stores it anyway.
+In both modes a model that does not answer never blocks a write: the memory
+is stored and one log line says the review did not run.
 
 Settings, read once when `make_reviewer()` runs at server start:
 
-    AGENT_MEMORY_REVIEW          `off` (default) or `warn`
+    AGENT_MEMORY_REVIEW          `off` (default), `warn` or `enforce`
     AGENT_MEMORY_REVIEW_URL      an Ollama server, for example http://host:11434
     AGENT_MEMORY_REVIEW_MODEL    the model to ask (default qwen3:14b)
     AGENT_MEMORY_REVIEW_TIMEOUT  seconds to wait for an answer (default 30)
@@ -52,6 +58,11 @@ RULES: tuple[tuple[int, str], ...] = (
 )
 
 VERDICTS = ("approve", "reject", "rewrite")
+
+# The values AGENT_MEMORY_REVIEW may take. `off` means no model is asked;
+# `warn` stores the verdict after the write; `enforce` refuses a write the
+# model rejects or wants rewritten.
+MODES = ("off", "warn", "enforce")
 
 
 @dataclass(frozen=True)
@@ -126,13 +137,13 @@ class OllamaReviewer(Reviewer):
         try:
             text = self._chat(body)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            log.warning("review of memory #%s failed: %s at %s: %s",
-                        memory.get("id"), self.model_name, self.url, _cause(e))
+            log.warning("review of memory %s failed: %s at %s: %s",
+                        _label(memory), self.model_name, self.url, _cause(e))
             return None
         verdict = parse_verdict(text, [n["id"] for n in neighbours], list(tags))
         if verdict is None:
-            log.warning("review of memory #%s failed: %s gave no usable JSON: %.200s",
-                        memory.get("id"), self.model_name, text)
+            log.warning("review of memory %s failed: %s gave no usable JSON: %.200s",
+                        _label(memory), self.model_name, text)
         return verdict
 
     def request_body(self, memory: dict, neighbours: list[dict],
@@ -162,6 +173,13 @@ class OllamaReviewer(Reviewer):
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return data.get("message", {}).get("content", "")
+
+
+def _label(memory: dict) -> str:
+    """How a log line names a memory: `#12`, or `(new)` for one that is
+    reviewed before it is stored and so has no id yet."""
+    mid = memory.get("id")
+    return f"#{mid}" if mid is not None else "(new)"
 
 
 def _cause(e: Exception) -> str:
@@ -213,7 +231,8 @@ SYSTEM_PROMPT = (
 
 def _entry(m: dict) -> str:
     tags = ", ".join(m.get("tags") or []) or "none"
-    return (f"id: {m.get('id')}\nproject: {m.get('project') or 'none'}\n"
+    mid = m.get("id")
+    return (f"id: {mid if mid is not None else 'new'}\nproject: {m.get('project') or 'none'}\n"
             f"type: {m.get('type') or 'none'}\ntags: {tags}\ncontent: {m.get('content', '')}")
 
 
@@ -300,21 +319,33 @@ def _is_int(v) -> bool:
 
 
 # ---- setup -----------------------------------------------------------------
+def review_mode() -> str:
+    """The mode AGENT_MEMORY_REVIEW asks for, as one of `MODES`. Unset, blank
+    or a value that is not one of them counts as `off`. Whether the server
+    can act on it is `make_reviewer`'s call: `warn` and `enforce` need a
+    server address too."""
+    mode = os.environ.get("AGENT_MEMORY_REVIEW", "off").strip().lower()
+    return mode if mode in MODES else "off"
+
+
 def make_reviewer() -> Reviewer:
     """Build the reviewer from the environment. Returns a `NullReviewer`, and
     logs one line saying why, when review is off, the setting is not a known
     value, or no server address is given."""
-    mode = os.environ.get("AGENT_MEMORY_REVIEW", "off").strip().lower()
+    raw = os.environ.get("AGENT_MEMORY_REVIEW", "off").strip().lower()
+    mode = review_mode()
     if mode == "off":
+        if raw and raw != "off":
+            reason = (f"review is off: AGENT_MEMORY_REVIEW={raw!r} is not one of "
+                      + ", ".join(repr(m) for m in MODES))
+            log.warning(reason)
+            return NullReviewer(reason)
         log.info("review is off (AGENT_MEMORY_REVIEW=off)")
         return NullReviewer("review is off (AGENT_MEMORY_REVIEW=off)")
-    if mode != "warn":
-        reason = f"review is off: AGENT_MEMORY_REVIEW={mode!r} is not 'off' or 'warn'"
-        log.warning(reason)
-        return NullReviewer(reason)
     url = os.environ.get("AGENT_MEMORY_REVIEW_URL", "").strip()
     if not url:
-        reason = "review is off: AGENT_MEMORY_REVIEW=warn but AGENT_MEMORY_REVIEW_URL is not set"
+        reason = (f"review is off: AGENT_MEMORY_REVIEW={mode} but "
+                  "AGENT_MEMORY_REVIEW_URL is not set")
         log.warning(reason)
         return NullReviewer(reason)
     model = os.environ.get("AGENT_MEMORY_REVIEW_MODEL", "").strip() or DEFAULT_MODEL
@@ -325,5 +356,5 @@ def make_reviewer() -> Reviewer:
         log.warning("AGENT_MEMORY_REVIEW_TIMEOUT=%r is not a number; using %s",
                     raw_timeout, DEFAULT_TIMEOUT)
         timeout = DEFAULT_TIMEOUT
-    log.info("review is on: %s at %s (timeout %ss)", model, url, timeout)
+    log.info("review is on (%s): %s at %s (timeout %ss)", mode, model, url, timeout)
     return OllamaReviewer(url, model, timeout)

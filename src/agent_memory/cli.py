@@ -9,7 +9,7 @@ import argparse
 import json
 import sys
 
-from .client import ApiClient, ApiRefused, ApiUnreachable, DuplicateMemory
+from .client import ApiClient, ApiRefused, ApiUnreachable, DuplicateMemory, ReviewRefused
 from .config import config_path, get_agent_name, load_config, save_config
 
 # Box-drawing separators used in the rendered output.
@@ -50,6 +50,28 @@ def _print_meta(row):
     _print_review(row)
 
 
+def _verdict_head(verdict, rule, duplicate_of):
+    """`reject, rule 2`, or `reject, duplicate of #7` for a repeat, or just
+    `approve`: the verdict part of a review line."""
+    head = verdict
+    if rule is not None:
+        head += f", rule {rule}"
+    if duplicate_of is not None:
+        head += f", duplicate of #{duplicate_of}"
+    return head
+
+
+def _print_suggestion(rewrite, tags):
+    """The suggested text, indented under `suggested:`, and one
+    `suggested tags: a, b` line when the model named any."""
+    if rewrite:
+        print("suggested:")
+        for line in rewrite.splitlines():
+            print(f"    {line}")
+    if tags:
+        print(f"suggested tags: {', '.join(tags)}")
+
+
 def _print_review(row):
     """One line with the review model's verdict, when the server has one:
     `review: reject, rule 2: <reason>`. A repeat names the memory it repeats
@@ -60,20 +82,10 @@ def _print_review(row):
     review = row.get("review")
     if not review:
         return
-    head = f"review: {review['verdict']}"
-    if review.get("rule") is not None:
-        head += f", rule {review['rule']}"
-    if review.get("duplicate_of") is not None:
-        head += f", duplicate of #{review['duplicate_of']}"
-    print(f"{head}: {review.get('reason', '')}")
-    if review["verdict"] != "rewrite":
-        return
-    if review.get("rewrite"):
-        print("suggested:")
-        for line in review["rewrite"].splitlines():
-            print(f"    {line}")
-    if review.get("tags"):
-        print(f"suggested tags: {', '.join(review['tags'])}")
+    head = _verdict_head(review["verdict"], review.get("rule"), review.get("duplicate_of"))
+    print(f"review: {head}: {review.get('reason', '')}")
+    if review["verdict"] == "rewrite":
+        _print_suggestion(review.get("rewrite"), review.get("tags"))
 
 
 def add_memory(args, client):
@@ -87,6 +99,14 @@ def add_memory(args, client):
         print(f"✗ Duplicate of memory #{e.existing_id} (score {e.score:.2f}). "
               f"Use 'memory update {e.existing_id}' or --force.")
         sys.exit(3)
+    except ReviewRefused as e:
+        # The review model said no, and nothing was stored. The suggestion is
+        # printed the way `show` prints a stored one. Exit 4: 3 is a duplicate.
+        print(f"✗ Review: {_verdict_head(e.verdict, e.rule, e.duplicate_of)}: {e.explanation}")
+        if e.verdict == "rewrite":
+            _print_suggestion(e.rewrite, e.tags)
+        print("Fix the entry, or pass --force to store it as written.")
+        sys.exit(4)
     print(f"✓ Memory #{mid} added ({agent})")
     # One line per rule the entry breaks. The memory is stored either way.
     for w in warnings:
@@ -325,7 +345,9 @@ def main():
     add_parser.add_argument("--type", help="Memory type (decision, lesson, note, preference)")
     add_parser.add_argument("--force", action="store_true",
                             help="Store even when a near-duplicate exists in the project "
-                                 "(without it, a duplicate is refused with exit code 3)")
+                                 "(without it, a duplicate is refused with exit code 3), "
+                                 "and even when the server's review model would refuse "
+                                 "the entry (exit code 4)")
     add_parser.set_defaults(func=add_memory)
 
     query_parser = subparsers.add_parser("query", help="Query memories")
