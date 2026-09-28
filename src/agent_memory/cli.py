@@ -53,7 +53,10 @@ def _print_meta(row):
 def _print_review(row):
     """One line with the review model's verdict, when the server has one:
     `review: reject, rule 2: <reason>`. A repeat names the memory it repeats
-    instead of a rule. Nothing is printed for a memory that has no review."""
+    instead of a rule. A rewrite is followed by the suggested text, indented
+    under `suggested:`, and by `suggested tags: a, b` when the model named
+    any. Nothing is applied: the memory stays as it was written. Nothing is
+    printed for a memory that has no review."""
     review = row.get("review")
     if not review:
         return
@@ -63,6 +66,14 @@ def _print_review(row):
     if review.get("duplicate_of") is not None:
         head += f", duplicate of #{review['duplicate_of']}"
     print(f"{head}: {review.get('reason', '')}")
+    if review["verdict"] != "rewrite":
+        return
+    if review.get("rewrite"):
+        print("suggested:")
+        for line in review["rewrite"].splitlines():
+            print(f"    {line}")
+    if review.get("tags"):
+        print(f"suggested tags: {', '.join(review['tags'])}")
 
 
 def add_memory(args, client):

@@ -88,6 +88,9 @@ class MemoryReview(Base):
     duplicate_of: Mapped[int | None] = mapped_column(
         ForeignKey("memories.id", ondelete="SET NULL")
     )
+    # Tags suggested for the rewritten text, chosen from the tags that existed
+    # when the review ran. NULL when the verdict suggested none.
+    tags: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
     # The model that gave the verdict.
     model: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(

@@ -1,8 +1,12 @@
 """Alembic migration tests.
 
 Proves `alembic upgrade head` builds a working schema from scratch on an empty
-Postgres, then that a row can be inserted through the repository against it. A
-second test walks the `embedding_columns` revision up and down on its own.
+Postgres, then that a row can be inserted through the repository against it.
+The other tests walk one revision each up and down on its own.
+
+A test that stops at an older revision cannot go through the repository for a
+table the models have since grown: the ORM would ask for a column that does not
+exist yet. Those tests check the migrated schema with plain SQL instead.
 
 The test DB already carries the models' schema (created once by the session
 `_schema` fixture), so these tests work on a *clean slate*: they drop and recreate
@@ -30,6 +34,7 @@ SRC = REPO_ROOT / "src"
 BASELINE = "310017671d9e"
 EMBEDDING_COLUMNS = "62fcc84d6c84"
 MEMORY_REVIEWS = "2906ffedb42f"
+REVIEW_TAGS = "7c3e1a9d5b20"
 
 
 def _alembic(*args: str) -> None:
@@ -175,9 +180,16 @@ async def test_embedding_columns_revision_upgrades_and_downgrades():
         await _create_all()
 
 
-async def test_memory_reviews_revision_upgrades_and_downgrades():
-    from agent_memory.server.review import Verdict
+async def _scalar(sql: str, **params):
+    eng = make_test_engine()
+    try:
+        async with eng.begin() as conn:
+            return (await conn.execute(text(sql), params)).scalar()
+    finally:
+        await eng.dispose()
 
+
+async def test_memory_reviews_revision_upgrades_and_downgrades():
     # Clean slate, then stop one step short: the table must not exist yet.
     await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
     try:
@@ -197,9 +209,10 @@ async def test_memory_reviews_revision_upgrades_and_downgrades():
             "created_at": ("timestamptz", False),
         }
 
-        # A verdict can be written into the migrated table and comes back with
-        # the memory; deleting the memory takes its review with it, and
-        # deleting the memory a verdict points at clears `duplicate_of`.
+        # A verdict can be written into the migrated table; deleting the memory
+        # takes its review with it, and deleting the memory a verdict points at
+        # clears `duplicate_of`. Plain SQL: the models have since grown a
+        # `tags` column this revision does not have (see the module docstring).
         eng = make_test_engine()
         sm = make_sessionmaker(eng)
         try:
@@ -207,27 +220,72 @@ async def test_memory_reviews_revision_upgrades_and_downgrades():
                 async with s.begin():
                     first = await repo.add(s, "the original", "tester", "proj", [], "note")
                     second = await repo.add(s, "the same again", "tester", "proj", [], "note")
-                    verdict = Verdict("reject", None, "says the same as #1", None, first)
-                    await repo.set_review(s, second, verdict, "test-model")
-                async with s.begin():
-                    row = await repo.get(s, second)
-                    assert row["review"] == {"verdict": "reject", "rule": None,
-                                             "reason": "says the same as #1",
-                                             "rewrite": None, "duplicate_of": first}
-                    await repo.delete(s, [first])
-                async with s.begin():
-                    assert (await repo.get(s, second))["review"]["duplicate_of"] is None
-                    await repo.delete(s, [second])
-                async with s.begin():
-                    count = (await s.execute(text("SELECT count(*) FROM memory_reviews"))).scalar()
-                    assert count == 0
         finally:
             await eng.dispose()
+        await _exec(
+            "INSERT INTO memory_reviews (memory_id, verdict, reason, duplicate_of, model) "
+            f"VALUES ({second}, 'reject', 'says the same as #{first}', {first}, 'test-model')")
+        assert await _scalar("SELECT duplicate_of FROM memory_reviews WHERE memory_id = :m",
+                             m=second) == first
+        await _exec(f"DELETE FROM memories WHERE id = {first}")
+        assert await _scalar("SELECT duplicate_of FROM memory_reviews WHERE memory_id = :m",
+                             m=second) is None
+        await _exec(f"DELETE FROM memories WHERE id = {second}")
+        assert await _scalar("SELECT count(*) FROM memory_reviews") == 0
 
         # Downgrade one step: the table is gone, the memories table stays.
         _alembic("downgrade", EMBEDDING_COLUMNS)
         assert not await _table_exists("memory_reviews")
         assert await _table_exists("memories")
+    finally:
+        await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        await _create_all()
+
+
+async def test_review_tags_revision_upgrades_and_downgrades():
+    from agent_memory.server.review import Verdict
+
+    # Clean slate, then stop one step short: the column must not exist yet.
+    await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    try:
+        _alembic("upgrade", MEMORY_REVIEWS)
+        assert await _columns("memory_reviews", "tags") == {}
+
+        # Upgrade one step: the column appears, nullable, as text[].
+        _alembic("upgrade", REVIEW_TAGS)
+        assert await _columns("memory_reviews", "tags") == {"tags": ("_text", True)}
+
+        # A verdict with tags goes in through the repository and comes back
+        # with the memory; one without tags leaves the column NULL and reads
+        # back as an empty list.
+        eng = make_test_engine()
+        sm = make_sessionmaker(eng)
+        try:
+            async with sm() as s:
+                async with s.begin():
+                    first = await repo.add(s, "the original", "tester", "proj", [], "note")
+                    second = await repo.add(s, "the same again", "tester", "proj", [], "note")
+                    rewrite = Verdict("rewrite", 3, "say why", "the original, because of X",
+                                      None, ["db", "search"])
+                    await repo.set_review(s, first, rewrite, "test-model")
+                    repeat = Verdict("reject", None, "says the same as #1", None, first)
+                    await repo.set_review(s, second, repeat, "test-model")
+                async with s.begin():
+                    assert (await repo.get(s, first))["review"] == {
+                        "verdict": "rewrite", "rule": 3, "reason": "say why",
+                        "rewrite": "the original, because of X", "duplicate_of": None,
+                        "tags": ["db", "search"]}
+                    assert (await repo.get(s, second))["review"]["tags"] == []
+                    stored = (await s.execute(text(
+                        "SELECT tags FROM memory_reviews ORDER BY memory_id"))).scalars().all()
+                    assert stored == [["db", "search"], None]
+        finally:
+            await eng.dispose()
+
+        # Downgrade one step: the column is gone, the table and its rows stay.
+        _alembic("downgrade", MEMORY_REVIEWS)
+        assert await _columns("memory_reviews", "tags") == {}
+        assert await _scalar("SELECT count(*) FROM memory_reviews") == 2
     finally:
         await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
         await _create_all()

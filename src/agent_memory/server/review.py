@@ -1,10 +1,11 @@
 """Have a language model read each new memory and say what it thinks.
 
-The model sees the five rules from the memory skill, the new memory, and the
-five memories closest to it in the same project. It answers approve, reject
-(with the rule the entry breaks) or rewrite (with better text). The verdict is
-stored next to the memory and shown with it. It is advice only: nothing is
-refused or changed because of it, and the write never waits for it.
+The model sees the five rules from the memory skill, the new memory, the
+five memories closest to it in the same project, and the ten existing tags
+closest to it in meaning. It answers approve, reject (with the rule the entry
+breaks) or rewrite (with better text and the tags from that list that fit it).
+The verdict is stored next to the memory and shown with it. It is advice only:
+nothing is refused or changed because of it, and the write never waits for it.
 
 Settings, read once when `make_reviewer()` runs at server start:
 
@@ -25,13 +26,14 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "qwen3:14b"
 DEFAULT_TIMEOUT = 30.0
 NEIGHBOUR_COUNT = 5
+TAG_COUNT = 10
 
 # The rules the model checks against. Copied word for word from the numbered
 # rules in skills/memory/SKILL.md; the server never reads that file. The
@@ -60,13 +62,16 @@ class Verdict:
     breaks or falls short of (None for an approve). `reason` is one sentence.
     `rewrite` is the suggested text when the verdict is `rewrite`, else None.
     `duplicate_of` is the id of the listed neighbour this entry repeats, when
-    the verdict is a reject for that reason, else None."""
+    the verdict is a reject for that reason, else None. `tags` are the tags
+    the model suggests for the rewritten text, chosen from the ones it was
+    offered; empty unless the verdict is `rewrite`."""
 
     verdict: str
     rule: int | None
     reason: str
     rewrite: str | None
     duplicate_of: int | None
+    tags: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -77,12 +82,14 @@ class Reviewer:
 
     `model_name` names the model (None when there is none). `review` takes the
     new memory and its nearest neighbours as dicts with at least `id`,
-    `project`, `type`, `tags` and `content`, and returns a `Verdict`, or None
+    `project`, `type`, `tags` and `content`, and the names of the existing
+    tags the model may suggest for a rewrite, and returns a `Verdict`, or None
     when the model gave no usable answer. It may block: call it in a thread."""
 
     model_name: str | None
 
-    def review(self, memory: dict, neighbours: list[dict]) -> Verdict | None:
+    def review(self, memory: dict, neighbours: list[dict],
+               tags: list[str] = ()) -> Verdict | None:
         raise NotImplementedError
 
 
@@ -95,7 +102,8 @@ class NullReviewer(Reviewer):
     def __init__(self, reason: str = "review is off"):
         self.reason = reason
 
-    def review(self, memory: dict, neighbours: list[dict]) -> Verdict | None:
+    def review(self, memory: dict, neighbours: list[dict],
+               tags: list[str] = ()) -> Verdict | None:
         return None
 
 
@@ -112,28 +120,30 @@ class OllamaReviewer(Reviewer):
         self.model_name = model
         self.timeout = timeout
 
-    def review(self, memory: dict, neighbours: list[dict]) -> Verdict | None:
-        body = self.request_body(memory, neighbours)
+    def review(self, memory: dict, neighbours: list[dict],
+               tags: list[str] = ()) -> Verdict | None:
+        body = self.request_body(memory, neighbours, tags)
         try:
             text = self._chat(body)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             log.warning("review of memory #%s failed: %s at %s: %s",
                         memory.get("id"), self.model_name, self.url, _cause(e))
             return None
-        verdict = parse_verdict(text, [n["id"] for n in neighbours])
+        verdict = parse_verdict(text, [n["id"] for n in neighbours], list(tags))
         if verdict is None:
             log.warning("review of memory #%s failed: %s gave no usable JSON: %.200s",
                         memory.get("id"), self.model_name, text)
         return verdict
 
-    def request_body(self, memory: dict, neighbours: list[dict]) -> dict:
+    def request_body(self, memory: dict, neighbours: list[dict],
+                     tags: list[str] = ()) -> dict:
         """The JSON sent to `/api/chat`. Separate from the call so a test can
         check it without a server."""
         return {
             "model": self.model_name,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt(memory, neighbours)},
+                {"role": "user", "content": user_prompt(memory, neighbours, tags)},
             ],
             "stream": False,
             "format": "json",
@@ -166,22 +176,38 @@ SYSTEM_PROMPT = (
     "will still matter in a later session. Judge each new entry against these rules:\n"
     + "\n".join(f"{n}. {text}" for n, text in RULES)
     + "\n\n"
-    "You get one new entry and up to five existing entries from the same project. "
-    "Answer with one JSON object and nothing else, with exactly these five keys:\n"
+    "You get one new entry, up to five existing entries from the same project, and a "
+    "list of existing tag names. Answer with one JSON object and nothing else, with "
+    "exactly these six keys:\n"
     '{"verdict": "approve" | "reject" | "rewrite", "rule": <number or null>, '
-    '"reason": "<one sentence>", "rewrite": "<text>" or null, "duplicate_of": <id or null>}\n'
+    '"reason": "<one sentence>", "rewrite": "<text>" or null, "duplicate_of": <id or null>, '
+    '"tags": [<names from the list only>]}\n'
     "\n"
-    "- approve: the entry follows the rules. rule, rewrite and duplicate_of are null.\n"
+    "- approve: the entry follows the rules. rule, rewrite and duplicate_of are null; "
+    "tags is [].\n"
     "- reject: the entry breaks a rule, or says the same as an existing entry in other "
     "words. Set rule to the number of the rule it breaks. For a repeat of an existing "
-    "entry set duplicate_of to that entry's id and rule to null. rewrite is null.\n"
+    "entry set duplicate_of to that entry's id and rule to null. rewrite is null; "
+    "tags is [].\n"
     "- rewrite: the entry is worth keeping but would follow the rules better in other "
     "words, for example a decision that has a why buried in it. Put the new text in "
-    "rewrite and the rule it falls short of in rule. duplicate_of is null.\n"
+    "rewrite and the rule it falls short of in rule. duplicate_of is null. In tags put "
+    "the names from the offered list that fit the new text, most fitting first, at most "
+    "five; never a name that is not on the list, and [] when none fits.\n"
     "- An entry that reverses or replaces what an existing entry says is not a repeat: "
     "approve it.\n"
     "- A short entry is fine when it follows the rules. Do not reject for length.\n"
-    "- reason is one plain sentence a person can act on."
+    "- reason is one plain sentence a person can act on.\n"
+    "\n"
+    "Check the new entry in this order, and stop at the first that applies:\n"
+    "1. It tells what was done in a session (rule 2): reject, rule 2.\n"
+    "2. It says the same as a listed existing entry in other words: reject, duplicate_of "
+    "that id.\n"
+    "3. It states what was decided, chosen, learned or will be done, but not why: no "
+    "'because', no cause, no alternative that was rejected. Then it falls short of rule "
+    "3: rewrite it, keeping the writer's words and adding the why when the entry or the "
+    "existing entries state it; otherwise reject, rule 3.\n"
+    "4. It states the what and the why, in any order: approve."
 )
 
 
@@ -191,25 +217,38 @@ def _entry(m: dict) -> str:
             f"type: {m.get('type') or 'none'}\ntags: {tags}\ncontent: {m.get('content', '')}")
 
 
-def user_prompt(memory: dict, neighbours: list[dict]) -> str:
-    """The new memory and its neighbours, laid out for the model."""
+def user_prompt(memory: dict, neighbours: list[dict], tags: list[str] = ()) -> str:
+    """The new memory, its neighbours and the tags on offer, laid out for the
+    model. `tags` are the only names the model may suggest for a rewrite."""
     parts = ["New entry:\n" + _entry(memory)]
     if neighbours:
         listed = "\n\n".join(_entry(n) for n in neighbours)
         parts.append(f"Existing entries in the same project, closest in meaning first:\n{listed}")
     else:
         parts.append("There are no existing entries to compare with.")
+    if tags:
+        parts.append("Existing tags you may suggest for a rewrite, closest in meaning "
+                     "first: " + ", ".join(tags))
+    else:
+        parts.append("There are no existing tags to suggest: tags must be [].")
     return "\n\n".join(parts)
 
 
 # ---- the answer ------------------------------------------------------------
-def parse_verdict(text: str, neighbour_ids: list[int] | None = None) -> Verdict | None:
+def parse_verdict(text: str, neighbour_ids: list[int] | None = None,
+                  offered_tags: list[str] | None = None) -> Verdict | None:
     """Turn the model's answer into a `Verdict`, or None when it is not the
     expected shape.
 
     Bad JSON, a missing key, a verdict outside `VERDICTS`, a rule number that
     is not one of the rules, or a `duplicate_of` that names an entry the model
-    was not shown all count as no answer. The caller stores nothing then."""
+    was not shown all count as no answer. The caller stores nothing then.
+
+    `tags` may be left out (then it is empty) but must be a list of strings
+    when present. Only a rewrite keeps its tags, and only the names in
+    `offered_tags`, matched without regard to case and returned in the offered
+    spelling; the rest are dropped. With `offered_tags` None the names are
+    kept as given."""
     try:
         data = json.loads(text)
     except (TypeError, ValueError):
@@ -232,8 +271,27 @@ def parse_verdict(text: str, neighbour_ids: list[int] | None = None) -> Verdict 
             return None
         if neighbour_ids is not None and duplicate_of not in neighbour_ids:
             return None
+    raw_tags = data.get("tags") or []
+    if not isinstance(raw_tags, list) or not all(isinstance(t, str) for t in raw_tags):
+        return None
+    tags = _keep_offered(raw_tags, offered_tags) if verdict == "rewrite" else []
     return Verdict(verdict=verdict, rule=rule, reason=reason.strip(),
-                   rewrite=rewrite, duplicate_of=duplicate_of)
+                   rewrite=rewrite, duplicate_of=duplicate_of, tags=tags)
+
+
+def _keep_offered(names: list[str], offered: list[str] | None) -> list[str]:
+    """The names that are on the offered list, in the model's order, each once,
+    spelled as offered. All of them, once each, when there is no list."""
+    spelling: dict[str, str] = {}
+    for name in (offered if offered is not None else [n.strip() for n in names]):
+        if name:
+            spelling.setdefault(name.lower(), name)
+    kept: list[str] = []
+    for name in names:
+        match = spelling.get(name.strip().lower())
+        if match is not None and match not in kept:
+            kept.append(match)
+    return kept
 
 
 def _is_int(v) -> bool:
