@@ -20,11 +20,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from agent_memory.server import repository as repo
 from agent_memory.server.db import make_sessionmaker
-from agent_memory.server.models import Base, Memory
+from agent_memory.server.models import Base
 from agent_memory.server.schemas import TagIn
 from conftest import PG_DSN, make_test_engine
 
@@ -35,6 +37,7 @@ BASELINE = "310017671d9e"
 EMBEDDING_COLUMNS = "62fcc84d6c84"
 MEMORY_REVIEWS = "2906ffedb42f"
 REVIEW_TAGS = "7c3e1a9d5b20"
+REVIEW_STATUS = "b8e2f4a6c9d1"
 
 
 def _alembic(*args: str) -> None:
@@ -123,6 +126,7 @@ async def test_alembic_upgrade_head_builds_working_schema():
                     row = await repo.get(s, mid)
                     assert row["content"] == "migrated in"
                     assert row["tags"] == ["net"]
+                    assert row["review_status"] == "unverified"
                     hits = await repo.search(s, "migrated")
                     assert len(hits) == 1
         finally:
@@ -147,29 +151,17 @@ async def test_embedding_columns_revision_upgrades_and_downgrades():
             "embedding_model": ("text", True),
         }
 
-        # The model can write a vector into the migrated table and read it back,
-        # and the API-facing dump keeps both columns out of sight.
-        eng = make_test_engine()
-        sm = make_sessionmaker(eng)
-        try:
-            async with sm() as s:
-                async with s.begin():
-                    mid = await repo.add(s, "has a vector", "tester", "proj", [], "note")
-                    m = await s.get(Memory, mid)
-                    assert m.embedding is None and m.embedding_model is None
-                    m.embedding = [0.5, -1.25, 2.0]
-                    m.embedding_model = "test-model"
-                async with s.begin():
-                    m = await s.get(Memory, mid)
-                    assert m.embedding == [0.5, -1.25, 2.0]
-                    assert m.embedding_model == "test-model"
-                    # `get_many`, not `get`: at this revision there is no
-                    # memory_reviews table yet, and `get` reads the review
-                    # with the memory.
-                    (row,) = await repo.get_many(s, [mid])
-                    assert "embedding" not in row and "embedding_model" not in row
-        finally:
-            await eng.dispose()
+        # A vector can be written into the migrated table and read back. Plain
+        # SQL: the models have since grown columns this revision does not have
+        # (see the module docstring).
+        mid = await _scalar("INSERT INTO memories (agent, content) VALUES ('tester', 'has a vector') "
+                            "RETURNING id")
+        assert await _scalar("SELECT embedding FROM memories WHERE id = :m", m=mid) is None
+        assert await _scalar("SELECT embedding_model FROM memories WHERE id = :m", m=mid) is None
+        await _exec(f"UPDATE memories SET embedding = ARRAY[0.5, -1.25, 2.0]::real[], "
+                    f"embedding_model = 'test-model' WHERE id = {mid}")
+        assert list(await _scalar("SELECT embedding FROM memories WHERE id = :m", m=mid)) == [0.5, -1.25, 2.0]
+        assert await _scalar("SELECT embedding_model FROM memories WHERE id = :m", m=mid) == "test-model"
 
         # Downgrade one step: both columns are gone, the rest of the table stays.
         _alembic("downgrade", BASELINE)
@@ -187,6 +179,25 @@ async def _scalar(sql: str, **params):
             return (await conn.execute(text(sql), params)).scalar()
     finally:
         await eng.dispose()
+
+
+async def _column_values(sql: str, **params) -> list:
+    """The first column of every row `sql` returns, as a list."""
+    eng = make_test_engine()
+    try:
+        async with eng.begin() as conn:
+            return list((await conn.execute(text(sql), params)).scalars().all())
+    finally:
+        await eng.dispose()
+
+
+async def _insert_memory(content: str, **columns) -> int:
+    """Insert a memory with plain SQL (for a revision the ORM has outgrown)
+    and return its id. `columns` are extra column values, bound as parameters."""
+    names = ", ".join(["agent", "project", "content", *columns])
+    values = ", ".join(["'tester'", "'proj'", ":content", *(f":{c}" for c in columns)])
+    return await _scalar(f"INSERT INTO memories ({names}) VALUES ({values}) RETURNING id",
+                         content=content, **columns)
 
 
 async def test_memory_reviews_revision_upgrades_and_downgrades():
@@ -211,17 +222,10 @@ async def test_memory_reviews_revision_upgrades_and_downgrades():
 
         # A verdict can be written into the migrated table; deleting the memory
         # takes its review with it, and deleting the memory a verdict points at
-        # clears `duplicate_of`. Plain SQL: the models have since grown a
-        # `tags` column this revision does not have (see the module docstring).
-        eng = make_test_engine()
-        sm = make_sessionmaker(eng)
-        try:
-            async with sm() as s:
-                async with s.begin():
-                    first = await repo.add(s, "the original", "tester", "proj", [], "note")
-                    second = await repo.add(s, "the same again", "tester", "proj", [], "note")
-        finally:
-            await eng.dispose()
+        # clears `duplicate_of`. Plain SQL: the models have since grown columns
+        # this revision does not have (see the module docstring).
+        first = await _insert_memory("the original")
+        second = await _insert_memory("the same again")
         await _exec(
             "INSERT INTO memory_reviews (memory_id, verdict, reason, duplicate_of, model) "
             f"VALUES ({second}, 'reject', 'says the same as #{first}', {first}, 'test-model')")
@@ -243,8 +247,6 @@ async def test_memory_reviews_revision_upgrades_and_downgrades():
 
 
 async def test_review_tags_revision_upgrades_and_downgrades():
-    from agent_memory.server.review import Verdict
-
     # Clean slate, then stop one step short: the column must not exist yet.
     await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
     try:
@@ -255,37 +257,108 @@ async def test_review_tags_revision_upgrades_and_downgrades():
         _alembic("upgrade", REVIEW_TAGS)
         assert await _columns("memory_reviews", "tags") == {"tags": ("_text", True)}
 
-        # A verdict with tags goes in through the repository and comes back
-        # with the memory; one without tags leaves the column NULL and reads
-        # back as an empty list.
-        eng = make_test_engine()
-        sm = make_sessionmaker(eng)
-        try:
-            async with sm() as s:
-                async with s.begin():
-                    first = await repo.add(s, "the original", "tester", "proj", [], "note")
-                    second = await repo.add(s, "the same again", "tester", "proj", [], "note")
-                    rewrite = Verdict("rewrite", 3, "say why", "the original, because of X",
-                                      None, ["db", "search"])
-                    await repo.set_review(s, first, rewrite, "test-model")
-                    repeat = Verdict("reject", None, "says the same as #1", None, first)
-                    await repo.set_review(s, second, repeat, "test-model")
-                async with s.begin():
-                    assert (await repo.get(s, first))["review"] == {
-                        "verdict": "rewrite", "rule": 3, "reason": "say why",
-                        "rewrite": "the original, because of X", "duplicate_of": None,
-                        "tags": ["db", "search"]}
-                    assert (await repo.get(s, second))["review"]["tags"] == []
-                    stored = (await s.execute(text(
-                        "SELECT tags FROM memory_reviews ORDER BY memory_id"))).scalars().all()
-                    assert stored == [["db", "search"], None]
-        finally:
-            await eng.dispose()
+        # A verdict with tags goes into the migrated table and comes back; one
+        # without tags leaves the column NULL. Plain SQL: the models have
+        # since grown a column this revision does not have (see the module
+        # docstring).
+        first = await _insert_memory("the original")
+        second = await _insert_memory("the same again")
+        await _exec(
+            "INSERT INTO memory_reviews (memory_id, verdict, rule, reason, rewrite, tags, model) "
+            f"VALUES ({first}, 'rewrite', 3, 'say why', 'the original, because of X', "
+            "ARRAY['db', 'search']::text[], 'test-model'); "
+            "INSERT INTO memory_reviews (memory_id, verdict, reason, duplicate_of, model) "
+            f"VALUES ({second}, 'reject', 'says the same as #1', {first}, 'test-model')")
+        assert await _column_values("SELECT tags FROM memory_reviews ORDER BY memory_id") == [
+            ["db", "search"], None]
 
         # Downgrade one step: the column is gone, the table and its rows stay.
         _alembic("downgrade", MEMORY_REVIEWS)
         assert await _columns("memory_reviews", "tags") == {}
         assert await _scalar("SELECT count(*) FROM memory_reviews") == 2
+    finally:
+        await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        await _create_all()
+
+
+async def _constraint_exists(name: str) -> bool:
+    return await _scalar("SELECT count(*) FROM pg_constraint WHERE conname = :n", n=name) == 1
+
+
+async def _statuses() -> list[str]:
+    return await _column_values("SELECT review_status FROM memories ORDER BY id")
+
+
+async def test_review_status_revision_fills_existing_rows_and_downgrades():
+    # Clean slate, then stop one step short: the column must not exist yet.
+    await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    try:
+        _alembic("upgrade", REVIEW_TAGS)
+        assert await _columns("memories", "review_status") == {}
+        assert not await _constraint_exists("ck_memories_review_status")
+
+        # Four memories written before the column existed: one approved, one
+        # rejected, one with a rewrite suggested, one never reviewed.
+        approved = await _insert_memory("Chose Postgres because several agents write at once.")
+        rejected = await _insert_memory("Spent the afternoon tidying.")
+        rewritten = await _insert_memory("Chose Postgres.")
+        bare = await _insert_memory("Not reviewed yet.")
+        await _exec(
+            "INSERT INTO memory_reviews (memory_id, verdict, reason, model) VALUES "
+            f"({approved}, 'approve', 'fine', 'm'), "
+            f"({rejected}, 'reject', 'a diary line', 'm'), "
+            f"({rewritten}, 'rewrite', 'say why', 'm')")
+
+        # Upgrade one step: the column appears, NOT NULL with the default,
+        # the CHECK and the index are there, and existing rows are filled
+        # from their review row.
+        _alembic("upgrade", REVIEW_STATUS)
+        assert await _columns("memories", "review_status") == {"review_status": ("text", False)}
+        assert await _scalar(
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_name = 'memories' AND column_name = 'review_status'"
+        ) == "'unverified'::text"
+        assert await _constraint_exists("ck_memories_review_status")
+        assert await _scalar("SELECT count(*) FROM pg_indexes WHERE indexname = "
+                             "'ix_memories_review_status'") == 1
+        assert await _statuses() == ["verified", "flagged", "flagged", "unverified"]
+
+        # A row inserted without a status gets the default; a value outside
+        # the three is refused by the CHECK.
+        new = await _insert_memory("written after the upgrade")
+        assert await _scalar("SELECT review_status FROM memories WHERE id = :m", m=new) == "unverified"
+        with pytest.raises(IntegrityError, match="ck_memories_review_status"):
+            await _insert_memory("a made-up status", review_status="maybe")
+        assert await _scalar("SELECT count(*) FROM memories") == 5
+
+        # The repository sees the column at this revision (it is head): a
+        # verdict stored now sets the status, and every read carries it.
+        eng = make_test_engine()
+        sm = make_sessionmaker(eng)
+        try:
+            async with sm() as s, s.begin():
+                from agent_memory.server.review import Verdict
+
+                await repo.set_review(s, bare, Verdict("approve", None, "fine", None, None), "m")
+                assert (await repo.get(s, bare))["review_status"] == "verified"
+                assert (await repo.get(s, new))["review_status"] == "unverified"
+        finally:
+            await eng.dispose()
+
+        # Downgrade one step: the column, the CHECK and the index are gone;
+        # the memories and their reviews stay.
+        _alembic("downgrade", REVIEW_TAGS)
+        assert await _columns("memories", "review_status") == {}
+        assert not await _constraint_exists("ck_memories_review_status")
+        assert await _scalar("SELECT count(*) FROM pg_indexes WHERE indexname = "
+                             "'ix_memories_review_status'") == 0
+        assert await _scalar("SELECT count(*) FROM memories") == 5
+        assert await _scalar("SELECT count(*) FROM memory_reviews") == 4
+
+        # Upgrade again: the fill runs again from the review rows, `bare`
+        # now among the approved ones.
+        _alembic("upgrade", REVIEW_STATUS)
+        assert await _statuses() == ["verified", "flagged", "flagged", "verified", "unverified"]
     finally:
         await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
         await _create_all()

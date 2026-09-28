@@ -89,6 +89,9 @@ class MemoryOut(BaseModel):
     # The model's verdict, once the review has run. None until then, and
     # always None when review is off.
     review: ReviewOut | None = None
+    # Whether the model has checked this memory: `unverified` until a verdict
+    # is stored, then `verified` (approve) or `flagged` (reject or rewrite).
+    review_status: str = "unverified"
 
 
 class UpdateIn(BaseModel):

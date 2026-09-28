@@ -9,7 +9,14 @@ import argparse
 import json
 import sys
 
-from .client import ApiClient, ApiRefused, ApiUnreachable, DuplicateMemory, ReviewRefused
+from .client import (
+    REVIEW_STATUSES,
+    ApiClient,
+    ApiRefused,
+    ApiUnreachable,
+    DuplicateMemory,
+    ReviewRefused,
+)
 from .config import config_path, get_agent_name, load_config, save_config
 
 # Box-drawing separators used in the rendered output.
@@ -34,6 +41,19 @@ def _parse_tags_json(raw, flag):
         print(f"✗ {flag} must be a JSON array of objects with at least a \"name\" field")
         sys.exit(1)
     return parsed
+
+
+def _header(row):
+    """The `━━━ #<id> status: <status> ━━━…` line that opens every memory
+    block, on `show`, `query`, `search` and `review`. The status says whether
+    the review model has checked the memory: `unverified`, `verified` or
+    `flagged`. A search result adds its score: `━━━ #12 status: verified
+    score 0.87 ━━━…`."""
+    head = f"━━━ #{row['id']} status: {row.get('review_status') or 'unverified'}"
+    score = row.get("score")
+    if score is not None:
+        head += f" score {score:.2f}"
+    return f"{head} {HBAR}"
 
 
 def _print_meta(row):
@@ -120,10 +140,11 @@ def _effective_limit(args):
 
 def _print_listing(rows, total, noun="memories"):
     """Print a list of memories the way `query` does: one block per memory
-    with its meta lines (the review line included) and its content, then a
-    footer that says how many were shown out of `total`."""
+    with its header line (the id and the review status), its meta lines
+    (the review line included) and its content, then a footer that says how
+    many were shown out of `total`."""
     for row in rows:
-        print(f"\n━━━ #{row['id']} {HBAR}")
+        print(f"\n{_header(row)}")
         _print_meta(row)
         print(f"\n{row['content']}")
     print(f"\n{FOOT}")
@@ -137,7 +158,7 @@ def query_memories(args, client):
     rows, total = client.query_with_total(
         since_days=args.since_days, since=args.since, until=args.until,
         project=args.project, agent=args.agent, tag=args.tag,
-        mtype=args.type, limit=_effective_limit(args))
+        mtype=args.type, status=args.status, limit=_effective_limit(args))
     if not rows:
         print("No memories found.")
         return
@@ -145,31 +166,26 @@ def query_memories(args, client):
 
 
 def review_memories(args, client):
-    """`memory review`: list the memories the review flagged. With
-    `--missing`, ask the server to review the memories that have no
-    review yet instead."""
-    if args.missing:
-        if args.project or args.verdict or args.all:
-            print("✗ --missing goes with --limit only, not with --project, --verdict or --all.")
+    """`memory review`: list the memories the review flagged, or with
+    `--status` the memories with that review status. With `--catch-up`
+    (`--missing` is the old name), ask the server to review the unverified
+    memories, oldest first, instead."""
+    if args.catch_up:
+        if args.project or args.verdict or args.status or args.all:
+            print("✗ --catch-up goes with --limit only, not with --project, --verdict, "
+                  "--status or --all.")
             sys.exit(2)
-        n = client.review_missing(limit=args.limit)
+        n = client.review_catch_up(limit=args.limit)
         print(f"✓ Scheduled {n} reviews")
         return
     rows, total = client.flagged_with_total(
-        project=args.project, verdict=args.verdict, limit=_effective_limit(args))
+        project=args.project, verdict=args.verdict, status=args.status,
+        limit=_effective_limit(args))
+    noun = f"{args.status} memories" if args.status else "flagged memories"
     if not rows:
-        print("No flagged memories.")
+        print(f"No {noun}.")
         return
-    _print_listing(rows, total, noun="flagged memories")
-
-
-def _search_header(row):
-    """The `━━━ #id ━━━…` line of a search result, with the score when the
-    server sent one: `━━━ #12 score 0.87 ━━━…`."""
-    score = row.get("score")
-    if score is None:
-        return f"━━━ #{row['id']} {HBAR}"
-    return f"━━━ #{row['id']} score {score:.2f} {HBAR}"
+    _print_listing(rows, total, noun=noun)
 
 
 def search_memories(args, client):
@@ -181,7 +197,7 @@ def search_memories(args, client):
         return
     print(f"🔍 Search results for: {args.query}\n")
     for row in rows:
-        print(_search_header(row))
+        print(_header(row))
         _print_meta(row)
         # Keyword search sends a snippet with the matches marked. Semantic
         # search has no words to mark, so it sends none: show the content.
@@ -223,7 +239,7 @@ def show_memory(args, client):
     if not row:
         print(f"✗ Memory #{args.id} not found.")
         sys.exit(1)
-    print(f"\n━━━ #{row['id']} {HBAR}")
+    print(f"\n{_header(row)}")
     _print_meta(row)
     print(f"\n{row['content']}")
 
@@ -358,6 +374,10 @@ def main():
     query_parser.add_argument("--agent", help="Filter by agent")
     query_parser.add_argument("--tag", help="Filter by tag")
     query_parser.add_argument("--type", help="Filter by type")
+    query_parser.add_argument(
+        "--status", choices=REVIEW_STATUSES,
+        help="Only memories with this review status: unverified (the model has not "
+             "checked it), verified (approved) or flagged (rejected or a rewrite suggested)")
     query_parser.add_argument("--limit", type=int, help="Limit results (default 100; 0 = all)")
     query_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     query_parser.set_defaults(func=query_memories)
@@ -419,21 +439,28 @@ def main():
         help="List the memories the review model flagged (reject or rewrite), newest first",
         description="List the memories the review model flagged: those whose verdict is "
                     "reject or rewrite, newest review first, each with its verdict and "
-                    "reason. With --missing, ask the server to review the memories that "
-                    "have no verdict yet instead (written while the model was off).")
+                    "reason. With --status, list the memories with that review status "
+                    "instead (--status unverified: the ones the model has not checked "
+                    "yet). With --catch-up, ask the server to review the unverified "
+                    "memories, oldest first (written while the model was off).")
     review_parser.add_argument("--project", help="Only this project")
     review_parser.add_argument("--verdict", choices=["reject", "rewrite"],
                                help="Only this verdict (default: both)")
     review_parser.add_argument(
+        "--status", choices=REVIEW_STATUSES,
+        help="List the memories with this review status instead of the flagged ones: "
+             "unverified, verified or flagged")
+    review_parser.add_argument(
         "--limit", type=int,
-        help="How many to show (default 100; 0 = all). With --missing: how many "
+        help="How many to show (default 100; 0 = all). With --catch-up: how many "
              "memories to review (default 50; 0 = all)")
     review_parser.add_argument("--all", action="store_true",
                                help="Show every flagged memory (same as --limit 0)")
     review_parser.add_argument(
-        "--missing", action="store_true",
-        help="Do not list; ask the server to review the memories that have no verdict "
-             "yet, newest first. Runs in the background; prints how many were scheduled")
+        "--catch-up", "--missing", dest="catch_up", action="store_true",
+        help="Do not list; ask the server to review the unverified memories, oldest "
+             "first, one after another. Runs in the background; prints how many were "
+             "scheduled. --missing is the old name for this flag")
     review_parser.set_defaults(func=review_memories)
 
     config_parser = subparsers.add_parser("config", help="Get/set persistent client settings (api_url, api_token)")

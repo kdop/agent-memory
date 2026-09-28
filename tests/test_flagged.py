@@ -1,13 +1,13 @@
-"""Tests for the list of flagged memories and the review of the ones that have
-none (issue #33).
+"""Tests for the list of flagged memories and the catch-up review of the
+unverified ones (issue #33; the catch-up order and the status are from #57).
 
 Four layers. The repository: `flagged` orders by the review's time, keeps to
 reject and rewrite, and takes the project, verdict and limit filters;
-`without_review` names the memories that have no row, newest first. The
-routes: `GET /memories/flagged` with its header and its 422, not shadowed by
-the id route; `POST /admin/review` schedules only the memories without a row
-and answers 503 without a model. The CLI: `memory review` prints flagged
-memories the way `query` does, and `--missing` prints what was scheduled.
+`unverified_ids` names the unverified memories, oldest first. The routes:
+`GET /memories/flagged` with its header and its 422, not shadowed by the id
+route; `POST /admin/review` schedules only the unverified memories and
+answers 503 without a model. The CLI: `memory review` prints flagged
+memories the way `query` does, and `--catch-up` prints what was scheduled.
 The MCP tool `memory_flagged` gives the same shape as `memory_query`.
 
 The `FakeReviewer` and the fixed verdicts come from test_review.py.
@@ -168,16 +168,17 @@ async def test_flagged_is_empty_without_reviews(session):
     assert await repo.count_flagged(session) == 0
 
 
-async def test_without_review_names_the_bare_memories_newest_first(session):
+async def test_unverified_ids_names_the_bare_memories_oldest_first(session):
     ids = await _seed(session)
-    assert await repo.without_review(session) == [ids["bare"]]
+    assert await repo.unverified_ids(session) == [ids["bare"]]
     late = await _add(session, "also bare")
     early = await _add(session, "bare too")
     await session.execute(update(repo.Memory).where(repo.Memory.id == early)
                           .values(timestamp=datetime.now(timezone.utc) - timedelta(minutes=5)))
-    assert await repo.without_review(session) == [late, ids["bare"], early]
-    assert await repo.without_review(session, limit=2) == [late, ids["bare"]]
-    assert await repo.without_review(session, limit=0) == [late, ids["bare"], early]
+    # Oldest first by timestamp; `bare` and `late` share a timestamp, so by id.
+    assert await repo.unverified_ids(session) == [early, ids["bare"], late]
+    assert await repo.unverified_ids(session, limit=2) == [early, ids["bare"]]
+    assert await repo.unverified_ids(session, limit=0) == [early, ids["bare"], late]
 
 
 # ── GET /memories/flagged, against the live server ───────────────────────────
@@ -281,7 +282,7 @@ class _App:
         await self.engine.dispose()
 
 
-async def test_review_missing_reviews_only_the_memories_without_a_row():
+async def test_catch_up_reviews_only_the_unverified_memories():
     fake = FakeReviewer(REJECT)
     async with _App(reviewer=NullReviewer()) as off:
         # Written while the model was off: no rows.
@@ -298,8 +299,8 @@ async def test_review_missing_reviews_only_the_memories_without_a_row():
         resp = await a.client.post("/admin/review")
         assert resp.status_code == 200
         assert resp.json() == {"scheduled": 3}
-        # Only the three without a row, newest first; the reviewed one was not asked again.
-        assert [m["id"] for m, _ in fake.calls] == ids[::-1]
+        # Only the three unverified ones, oldest first; the reviewed one was not asked again.
+        assert [m["id"] for m, _ in fake.calls] == ids
         assert await _review_rows() == [(mid, "reject") for mid in ids + [reviewed]]
 
         # Nothing left the second time.
@@ -308,21 +309,21 @@ async def test_review_missing_reviews_only_the_memories_without_a_row():
         assert fake.calls == []
 
 
-async def test_review_missing_limit_takes_the_newest():
+async def test_catch_up_limit_takes_the_oldest():
     fake = FakeReviewer(APPROVE)
     async with _App(reviewer=NullReviewer()) as off:
         ids = [(await off.client.post("/memories", json={"content": t, "agent": "t"})).json()["id"]
                for t in ("one", "two", "three")]
     async with _App(reviewer=fake) as a:
         assert (await a.client.post("/admin/review", params={"limit": 2})).json() == {"scheduled": 2}
-        assert [m["id"] for m, _ in fake.calls] == ids[:0:-1]
-        assert await _review_rows() == [(ids[1], "approve"), (ids[2], "approve")]
+        assert [m["id"] for m, _ in fake.calls] == ids[:2]
+        assert await _review_rows() == [(ids[0], "approve"), (ids[1], "approve")]
         # limit 0 means all: the one left over.
         assert (await a.client.post("/admin/review", params={"limit": 0})).json() == {"scheduled": 1}
         assert len(await _review_rows()) == 3
 
 
-async def test_review_missing_default_limit_is_50():
+async def test_catch_up_default_limit_is_50():
     fake = FakeReviewer(APPROVE)
     async with _App(reviewer=NullReviewer()) as off:
         for i in range(52):
@@ -333,7 +334,7 @@ async def test_review_missing_default_limit_is_50():
         assert (await a.client.post("/admin/review")).json() == {"scheduled": 2}
 
 
-async def test_review_missing_one_failure_does_not_stop_the_rest(caplog):
+async def test_catch_up_one_failure_does_not_stop_the_rest(caplog):
     import logging
 
     class FailsOnTwo(FakeReviewer):
@@ -353,7 +354,7 @@ async def test_review_missing_one_failure_does_not_stop_the_rest(caplog):
         f"review of memory #{ids[1]} failed: RuntimeError: model blew up"]
 
 
-async def test_review_missing_no_verdict_leaves_no_row_and_still_counts():
+async def test_catch_up_no_verdict_leaves_no_row_and_still_counts():
     async with _App(reviewer=NullReviewer()) as off:
         await off.client.post("/memories", json={"content": "one", "agent": "t"})
     async with _App(reviewer=FakeReviewer(verdict=None)) as a:
@@ -361,7 +362,7 @@ async def test_review_missing_no_verdict_leaves_no_row_and_still_counts():
     assert await _review_rows() == []
 
 
-async def test_review_missing_503_with_null_reviewer():
+async def test_catch_up_503_with_null_reviewer():
     async with _App(reviewer=NullReviewer("review is off (AGENT_MEMORY_REVIEW=off)")) as a:
         await a.client.post("/memories", json={"content": "one", "agent": "t"})
         resp = await a.client.post("/admin/review")
@@ -370,13 +371,13 @@ async def test_review_missing_503_with_null_reviewer():
     assert await _review_rows() == []
 
 
-async def test_review_missing_needs_the_token():
+async def test_catch_up_needs_the_token():
     async with _App(reviewer=FakeReviewer()) as a:
         resp = await a.client.post("/admin/review", headers={"Authorization": ""})
         assert resp.status_code == 401
 
 
-async def test_review_missing_negative_limit_422():
+async def test_catch_up_negative_limit_422():
     async with _App(reviewer=FakeReviewer()) as a:
         assert (await a.client.post("/admin/review", params={"limit": -1})).status_code == 422
 
@@ -393,7 +394,7 @@ def test_cli_review_lists_flagged_memories_like_query(cli):
     proc = cli.raw("review")
     assert proc.returncode == 0, proc.stderr
     out = proc.stdout
-    headers = [int(h) for h in re.findall(r"^━━━ #(\d+) ━+$", out, re.M)]
+    headers = [int(h) for h in re.findall(r"^━━━ #(\d+) status: flagged ━+$", out, re.M)]
     assert headers == [ids["new_reject"], ids["rewrite"], ids["old_reject"]]
     # Each block is printed as `query` prints it: meta lines, the review line, the content.
     assert "👤 tester @ alpha" in out
@@ -419,10 +420,10 @@ def test_cli_review_empty(cli):
 def test_cli_review_filters(cli):
     ids = asyncio.run(_seeded())
     out = cli.raw("review", "--verdict", "rewrite").stdout
-    assert [int(h) for h in re.findall(r"^━━━ #(\d+) ━+$", out, re.M)] == [ids["rewrite"]]
+    assert [int(h) for h in re.findall(r"^━━━ #(\d+) status: \w+ ━+$", out, re.M)] == [ids["rewrite"]]
     assert "Found 1 flagged memories" in out
     out = cli.raw("review", "--project", "alpha").stdout
-    assert [int(h) for h in re.findall(r"^━━━ #(\d+) ━+$", out, re.M)] == [ids["new_reject"], ids["old_reject"]]
+    assert [int(h) for h in re.findall(r"^━━━ #(\d+) status: \w+ ━+$", out, re.M)] == [ids["new_reject"], ids["old_reject"]]
     assert "No flagged memories." in cli.raw("review", "--project", "gamma").stdout
 
 
@@ -443,33 +444,33 @@ def test_cli_review_rejects_an_unknown_verdict(cli):
 
 def test_cli_review_help_is_plain(cli):
     out = cli.raw("review", "--help").stdout
-    for flag in ("--project", "--verdict", "--limit", "--all", "--missing"):
+    for flag in ("--project", "--verdict", "--status", "--limit", "--all", "--catch-up"):
         assert flag in out
     assert "reject" in out and "rewrite" in out
-    assert "no verdict yet" in out
+    assert "unverified" in out
     assert "review" in cli.raw("--help").stdout
 
 
-def test_cli_review_missing_without_a_model_prints_the_reason(cli):
+def test_cli_catch_up_without_a_model_prints_the_reason(cli):
     # The live server runs without a review model.
     cli.raw("add", "unreviewed")
-    proc = cli.raw("review", "--missing")
+    proc = cli.raw("review", "--catch-up")
     assert proc.returncode == 1
     assert "✗ Cannot review:" in proc.stderr
     assert "Traceback" not in proc.stderr
     assert "Scheduled" not in proc.stdout
 
 
-def test_cli_review_missing_refuses_the_listing_flags(cli):
-    proc = cli.raw("review", "--missing", "--verdict", "reject")
+def test_cli_catch_up_refuses_the_listing_flags(cli):
+    proc = cli.raw("review", "--catch-up", "--verdict", "reject")
     assert proc.returncode == 2
-    assert "--missing goes with --limit only" in proc.stdout
+    assert "--catch-up goes with --limit only" in proc.stdout
 
 
 @pytest.fixture(scope="module")
 def reviewing_server(_schema):
     """A second live server, this one with a `FakeReviewer`, so the CLI can
-    run `--missing` for real. Yields `(url, token, reviewer)`."""
+    run `--catch-up` for real. Yields `(url, token, reviewer)`."""
     import uvicorn
 
     fake = FakeReviewer(REJECT)
@@ -504,29 +505,29 @@ def _wait_for_rows(n, timeout=10):
     raise AssertionError(f"expected {n} review rows, got {len(asyncio.run(_review_rows()))}")
 
 
-def test_cli_review_missing_schedules_the_reviews(cli, reviewing_server):
-    # Written through the server without a model: no rows.
+def test_cli_catch_up_schedules_the_reviews(cli, reviewing_server):
+    # Written through the server without a model: unverified, no rows.
     for text in ("one", "two", "three"):
         cli.raw("add", text)
     url, token, fake = reviewing_server
     fake.calls.clear()
     with_model = CliDriver(url, token)
 
-    proc = with_model.raw("review", "--missing", "--limit", "2")
+    proc = with_model.raw("review", "--catch-up", "--limit", "2")
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "✓ Scheduled 2 reviews"
-    assert _wait_for_rows(2) == [(2, "reject"), (3, "reject")]
-    assert [m["id"] for m, _ in fake.calls] == [3, 2]
+    assert _wait_for_rows(2) == [(1, "reject"), (2, "reject")]
+    assert [m["id"] for m, _ in fake.calls] == [1, 2]
 
-    proc = with_model.raw("review", "--missing")
+    proc = with_model.raw("review", "--catch-up")
     assert proc.stdout.strip() == "✓ Scheduled 1 reviews"
     assert _wait_for_rows(3) == [(1, "reject"), (2, "reject"), (3, "reject")]
-    assert with_model.raw("review", "--missing").stdout.strip() == "✓ Scheduled 0 reviews"
+    assert with_model.raw("review", "--catch-up").stdout.strip() == "✓ Scheduled 0 reviews"
 
-    # And now they show up as flagged, newest review first: #1 was reviewed
-    # last, and #2 after #3 (the reviews run newest memory first).
+    # And now they show up as flagged, newest review first: #3 was reviewed
+    # last (the reviews run oldest memory first).
     out = cli.raw("review").stdout
-    assert [int(h) for h in re.findall(r"^━━━ #(\d+) ━+$", out, re.M)] == [1, 2, 3]
+    assert [int(h) for h in re.findall(r"^━━━ #(\d+) status: flagged ━+$", out, re.M)] == [3, 2, 1]
 
 
 # ── the MCP tool ─────────────────────────────────────────────────────────────

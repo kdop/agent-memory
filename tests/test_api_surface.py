@@ -10,7 +10,7 @@ Cross-surface behavior lives in test_behaviors.py (run against the API via
 import httpx
 import pytest
 
-from conftest import TOKEN, make_test_engine
+from conftest import TOKEN, make_test_engine, verify
 
 
 @pytest.fixture
@@ -207,6 +207,7 @@ def test_add_identical_content_409_with_existing_id(client):
     first = _post(client, "dup me", "proj")
     assert first.status_code == 201
     existing = first.json()["id"]
+    verify(existing)   # only a verified memory counts as reference
 
     again = _post(client, "dup me", "proj")
     assert again.status_code == 409
@@ -222,17 +223,20 @@ def test_add_identical_content_409_with_existing_id(client):
 
 def test_add_same_content_in_another_project_is_stored(client):
     assert _post(client, "dup me", "alpha").status_code == 201
+    verify(1)
     assert _post(client, "dup me", "beta").status_code == 201
     assert _post(client, "dup me", None).status_code == 201
 
 
 def test_add_same_content_with_no_project_twice_409(client):
     assert _post(client, "dup me", None).status_code == 201
+    verify(1)
     assert _post(client, "dup me", None).status_code == 409
 
 
 def test_add_force_stores_the_duplicate(client):
     assert _post(client, "dup me", "proj").status_code == 201
+    verify(1)
     forced = _post(client, "dup me", "proj", force="true")
     assert forced.status_code == 201
     assert forced.json()["id"] == 2
@@ -241,6 +245,7 @@ def test_add_force_stores_the_duplicate(client):
 
 def test_add_force_false_still_checks(client):
     assert _post(client, "dup me", "proj").status_code == 201
+    verify(1)
     assert _post(client, "dup me", "proj", force="false").status_code == 409
 
 

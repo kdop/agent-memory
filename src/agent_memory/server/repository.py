@@ -17,7 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from .embedding import Embedder, cosine
 from .models import Memory, MemoryReview, MemoryTag, Tag
-from .review import NEIGHBOUR_COUNT, TAG_COUNT, Verdict
+from .review import NEIGHBOUR_COUNT, STATUSES, TAG_COUNT, UNVERIFIED, VERIFIED, Verdict, status_for
 
 # ts_headline markers match the old snippet() output so clients render identically.
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
@@ -82,7 +82,15 @@ def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> 
         "snippet": snippet,
         "score": score,
         "review": _dump_review(m.review),
+        "review_status": m.review_status,
     }
+
+
+def _check_status(status: str | None) -> None:
+    """A `status` filter must be one of `STATUSES` (or None for no filter);
+    anything else is a caller's error."""
+    if status is not None and status not in STATUSES:
+        raise ValueError(f"status must be one of {', '.join(STATUSES)} (got {status!r})")
 
 
 async def _get_or_create_tag(session: AsyncSession, name: str, description: str | None) -> Tag:
@@ -117,19 +125,23 @@ async def add(session, content, agent, project, tags, mtype, embedder=None) -> i
 async def find_duplicate(session, embedder, content, project) -> tuple[int, float] | None:
     """The memory that `content` would duplicate, as `(id, score)`, or None.
 
-    Embeds the content and compares it, in Python, with every vector in the
-    same project (`project=None` compares with the memories that have none).
-    Only vectors from the same model count: a vector from another model is not
-    comparable, and may not even have the same length. Returns the best match
-    when its cosine is at or above `DUPLICATE_THRESHOLD`. Without a model
-    (no embedder, or a `NullEmbedder`) there is nothing to compare, so it
-    returns None and nothing is ever refused."""
+    Embeds the content and compares it, in Python, with the vector of every
+    verified memory in the same project (`project=None` compares with the
+    memories that have none). A memory the model has not checked, or has
+    flagged, is never used as reference: only `review_status = 'verified'`
+    rows count. Only vectors from the same model count too: a vector from
+    another model is not comparable, and may not even have the same length.
+    Returns the best match when its cosine is at or above
+    `DUPLICATE_THRESHOLD`. Without a model (no embedder, or a `NullEmbedder`)
+    there is nothing to compare, so it returns None and nothing is ever
+    refused."""
     vector, model = _embed(embedder, content)
     if vector is None:
         return None
     stmt = (
         select(Memory.id, Memory.embedding)
         .where(Memory.project.is_not_distinct_from(project))
+        .where(Memory.review_status == VERIFIED)
         .where(Memory.embedding.is_not(None))
         .where(Memory.embedding_model == model)
     )
@@ -144,11 +156,16 @@ async def find_duplicate(session, embedder, content, project) -> tuple[int, floa
 
 
 async def query(session, *, since_days=None, since=None, until=None, project=None,
-                agent=None, tag=None, mtype=None, limit=None) -> list[dict]:
+                agent=None, tag=None, mtype=None, status=None, limit=None) -> list[dict]:
+    """The timeline, newest first, narrowed by the filters. `status` keeps to
+    one review status (`unverified`, `verified` or `flagged`)."""
+    _check_status(status)
     if since_days is not None:
         since, until = _since_days_window(since_days)
 
     stmt = select(Memory).options(*_LOAD)
+    if status:
+        stmt = stmt.where(Memory.review_status == status)
     if since:
         stmt = stmt.where(Memory.timestamp >= _as_dt(since))
     if until:
@@ -394,15 +411,18 @@ async def _ts(session, agg):
 
 # ---- dashboard: unified list + tag management (D1) ------------------------
 async def list_memories(session, *, q=None, tags=(), project=None, agent=None, mtype=None,
-                        since_days=None, since=None, until=None, order="date_desc",
-                        limit=100, offset=0) -> tuple[list[dict], int]:
+                        status=None, since_days=None, since=None, until=None,
+                        order="date_desc", limit=100, offset=0) -> tuple[list[dict], int]:
     """The one list endpoint: full-text (`q`) + multi-tag + filters + order +
-    pagination. `limit=0` means no limit. Returns (items, total) where total ignores
-    limit/offset."""
+    pagination. `status` keeps to one review status. `limit=0` means no limit.
+    Returns (items, total) where total ignores limit/offset."""
+    _check_status(status)
     if since_days is not None:
         since, until = _since_days_window(since_days)
 
     conds = []
+    if status:
+        conds.append(Memory.review_status == status)
     if since:
         conds.append(Memory.timestamp >= _as_dt(since))
     if until:
@@ -535,12 +555,13 @@ async def review_input(session, mid: int) -> tuple[dict, list[dict]] | None:
     nearest neighbours, as `(memory, neighbours)`. None when there is no such
     memory.
 
-    The neighbours are the `NEIGHBOUR_COUNT` memories of the same project
-    (no project matches no project) closest to it by cosine over the stored
-    vectors, best first, the memory itself left out. Only vectors from the
-    same model as the memory's own count, as in `find_duplicate`. A memory
-    with no vector, which is what a server without the embedding model
-    writes, gets no neighbours."""
+    The neighbours are the `NEIGHBOUR_COUNT` verified memories of the same
+    project (no project matches no project) closest to it by cosine over the
+    stored vectors, best first, the memory itself left out. As in
+    `find_duplicate`, only `review_status = 'verified'` rows serve as
+    reference, and only vectors from the same model as the memory's own
+    count. A memory with no vector, which is what a server without the
+    embedding model writes, gets no neighbours."""
     m = (await session.execute(select(Memory).options(*_LOAD).where(Memory.id == mid))
          ).scalar_one_or_none()
     if m is None:
@@ -558,8 +579,9 @@ async def neighbours_for(session, embedder: Embedder | None, content: str,
     in this `project`, before it is stored: the enforce mode reviews the
     entry first and writes it only when the model approves. The content is
     embedded here and now, and the same rules apply: same project (no
-    project matches no project), same model, best first, at most
-    `NEIGHBOUR_COUNT`. Without a model there are no neighbours."""
+    project matches no project), verified memories only, same model, best
+    first, at most `NEIGHBOUR_COUNT`. Without a model there are no
+    neighbours."""
     vector, model = _embed(embedder, content)
     if vector is None:
         return []
@@ -567,14 +589,18 @@ async def neighbours_for(session, embedder: Embedder | None, content: str,
 
 
 async def _nearest(session, vector, model, project, exclude_id=None) -> list[dict]:
-    """The `NEIGHBOUR_COUNT` memories of `project` closest to `vector` by
-    cosine, best first (ties: newest first), each with its `score`. Only
-    vectors from `model` are compared, as in `find_duplicate`. `exclude_id`
-    leaves one memory out: the one being reviewed, when it is stored."""
+    """The `NEIGHBOUR_COUNT` verified memories of `project` closest to
+    `vector` by cosine, best first (ties: newest first), each with its
+    `score`. The reference set is the same as in `find_duplicate`: only rows
+    with `review_status = 'verified'`, and only vectors from `model`. An
+    unverified or flagged memory is never handed to the model as reference.
+    `exclude_id` leaves one memory out: the one being reviewed, when it is
+    stored."""
     stmt = (
         select(Memory)
         .options(*_LOAD)
         .where(Memory.project.is_not_distinct_from(project))
+        .where(Memory.review_status == VERIFIED)
         .where(Memory.embedding.is_not(None))
         .where(Memory.embedding_model == model)
     )
@@ -591,47 +617,63 @@ async def _nearest(session, vector, model, project, exclude_id=None) -> list[dic
 FLAGGED_VERDICTS = ("reject", "rewrite")
 
 
-def _flagged_filters(stmt, *, project=None, verdict=None):
-    """The WHERE clauses of a flagged listing: joined to the review row, kept
-    to the flagged verdicts (or only `verdict`), and to `project` when given.
-    A `verdict` that is not one of the flagged ones is a caller's error."""
+def _flagged_filters(stmt, *, project=None, verdict=None, status=None):
+    """The WHERE clauses of a review listing. Without `status`: joined to the
+    review row and kept to the flagged verdicts (or only `verdict`). With
+    `status`: kept to the memories with that review status (an outer join, so
+    unverified memories, which have no row, are listed too), and to `verdict`
+    when given. `project` narrows either. A `verdict` that is not one of the
+    flagged ones, or a `status` that is not one of `STATUSES`, is a caller's
+    error."""
     if verdict is not None and verdict not in FLAGGED_VERDICTS:
         raise ValueError(f"verdict must be one of {', '.join(FLAGGED_VERDICTS)} (got {verdict!r})")
-    wanted = FLAGGED_VERDICTS if verdict is None else (verdict,)
-    stmt = stmt.join(Memory.review).where(MemoryReview.verdict.in_(wanted))
+    _check_status(status)
+    if status is None:
+        wanted = FLAGGED_VERDICTS if verdict is None else (verdict,)
+        stmt = stmt.join(Memory.review).where(MemoryReview.verdict.in_(wanted))
+    else:
+        stmt = stmt.outerjoin(Memory.review).where(Memory.review_status == status)
+        if verdict is not None:
+            stmt = stmt.where(MemoryReview.verdict == verdict)
     if project:
         stmt = stmt.where(Memory.project == project)
     return stmt
 
 
-async def flagged(session, *, project=None, verdict=None, limit=None) -> list[dict]:
+async def flagged(session, *, project=None, verdict=None, status=None, limit=None) -> list[dict]:
     """The memories the review flagged: those whose review says reject or
-    rewrite, or only `verdict` when given, newest review first (ties by id,
-    newest first). Same shape as `query`, the review included. `project`
+    rewrite, or only `verdict` when given, newest review first (ties: newest
+    memory first, then by id). With `status`, the memories with that review
+    status instead (`unverified` ones have no review, so they come newest
+    memory first). Same shape as `query`, the review included. `project`
     narrows to one project. `limit` of 0 or None means all."""
-    stmt = _flagged_filters(select(Memory).options(*_LOAD), project=project, verdict=verdict)
-    stmt = stmt.order_by(MemoryReview.created_at.desc(), Memory.id.desc())
+    stmt = _flagged_filters(select(Memory).options(*_LOAD), project=project, verdict=verdict,
+                            status=status)
+    stmt = stmt.order_by(MemoryReview.created_at.desc().nulls_last(),
+                         Memory.timestamp.desc(), Memory.id.desc())
     if limit:
         stmt = stmt.limit(int(limit))
     rows = (await session.execute(stmt)).scalars().all()
     return [_dump(m) for m in rows]
 
 
-async def count_flagged(session, *, project=None, verdict=None) -> int:
+async def count_flagged(session, *, project=None, verdict=None, status=None) -> int:
     """How many memories `flagged` would list with the same filters and no limit."""
-    stmt = _flagged_filters(select(func.count(Memory.id)), project=project, verdict=verdict)
+    stmt = _flagged_filters(select(func.count(Memory.id)), project=project, verdict=verdict,
+                            status=status)
     return (await session.execute(stmt)).scalar()
 
 
-async def without_review(session, *, limit=None) -> list[int]:
-    """The ids of the memories that have no review row, newest first (ties by
-    id, newest first). These are the memories written while the review model
-    was off or could not answer. `limit` of 0 or None means all."""
+async def unverified_ids(session, *, limit=None) -> list[int]:
+    """The ids of the unverified memories, oldest first (by timestamp, ties
+    by id): the memories the model has not checked yet, written while it was
+    off or when it gave no answer. This is the order the catch-up reviews
+    them in, so that each one is verified before the next is compared.
+    `limit` of 0 or None means all."""
     stmt = (
         select(Memory.id)
-        .outerjoin(Memory.review)
-        .where(MemoryReview.memory_id.is_(None))
-        .order_by(Memory.timestamp.desc(), Memory.id.desc())
+        .where(Memory.review_status == UNVERIFIED)
+        .order_by(Memory.timestamp.asc(), Memory.id.asc())
     )
     if limit:
         stmt = stmt.limit(int(limit))
@@ -640,8 +682,14 @@ async def without_review(session, *, limit=None) -> list[int]:
 
 async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
     """Store `verdict` as the review of memory `mid`, replacing any earlier
-    one, and return the API view of it. `model` names the model that gave it.
-    The memory must exist; a missing one fails on the foreign key."""
+    one, set the memory's `review_status` from it (`verified` for an
+    approve, `flagged` for a reject or rewrite), and return the API view of
+    the review. `model` names the model that gave it. Raises `LookupError`
+    when there is no such memory."""
+    memory = await session.get(Memory, mid)
+    if memory is None:
+        raise LookupError(f"Memory #{mid} not found")
+    memory.review_status = status_for(verdict.verdict)
     row = await session.get(MemoryReview, mid)
     if row is None:
         row = MemoryReview(memory_id=mid)

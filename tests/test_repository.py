@@ -280,12 +280,23 @@ async def test_update_content_without_model_clears_vector(session):
 # ── find_duplicate ───────────────────────────────────────────────────────────
 # FakeEmbedder vectors come from a hash of the text, so only identical text
 # scores 1.0; the other pairs used here score well under DUPLICATE_THRESHOLD.
+# Only verified memories count as reference, so each stored row is verified
+# first (an approve verdict sets the status); tests/test_review_status.py
+# covers the unverified and flagged cases.
+async def _verified(session, *ids):
+    from agent_memory.server.review import Verdict
+
+    for mid in ids:
+        await repo.set_review(session, mid, Verdict("approve", None, "Fine.", None, None), "t")
+
+
 async def test_find_duplicate_returns_the_matching_id_and_score(session):
     from conftest import FakeEmbedder
 
     emb = FakeEmbedder()
-    await repo.add(session, "not a dup", "t", "proj", _tags(), None, embedder=emb)
+    other = await repo.add(session, "not a dup", "t", "proj", _tags(), None, embedder=emb)
     mid = await repo.add(session, "dup me", "t", "proj", _tags(), None, embedder=emb)
+    await _verified(session, other, mid)
     found = await repo.find_duplicate(session, emb, "dup me", "proj")
     assert found is not None
     existing_id, score = found
@@ -298,7 +309,8 @@ async def test_find_duplicate_ignores_other_projects(session):
     from conftest import FakeEmbedder
 
     emb = FakeEmbedder()
-    await repo.add(session, "dup me", "t", "alpha", _tags(), None, embedder=emb)
+    await _verified(session, await repo.add(session, "dup me", "t", "alpha", _tags(), None,
+                                            embedder=emb))
     assert await repo.find_duplicate(session, emb, "dup me", "beta") is None
     assert await repo.find_duplicate(session, emb, "dup me", None) is None
 
@@ -308,6 +320,7 @@ async def test_find_duplicate_matches_no_project_with_no_project(session):
 
     emb = FakeEmbedder()
     mid = await repo.add(session, "dup me", "t", None, _tags(), None, embedder=emb)
+    await _verified(session, mid)
     found = await repo.find_duplicate(session, emb, "dup me", None)
     assert found is not None and found[0] == mid
 
@@ -316,7 +329,8 @@ async def test_find_duplicate_different_text_is_not_a_duplicate(session):
     from conftest import FakeEmbedder
 
     emb = FakeEmbedder()
-    await repo.add(session, "dup me", "t", "proj", _tags(), None, embedder=emb)
+    await _verified(session, await repo.add(session, "dup me", "t", "proj", _tags(), None,
+                                            embedder=emb))
     assert await repo.find_duplicate(session, emb, "not a dup", "proj") is None
 
 
@@ -325,7 +339,8 @@ async def test_find_duplicate_without_model_never_refuses(session):
     from conftest import FakeEmbedder
 
     # Stored with a vector, but a server without a model has nothing to compare.
-    await repo.add(session, "dup me", "t", "proj", _tags(), None, embedder=FakeEmbedder())
+    await _verified(session, await repo.add(session, "dup me", "t", "proj", _tags(), None,
+                                            embedder=FakeEmbedder()))
     assert await repo.find_duplicate(session, NullEmbedder(), "dup me", "proj") is None
     assert await repo.find_duplicate(session, None, "dup me", "proj") is None
 
@@ -334,7 +349,7 @@ async def test_find_duplicate_skips_rows_without_a_vector(session):
     from conftest import FakeEmbedder
 
     # Written while the model was off: no vector, so nothing to compare with.
-    await repo.add(session, "dup me", "t", "proj", _tags(), None)
+    await _verified(session, await repo.add(session, "dup me", "t", "proj", _tags(), None))
     assert await repo.find_duplicate(session, FakeEmbedder(), "dup me", "proj") is None
 
 

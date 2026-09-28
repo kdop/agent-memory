@@ -8,6 +8,8 @@ lives in test_cli_surface.py / test_api_surface.py.
 
 import pytest
 
+from conftest import verify
+
 
 # ---- add ------------------------------------------------------------------
 def test_add_returns_incrementing_ids(driver):
@@ -27,19 +29,23 @@ def test_add_explicit_agent_is_attributed(driver):
 
 def test_add_refuses_a_duplicate_in_the_same_project(driver):
     # The live server embeds with FakeEmbedder, so identical text is a duplicate.
+    # Only a verified memory counts as reference, so the first one is verified.
     assert driver.add("dup me", project="proj") == 1
+    verify(1)
     assert driver.add("dup me", project="proj") is None
     assert len(driver.query()) == 1
 
 
 def test_add_same_content_in_another_project_is_not_a_duplicate(driver):
     assert driver.add("dup me", project="alpha") == 1
+    verify(1)
     assert driver.add("dup me", project="beta") == 2
     assert driver.add("dup me") == 3
 
 
 def test_add_force_stores_a_duplicate(driver):
     assert driver.add("dup me", project="proj") == 1
+    verify(1)
     assert driver.add("dup me", project="proj", force=True) == 2
 
 

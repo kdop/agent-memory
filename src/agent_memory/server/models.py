@@ -13,6 +13,7 @@ from datetime import datetime
 from sqlalchemy import (
     REAL,
     BigInteger,
+    CheckConstraint,
     Computed,
     DateTime,
     ForeignKey,
@@ -23,6 +24,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from .review import STATUSES, UNVERIFIED
+
+# The CHECK on `memories.review_status`: one of the three statuses, nothing else.
+REVIEW_STATUS_CHECK = "review_status IN (" + ", ".join(f"'{s}'" for s in STATUSES) + ")"
 
 
 class Base(DeclarativeBase):
@@ -53,6 +59,14 @@ class Memory(Base):
     embedding: Mapped[list[float] | None] = mapped_column(ARRAY(REAL))
     embedding_model: Mapped[str | None] = mapped_column(Text)
 
+    # Whether the review model has checked this memory: `unverified` until a
+    # verdict is stored, then `verified` (approve) or `flagged` (reject or
+    # rewrite). Only verified memories are used as reference when another
+    # memory is checked (see server/review.py).
+    review_status: Mapped[str] = mapped_column(
+        Text, default=UNVERIFIED, server_default=UNVERIFIED, index=True
+    )
+
     tags: Mapped[list[Tag]] = relationship(
         secondary="memory_tags", back_populates="memories", order_by="Tag.name",
     )
@@ -63,7 +77,10 @@ class Memory(Base):
         cascade="all, delete-orphan", passive_deletes=True,
     )
 
-    __table_args__ = (Index("idx_content_tsv", "content_tsv", postgresql_using="gin"),)
+    __table_args__ = (
+        Index("idx_content_tsv", "content_tsv", postgresql_using="gin"),
+        CheckConstraint(REVIEW_STATUS_CHECK, name="ck_memories_review_status"),
+    )
 
 
 class MemoryReview(Base):

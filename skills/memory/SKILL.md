@@ -72,7 +72,9 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
   `rewrite` adds a suggested text under `suggested:`. When the server is set to refuse
   what the model rejects, a refused `add` prints the rule and the suggestion, stores
   nothing and exits with code 4. Fix the entry, or pass `--force` only when the entry is
-  right as written.
+  right as written. The header line of every memory says its status (`unverified` until
+  the model has checked it, `verified` when it approved, `flagged` when it did not), and
+  only verified memories count as reference when a new entry is checked.
 - An agent's own cross-project working rules go under `--project=<agent-name>`.
 - Never write memories to Claude Code's md-file memory (`~/.claude/.../memory/*.md`):
   it is neither shared nor checked in. The DB is the single source of truth.
