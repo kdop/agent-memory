@@ -139,6 +139,20 @@ Editing a memory's text with `memory update` sets it back to `unverified` and dr
 verdict and its `supersedes` link, so the next catch-up reads the new text; a change of
 tags or project alone keeps both.
 
+**Measuring the prompt.** The prompt's checklist was tuned by hand to `qwen3:14b`, so a
+change to its wording or to the model is measured, not felt. `tests/data/verdict_set.json`
+holds 30 invented entries with the verdict the model should give each one, across ten
+cases (a clean decision, lesson and preference; a diary line; a fact git already holds; a
+decision with no why; an exact and a reworded repeat; a reversal; a repeat that adds
+something), each with the existing entries the model is shown.
+`tests/test_verdict_quality.py` runs them through the real model and prints a table of
+passes per case and the overall rate. It runs only when `AGENT_MEMORY_REVIEW_URL` names
+an Ollama server that answers (`AGENT_MEMORY_REVIEW_MODEL` picks the model) and is
+skipped otherwise: `AGENT_MEMORY_REVIEW_URL=http://host:11434 pytest
+tests/test_verdict_quality.py -s`. The `floor` in the file is the overall pass rate the
+test asserts. It is the rate the current prompt and model reach, rounded down, so a
+change that lowers it fails the test; raise it when the prompt improves.
+
 - **[skills/memory/SKILL.md](skills/memory/SKILL.md)** — the logging protocol, as a
   Claude Code skill each project installs; see [Claude Code skill](#claude-code-skill)
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — schema, design decisions, programmatic access
