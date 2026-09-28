@@ -8,7 +8,7 @@ Full-text search is the one place raw Postgres shows through (`plainto_tsquery`,
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import func, or_, select
@@ -16,10 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from .embedding import Embedder, cosine
-from .models import Memory, MemoryTag, Tag
+from .models import Memory, MemoryReview, MemoryTag, Tag
+from .review import NEIGHBOUR_COUNT, Verdict
 
 # ts_headline markers match the old snippet() output so clients render identically.
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
+
+# What every memory read loads with it: its tags and its review, each in one
+# extra query per result set, so `_dump` never triggers a lazy load.
+_LOAD = (selectinload(Memory.tags), selectinload(Memory.review))
 
 # A new memory whose vector scores this close to one already in its project is
 # a duplicate. Cosine on unit vectors: 1.0 is the same text, 0.92 is a rewording.
@@ -55,6 +60,14 @@ def _embed(embedder: Embedder | None, content: str) -> tuple[list[float] | None,
     return embedder.embed([content])[0], embedder.model_name
 
 
+def _dump_review(r: MemoryReview | None) -> dict | None:
+    """The API view of a review row: the verdict and nothing about how it was made."""
+    if r is None:
+        return None
+    return {"verdict": r.verdict, "rule": r.rule, "reason": r.reason,
+            "rewrite": r.rewrite, "duplicate_of": r.duplicate_of}
+
+
 def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> dict:
     # `embedding` and `embedding_model` stay out on purpose: they are internal.
     return {
@@ -67,6 +80,7 @@ def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> 
         "tags": [t.name for t in m.tags],
         "snippet": snippet,
         "score": score,
+        "review": _dump_review(m.review),
     }
 
 
@@ -133,7 +147,7 @@ async def query(session, *, since_days=None, since=None, until=None, project=Non
     if since_days is not None:
         since, until = _since_days_window(since_days)
 
-    stmt = select(Memory).options(selectinload(Memory.tags))
+    stmt = select(Memory).options(*_LOAD)
     if since:
         stmt = stmt.where(Memory.timestamp >= _as_dt(since))
     if until:
@@ -175,7 +189,7 @@ async def search(session, text, *, project=None, agent=None, since=None, tag=Non
 
     stmt = (
         select(Memory, snippet.label("snippet"), rank.label("score"))
-        .options(selectinload(Memory.tags))
+        .options(*_LOAD)
         .where(Memory.content_tsv.op("@@")(tsquery))
     )
     stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag)
@@ -200,7 +214,7 @@ async def search_semantic(session, embedder: Embedder, text, *, project=None, ag
 
     stmt = (
         select(Memory)
-        .options(selectinload(Memory.tags))
+        .options(*_LOAD)
         # Only vectors from the running model: another model's vector may have a
         # different width, and cosine of two widths is an error, not a low score.
         .where(Memory.embedding.is_not(None), Memory.embedding_model == embedder.model_name)
@@ -251,7 +265,7 @@ async def search_hybrid(session, embedder: Embedder, text, *, project=None, agen
 async def get(session, mid: int) -> dict | None:
     m = (
         await session.execute(
-            select(Memory).options(selectinload(Memory.tags)).where(Memory.id == mid)
+            select(Memory).options(*_LOAD).where(Memory.id == mid)
         )
     ).scalar_one_or_none()
     return _dump(m) if m is not None else None
@@ -262,7 +276,7 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
                  embedder=None) -> list[str] | None:
     m = (
         await session.execute(
-            select(Memory).options(selectinload(Memory.tags)).where(Memory.id == mid)
+            select(Memory).options(*_LOAD).where(Memory.id == mid)
         )
     ).scalar_one_or_none()
     if m is None:
@@ -406,11 +420,11 @@ async def list_memories(session, *, q=None, tags=(), project=None, agent=None, m
 
     total = (await session.execute(select(func.count()).select_from(Memory).where(*conds))).scalar()
 
-    base = select(Memory).options(selectinload(Memory.tags)).where(*conds)
+    base = select(Memory).options(*_LOAD).where(*conds)
     if tsquery is not None:
         snippet = func.ts_headline("english", Memory.content, tsquery, _HEADLINE)
         stmt = (select(Memory, snippet.label("snippet"))
-                .options(selectinload(Memory.tags)).where(*conds)
+                .options(*_LOAD).where(*conds)
                 .order_by(func.ts_rank(Memory.content_tsv, tsquery).desc(), Memory.id.desc())
                 .offset(offset))
         if limit:  # 0 = no limit
@@ -512,6 +526,57 @@ async def detach_tag(session, name, memory_ids=None) -> dict | None:
         stmt = stmt.where(MemoryTag.memory_id.in_(list(memory_ids)))
     res = await session.execute(stmt)
     return {"detached": res.rowcount}
+
+
+# ---- review: the model's verdict on a memory --------------------------------
+async def review_input(session, mid: int) -> tuple[dict, list[dict]] | None:
+    """What the reviewer gets for memory `mid`: the memory itself and its
+    nearest neighbours, as `(memory, neighbours)`. None when there is no such
+    memory.
+
+    The neighbours are the `NEIGHBOUR_COUNT` memories of the same project
+    (no project matches no project) closest to it by cosine over the stored
+    vectors, best first, the memory itself left out. Only vectors from the
+    same model as the memory's own count, as in `find_duplicate`. A memory
+    with no vector, which is what a server without the embedding model
+    writes, gets no neighbours."""
+    m = (await session.execute(select(Memory).options(*_LOAD).where(Memory.id == mid))
+         ).scalar_one_or_none()
+    if m is None:
+        return None
+    if m.embedding is None:
+        return _dump(m), []
+    stmt = (
+        select(Memory)
+        .options(*_LOAD)
+        .where(Memory.project.is_not_distinct_from(m.project))
+        .where(Memory.id != m.id)
+        .where(Memory.embedding.is_not(None))
+        .where(Memory.embedding_model == m.embedding_model)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    scored = [(cosine(m.embedding, list(other.embedding)), other) for other in rows]
+    scored.sort(key=lambda pair: (-pair[0], -pair[1].id))
+    return _dump(m), [_dump(other, score=score) for score, other in scored[:NEIGHBOUR_COUNT]]
+
+
+async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
+    """Store `verdict` as the review of memory `mid`, replacing any earlier
+    one, and return the API view of it. `model` names the model that gave it.
+    The memory must exist; a missing one fails on the foreign key."""
+    row = await session.get(MemoryReview, mid)
+    if row is None:
+        row = MemoryReview(memory_id=mid)
+        session.add(row)
+    row.verdict = verdict.verdict
+    row.rule = verdict.rule
+    row.reason = verdict.reason
+    row.rewrite = verdict.rewrite
+    row.duplicate_of = verdict.duplicate_of
+    row.model = model
+    row.created_at = datetime.now(timezone.utc)
+    await session.flush()
+    return _dump_review(row)
 
 
 # ---- reindex: fill in missing or stale vectors -----------------------------

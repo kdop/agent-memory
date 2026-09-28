@@ -298,6 +298,10 @@ class CliDriver:
                 tagstr = re.sub(r"^[^\w]+", "", line.strip())
                 tags = [t.strip() for t in tagstr.split(",") if t.strip()]
                 continue
+            if line.startswith("review: "):
+                # The review model's verdict line sits with the meta lines,
+                # before the content; the drivers compare content only.
+                continue
             if _SEP.match(line.strip()) or line.startswith("Found "):
                 break
             collected.append(line)

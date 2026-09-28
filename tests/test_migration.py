@@ -29,6 +29,7 @@ SRC = REPO_ROOT / "src"
 
 BASELINE = "310017671d9e"
 EMBEDDING_COLUMNS = "62fcc84d6c84"
+MEMORY_REVIEWS = "2906ffedb42f"
 
 
 def _alembic(*args: str) -> None:
@@ -157,7 +158,10 @@ async def test_embedding_columns_revision_upgrades_and_downgrades():
                     m = await s.get(Memory, mid)
                     assert m.embedding == [0.5, -1.25, 2.0]
                     assert m.embedding_model == "test-model"
-                    row = await repo.get(s, mid)
+                    # `get_many`, not `get`: at this revision there is no
+                    # memory_reviews table yet, and `get` reads the review
+                    # with the memory.
+                    (row,) = await repo.get_many(s, [mid])
                     assert "embedding" not in row and "embedding_model" not in row
         finally:
             await eng.dispose()
@@ -165,6 +169,64 @@ async def test_embedding_columns_revision_upgrades_and_downgrades():
         # Downgrade one step: both columns are gone, the rest of the table stays.
         _alembic("downgrade", BASELINE)
         assert await _columns("memories", "embedding") == {}
+        assert await _table_exists("memories")
+    finally:
+        await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        await _create_all()
+
+
+async def test_memory_reviews_revision_upgrades_and_downgrades():
+    from agent_memory.server.review import Verdict
+
+    # Clean slate, then stop one step short: the table must not exist yet.
+    await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    try:
+        _alembic("upgrade", EMBEDDING_COLUMNS)
+        assert not await _table_exists("memory_reviews")
+
+        # Upgrade one step: the table appears with every column as designed.
+        _alembic("upgrade", MEMORY_REVIEWS)
+        assert await _columns("memory_reviews", "") == {
+            "memory_id": ("int8", False),
+            "verdict": ("text", False),
+            "rule": ("int4", True),
+            "reason": ("text", False),
+            "rewrite": ("text", True),
+            "duplicate_of": ("int8", True),
+            "model": ("text", False),
+            "created_at": ("timestamptz", False),
+        }
+
+        # A verdict can be written into the migrated table and comes back with
+        # the memory; deleting the memory takes its review with it, and
+        # deleting the memory a verdict points at clears `duplicate_of`.
+        eng = make_test_engine()
+        sm = make_sessionmaker(eng)
+        try:
+            async with sm() as s:
+                async with s.begin():
+                    first = await repo.add(s, "the original", "tester", "proj", [], "note")
+                    second = await repo.add(s, "the same again", "tester", "proj", [], "note")
+                    verdict = Verdict("reject", None, "says the same as #1", None, first)
+                    await repo.set_review(s, second, verdict, "test-model")
+                async with s.begin():
+                    row = await repo.get(s, second)
+                    assert row["review"] == {"verdict": "reject", "rule": None,
+                                             "reason": "says the same as #1",
+                                             "rewrite": None, "duplicate_of": first}
+                    await repo.delete(s, [first])
+                async with s.begin():
+                    assert (await repo.get(s, second))["review"]["duplicate_of"] is None
+                    await repo.delete(s, [second])
+                async with s.begin():
+                    count = (await s.execute(text("SELECT count(*) FROM memory_reviews"))).scalar()
+                    assert count == 0
+        finally:
+            await eng.dispose()
+
+        # Downgrade one step: the table is gone, the memories table stays.
+        _alembic("downgrade", EMBEDDING_COLUMNS)
+        assert not await _table_exists("memory_reviews")
         assert await _table_exists("memories")
     finally:
         await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")

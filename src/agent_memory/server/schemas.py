@@ -61,6 +61,16 @@ class MemoryIn(BaseModel):
     _validate_type = field_validator("type")(_validate_memory_type)
 
 
+class ReviewOut(BaseModel):
+    """What the review model said about a memory (see server/review.py)."""
+
+    verdict: str
+    rule: int | None = None
+    reason: str = ""
+    rewrite: str | None = None
+    duplicate_of: int | None = None
+
+
 class MemoryOut(BaseModel):
     id: int
     timestamp: str | None = None
@@ -73,6 +83,9 @@ class MemoryOut(BaseModel):
     # Search only: the ts_rank of a keyword hit, the cosine of a semantic hit.
     # None for rows that come from anything other than a search.
     score: float | None = None
+    # The model's verdict, once the review has run. None until then, and
+    # always None when review is off.
+    review: ReviewOut | None = None
 
 
 class UpdateIn(BaseModel):
