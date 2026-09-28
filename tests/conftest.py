@@ -6,7 +6,7 @@ Postgres — the anti-drift guard. The whole suite is skipped unless
 
 - `live_server` (session): schema created once from the models; uvicorn runs in
   a background thread on a free port. Yields `(url, token)`.
-- `_truncate` (function, autouse): wipes the three tables with RESTART IDENTITY
+- `_truncate` (function, autouse): wipes the four tables with RESTART IDENTITY
   before each test, so state is isolated and ids start at 1.
 - `driver` (function, parametrized cli/api/mcp): one driver per surface, built
   against the live server.
@@ -152,13 +152,14 @@ def live_server(_schema):
 
 @pytest.fixture(autouse=True)
 def _truncate(_schema):
-    """Wipe the three tables before each test (RESTART IDENTITY so ids start at 1)."""
+    """Wipe the four tables before each test (RESTART IDENTITY so ids start at 1)."""
     async def _do():
         eng = make_test_engine()
         try:
             async with eng.begin() as conn:
                 await conn.execute(
-                    text("TRUNCATE memories, tags, memory_tags RESTART IDENTITY CASCADE")
+                    text("TRUNCATE memories, tags, memory_tags, memory_reviews "
+                         "RESTART IDENTITY CASCADE")
                 )
         finally:
             await eng.dispose()

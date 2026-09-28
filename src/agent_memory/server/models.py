@@ -17,6 +17,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Text,
     func,
 )
@@ -56,7 +57,44 @@ class Memory(Base):
         secondary="memory_tags", back_populates="memories", order_by="Tag.name",
     )
 
+    # What the review model said about this memory, if it has been reviewed.
+    review: Mapped[MemoryReview | None] = relationship(
+        back_populates="memory", uselist=False, foreign_keys="MemoryReview.memory_id",
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
+
     __table_args__ = (Index("idx_content_tsv", "content_tsv", postgresql_using="gin"),)
+
+
+class MemoryReview(Base):
+    """The model's verdict on one memory. One row per memory, replaced when the
+    memory is reviewed again. Advice only: the memory itself is never changed
+    because of it."""
+
+    __tablename__ = "memory_reviews"
+
+    memory_id: Mapped[int] = mapped_column(
+        ForeignKey("memories.id", ondelete="CASCADE"), primary_key=True
+    )
+    # approve, reject or rewrite (see server/review.py).
+    verdict: Mapped[str] = mapped_column(Text)
+    # The rule the entry breaks or falls short of; None for an approve.
+    rule: Mapped[int | None] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text)
+    # Suggested text when the verdict is rewrite.
+    rewrite: Mapped[str | None] = mapped_column(Text)
+    # The memory this one repeats, when the verdict is a reject for that reason.
+    # Cleared, not cascaded, when that memory is deleted.
+    duplicate_of: Mapped[int | None] = mapped_column(
+        ForeignKey("memories.id", ondelete="SET NULL")
+    )
+    # The model that gave the verdict.
+    model: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    memory: Mapped[Memory] = relationship(back_populates="review", foreign_keys=[memory_id])
 
 
 class Tag(Base):

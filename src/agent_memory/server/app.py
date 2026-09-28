@@ -9,12 +9,13 @@ concern — the CLI/MCP resolve it and send it; the server only falls back to
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,6 +26,7 @@ from .auth import require_token
 from .checks import warnings_for
 from .db import make_engine, make_sessionmaker
 from .embedding import Embedder, make_embedder
+from .review import Reviewer, Verdict, make_reviewer
 from .schemas import (
     AddResult,
     AgentCount,
@@ -32,6 +34,7 @@ from .schemas import (
     MemoryIn,
     MemoryOut,
     ProjectCount,
+    ReviewOut,
     TagCount,
     TagDetachIn,
     TagMergeIn,
@@ -65,6 +68,53 @@ def get_embedder(request: Request) -> Embedder | None:
 EmbedderDep = Depends(get_embedder)
 
 
+def get_reviewer(request: Request) -> Reviewer | None:
+    """The reviewer the lifespan put on `app.state`. None when an app was built
+    without one and its lifespan never ran (some in-process tests)."""
+    return getattr(request.app.state, "reviewer", None)
+
+
+ReviewerDep = Depends(get_reviewer)
+
+
+def _has_model(backend) -> bool:
+    """True when an embedder or reviewer is present and has a real model."""
+    return backend is not None and backend.model_name is not None
+
+
+async def _review_memory(app: FastAPI, mid: int) -> Verdict | None:
+    """Ask the reviewer about memory `mid` and store what it says.
+
+    Reads the memory and its nearest neighbours in one session, closes it,
+    calls the model in a thread (it may take many seconds, and a database
+    connection should not sit idle that long), then writes the verdict in a
+    second session. Returns the verdict, or None when the model gave none;
+    then nothing is written and an earlier verdict, if any, stays. Raises
+    `LookupError` when there is no such memory."""
+    reviewer: Reviewer = app.state.reviewer
+    sessionmaker = app.state.sessionmaker
+    async with sessionmaker() as session, session.begin():
+        found = await repo.review_input(session, mid)
+    if found is None:
+        raise LookupError(f"Memory #{mid} not found")
+    memory, neighbours = found
+    verdict = await asyncio.to_thread(reviewer.review, memory, neighbours)
+    if verdict is None:
+        return None
+    async with sessionmaker() as session, session.begin():
+        await repo.set_review(session, mid, verdict, reviewer.model_name)
+    return verdict
+
+
+async def _review_in_background(app: FastAPI, mid: int) -> None:
+    """The review as a background task after an add. Whatever goes wrong is
+    one log line; the memory is already stored and stays as it is."""
+    try:
+        await _review_memory(app, mid)
+    except Exception as e:
+        log.warning("review of memory #%d failed: %s: %s", mid, type(e).__name__, e)
+
+
 async def _reindex_at_startup(app: FastAPI) -> None:
     """Fill in vectors for rows that have none, or one from another model, once
     at server start. A failure here is logged and must not stop the server: the
@@ -81,13 +131,16 @@ def create_app(
     sessionmaker: async_sessionmaker | None = None,
     token: str | None = None,
     embedder: Embedder | None = None,
+    reviewer: Reviewer | None = None,
 ) -> FastAPI:
     """Build the app. In production (`sessionmaker` omitted) the lifespan builds a
     pooled engine from AGENT_MEMORY_DB and disposes it on shutdown; tests inject a
     sessionmaker bound to their own test engine. Token falls back to
     AGENT_MEMORY_API_TOKEN. The embedder lands on `app.state.embedder`; when
     omitted, the lifespan builds one from the environment with `make_embedder()`
-    (a `NullEmbedder` when the model is off or not installed)."""
+    (a `NullEmbedder` when the model is off or not installed). The reviewer
+    lands on `app.state.reviewer` the same way, through `make_reviewer()`
+    (a `NullReviewer` unless AGENT_MEMORY_REVIEW=warn and a server is set)."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -100,6 +153,7 @@ def create_app(
         # Built here, not at construction, so the model loads once at server
         # start and an app built for tests stays cheap.
         app.state.embedder = embedder if embedder is not None else make_embedder()
+        app.state.reviewer = reviewer if reviewer is not None else make_reviewer()
         if app.state.embedder.model_name is not None:
             await _reindex_at_startup(app)
         try:
@@ -115,6 +169,8 @@ def create_app(
         app.state.sessionmaker = sessionmaker
     if embedder is not None:
         app.state.embedder = embedder
+    if reviewer is not None:
+        app.state.reviewer = reviewer
     guard = [Depends(require_token)]
 
     @app.get("/health")
@@ -122,8 +178,10 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/memories", response_model=AddResult, status_code=201, dependencies=guard)
-    async def add_memory(body: MemoryIn, session: AsyncSession = SessionDep,
+    async def add_memory(body: MemoryIn, request: Request, background: BackgroundTasks,
+                         session: AsyncSession = SessionDep,
                          embedder: Embedder | None = EmbedderDep,
+                         reviewer: Reviewer | None = ReviewerDep,
                          force: bool = Query(default=False,
                                              description="Store even when a near-duplicate exists")):
         # A memory that already exists in this project is refused, not stored
@@ -137,6 +195,11 @@ def create_app(
                     "reason": "duplicate", "existing_id": existing_id, "score": score})
         mid = await repo.add(session, body.content, body.agent or "unknown",
                              body.project, body.tags, body.type, embedder=embedder)
+        # The model's review runs after the response is sent, so the writer
+        # never waits for it. The session above commits before the response
+        # goes out, so the task sees the new row in its own session.
+        if _has_model(reviewer):
+            background.add_task(_review_in_background, request.app, mid)
         # Stored either way; the warnings only tell the writer what the entry lacks.
         return {"id": mid, "warnings": warnings_for(body)}
 
@@ -292,6 +355,25 @@ def create_app(
             reason = getattr(embedder, "reason", "the server has no embedding model")
             raise HTTPException(status_code=503, detail=f"Cannot reindex: {reason}")
         return {"updated": await repo.reindex(session, embedder)}
+
+    @app.post("/admin/review/{mid}", response_model=ReviewOut, dependencies=guard)
+    async def review_memory(mid: int, request: Request,
+                            reviewer: Reviewer | None = ReviewerDep):
+        """Run the review for one memory now, replacing any earlier verdict, and
+        return the new one. 503 when the server has no review model, 404 when
+        there is no such memory, 502 when the model gave no usable answer."""
+        if not _has_model(reviewer):
+            reason = getattr(reviewer, "reason", "the server has no review model")
+            raise HTTPException(status_code=503, detail=f"Cannot review: {reason}")
+        try:
+            verdict = await _review_memory(request.app, mid)
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        if verdict is None:
+            raise HTTPException(
+                status_code=502,
+                detail=f"The review model gave no verdict for memory #{mid}; see the server log.")
+        return verdict.as_dict()
 
     # The built dashboard SPA, if present, is served (unauthenticated static assets;
     # its JS carries the bearer token to the API). Registered last so every API

@@ -47,6 +47,22 @@ def _print_meta(row):
     print()
     if row.get('tags'):
         print(f"🏷️  {', '.join(row['tags'])}")
+    _print_review(row)
+
+
+def _print_review(row):
+    """One line with the review model's verdict, when the server has one:
+    `review: reject, rule 2: <reason>`. A repeat names the memory it repeats
+    instead of a rule. Nothing is printed for a memory that has no review."""
+    review = row.get("review")
+    if not review:
+        return
+    head = f"review: {review['verdict']}"
+    if review.get("rule") is not None:
+        head += f", rule {review['rule']}"
+    if review.get("duplicate_of") is not None:
+        head += f", duplicate of #{review['duplicate_of']}"
+    print(f"{head}: {review.get('reason', '')}")
 
 
 def add_memory(args, client):
