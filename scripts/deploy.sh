@@ -72,7 +72,7 @@ case "$CMD" in
 esac
 
 # ---- helpers ----------------------------------------------------------------
-VENV="$RELEASE/.venv"
+VENV=""
 
 # env_value <key> <default>: a value from the release checkout's .env.
 env_value() {
@@ -87,6 +87,8 @@ env_value() {
 check_release() {
   log "release checkout"
   [ -d "$RELEASE" ] || fail "no release checkout at $RELEASE"
+  RELEASE="$(cd "$RELEASE" && pwd)"
+  VENV="$RELEASE/.venv"
   local top
   top=$(git -C "$RELEASE" rev-parse --show-toplevel 2>/dev/null) || fail "$RELEASE is not a git checkout"
   [ "$top" != "$HERE" ] || fail "$RELEASE is the folder this script lives in; run it from a working checkout against the release checkout"
@@ -164,7 +166,7 @@ install() {
     python3 -m venv "$VENV" || fail "could not create $VENV"
     ok "created $VENV"
   fi
-  (cd "$RELEASE" && "$VENV/bin/python" -m pip install --quiet -e '.[server,mcp,embed]') \
+  (cd "$RELEASE" && "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check -e '.[server,mcp,embed]') \
     || fail "pip install failed"
   ok "agent-memory $("$VENV/bin/python" -c 'import importlib.metadata as m; print(m.version("agent-memory"))') in $VENV"
 }
@@ -216,7 +218,8 @@ compare_counts() {
   for t in $DATA_TABLES; do
     b=$(printf '%s\n' "$BEFORE" | awk -v t="$t" '$1 == t { print $2 }')
     a=$(printf '%s\n' "$AFTER" | awk -v t="$t" '$1 == t { print $2 }')
-    [ "$b" = "$a" ] || { same=false; echo "  $t: $b before, $a after" >&2; }
+    # A table that did not exist before (-) had no rows: the first deploy creates it.
+    [ "${b/-/0}" = "${a/-/0}" ] || { same=false; echo "  $t: $b before, $a after" >&2; }
   done
   $same || fail "row counts changed"
   ok "memories, tags and memory_tags unchanged"
