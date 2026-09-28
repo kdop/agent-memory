@@ -91,6 +91,29 @@ warnings can print after the id, one per line: `warning: short` (under 40 charac
 `lesson` with no word that says why, such as "because" or "rejected"). Warnings never
 block; the memory is stored either way.
 
+**Review by a model.** The server can also have a model read each new memory and judge
+it against the five rules in the skill. The model answers `approve`, `reject` with the
+number of the rule the entry breaks (or the id of the memory it repeats), or `rewrite`
+with a suggested text and suggested tags. `AGENT_MEMORY_REVIEW`, read by the server at
+start, picks the mode: `off` (the default) asks no model; `warn` stores the memory,
+answers, and asks the model afterwards, so the verdict is advice only; `enforce` asks
+the model before storing, and a `reject` or `rewrite` refuses the write. The model runs
+on any Ollama server: `AGENT_MEMORY_REVIEW_URL` is its address, for example
+`http://192.168.1.20:11434`, `AGENT_MEMORY_REVIEW_MODEL` names the model to ask (default
+`qwen3:14b`), and `AGENT_MEMORY_REVIEW_TIMEOUT` is how many seconds to wait for an answer
+(default 30). In warn mode the verdict shows as a `review:` line on `show`, `query` and
+`search`, for example `review: reject, rule 2: <reason>`; a rewrite adds the suggested
+text under `suggested:` and a `suggested tags:` line. `memory review` lists the memories
+with a reject or rewrite verdict, newest first (`--project`, `--verdict`, `--limit`,
+`--all`); `memory review --missing` reviews the memories written while the model was off.
+In enforce mode a reject or rewrite refuses the write and nothing is stored: the API
+answers `422` with the verdict and the suggestion, the CLI prints `✗ Review: rewrite,
+rule 3: <reason>`, the suggestion, and `Fix the entry, or pass --force to store it as
+written.` and exits with code 4, and the MCP tool returns `{"error": "review", ...}`.
+`--force` stores the entry anyway; the review then runs after the write, as in warn mode.
+A model that is off, unreachable or slow never blocks a write: the memory is stored
+without a verdict and the server logs one line.
+
 - **[skills/memory/SKILL.md](skills/memory/SKILL.md)** — the logging protocol, as a
   Claude Code skill each project installs; see [Claude Code skill](#claude-code-skill)
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — schema, design decisions, programmatic access
@@ -104,6 +127,7 @@ block; the memory is stored either way.
 | **CLI client** | `memory-cli` — a presentation layer over `ApiClient`. Stdlib-only, never opens a DB. | none |
 | **MCP client** | Same `ApiClient`, exposed as MCP tools over stdio. | `[mcp]` |
 | **Dashboard** | Vue 3 + Quasar single-page app, served by the API service under `/app`. | `web/` (Node) |
+| **Review model** | A model on an Ollama server (default `qwen3:14b`) that reads each new memory against the rules in the skill and answers approve, reject or rewrite. Off by default; `AGENT_MEMORY_REVIEW=warn` or `enforce` plus `AGENT_MEMORY_REVIEW_URL` turns it on. The call is plain `urllib`, so nothing extra is installed. | none |
 | **Meaning vectors** | A small local model (`BAAI/bge-small-en-v1.5`, 384 numbers per vector) run inside the API service through fastembed. It serves `--mode semantic`, `--mode hybrid` and the duplicate check on add. Optional: `pip install -e ".[embed]"`; without it the service runs with no vectors. `AGENT_MEMORY_EMBED_MODEL=off` turns it off; `AGENT_MEMORY_EMBED_CACHE` sets where model files land (default `.cache/fastembed`). | `[embed]` |
 
 ### Endpoint & auth resolution (clients)
@@ -118,8 +142,10 @@ block; the memory is stored either way.
 
 Agents can reach the memory system over **MCP**. Install the extra and register the
 stdio server once — it's then available in every session, exposing tools
-`memory_add/query/search/show/update/delete/tags/projects/stats` (`memory_search` takes
-`mode`, `memory_add` takes `force` and returns the warnings):
+`memory_add/query/search/flagged/show/update/delete/tags/projects/stats` (`memory_search`
+takes `mode`, `memory_add` takes `force` and returns the warnings, or `{"error": "review",
+...}` when the review refuses the entry, and `memory_flagged` lists the memories the
+review flagged):
 
 ```bash
 pip install -e ".[mcp]"               # installs the `agent-memory-mcp` entry point

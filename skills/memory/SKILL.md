@@ -45,7 +45,7 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
   --tags='[{"name":"auth","description":"authentication"},{"name":"feature"}]'
 ```
 
-- **Types** (enforced by the API, anything else is a 422): `decision` (architecture,
+- **Types** (the API accepts only these; anything else is a 422): `decision` (architecture,
   tooling, judgment calls — include the rejected alternatives), `lesson` (mistakes,
   insights), `preference` (standing behavioral rules — user corrections or
   confirmations about how to work), `note` (everything else: changes, refactors,
@@ -67,6 +67,12 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
   already in the project. Nothing is stored; the message names the existing id and the
   exit code is 3. Update that memory instead. Use `--force` only when the new entry is
   a deliberate separate record, for example a reversal of a decision.
+- **Review:** a `review:` line under a memory (on `show`, `query` or `search`) is a
+  model's verdict on it against the rules above: `reject` names the rule it breaks,
+  `rewrite` adds a suggested text under `suggested:`. When the server is set to refuse
+  what the model rejects, a refused `add` prints the rule and the suggestion, stores
+  nothing and exits with code 4. Fix the entry, or pass `--force` only when the entry is
+  right as written.
 - An agent's own cross-project working rules go under `--project=<agent-name>`.
 - Never write memories to Claude Code's md-file memory (`~/.claude/.../memory/*.md`):
   it is neither shared nor checked in. The DB is the single source of truth.
