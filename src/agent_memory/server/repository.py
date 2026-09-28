@@ -306,6 +306,12 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
         # New text, new vector. Without a model this clears the old one, since a
         # vector of the old text would be wrong for the new one.
         m.embedding, m.embedding_model = _embed(embedder, content)
+        # New text, new check too: the verdict was about the old text. The
+        # memory goes back to unverified and its review row goes with it, so
+        # the next catch-up picks it up again. A change of tags or project
+        # alone leaves both as they are.
+        m.review_status = UNVERIFIED
+        m.review = None
         changes.append("content")
     if project is not None:
         m.project = project or None

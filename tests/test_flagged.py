@@ -476,7 +476,7 @@ def reviewing_server(_schema):
     fake = FakeReviewer(REJECT)
     engine = make_test_engine()
     app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN,
-                     embedder=FakeEmbedder(), reviewer=fake)
+                     embedder=FakeEmbedder(), reviewer=fake, review_poll=0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)

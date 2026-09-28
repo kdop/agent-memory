@@ -286,10 +286,12 @@ class ApiClient:
         """The catch-up: ask the server to review the unverified memories,
         oldest first, one after another, up to `limit` (None uses the server
         default, 0 means all). The reviews run in the background; returns
-        how many were scheduled. A server without a review model raises
-        `ApiRefused`."""
+        `{"scheduled": <how many>, "running": <bool>}`, where `running` is
+        True when a catch-up was already running (the server runs one at a
+        time, so nothing new was scheduled). A server without a review model
+        raises `ApiRefused`."""
         _, data = self._call("POST", "/admin/review", params={"limit": limit})
-        return data["scheduled"]
+        return {"scheduled": data["scheduled"], "running": bool(data.get("running", False))}
 
     # The old name, kept for callers that still use it.
     review_missing = review_catch_up

@@ -507,7 +507,7 @@ def scripted_server(_schema):
     scripted = Scripted()
     engine = make_test_engine()
     app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN,
-                     embedder=FakeEmbedder(), reviewer=scripted)
+                     embedder=FakeEmbedder(), reviewer=scripted, review_poll=0)
     with live_app(app) as url:
         yield url, scripted
     asyncio.run(engine.dispose())
@@ -533,11 +533,11 @@ def test_client_review_catch_up_and_its_old_name(live_server, scripted_server):
     ApiClient(url, token).add("two", "tester", "p", [], None)
     api = ApiClient(scripted_server[0], token)
     assert ApiClient.review_missing is ApiClient.review_catch_up
-    assert api.review_catch_up(limit=1) == 1
+    assert api.review_catch_up(limit=1) == {"scheduled": 1, "running": False}
     _wait_until(lambda: _verified_count() == 1)
-    assert api.review_missing() == 1
+    assert api.review_missing()["scheduled"] == 1
     _wait_until(lambda: _verified_count() == 2)
-    assert api.review_catch_up() == 0
+    assert api.review_catch_up() == {"scheduled": 0, "running": False}
     # The live server without a model answers 503, which the client raises.
     with pytest.raises(ApiRefused) as caught:
         ApiClient(url, token).review_catch_up()

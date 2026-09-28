@@ -175,8 +175,11 @@ def review_memories(args, client):
             print("✗ --catch-up goes with --limit only, not with --project, --verdict, "
                   "--status or --all.")
             sys.exit(2)
-        n = client.review_catch_up(limit=args.limit)
-        print(f"✓ Scheduled {n} reviews")
+        result = client.review_catch_up(limit=args.limit)
+        if result["running"]:
+            print("✓ A catch-up is already running; nothing new scheduled")
+            return
+        print(f"✓ Scheduled {result['scheduled']} reviews")
         return
     rows, total = client.flagged_with_total(
         project=args.project, verdict=args.verdict, status=args.status,

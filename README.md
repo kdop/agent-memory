@@ -117,7 +117,17 @@ rule 3: <reason>`, the suggestion, and `Fix the entry, or pass --force to store 
 written.` and exits with code 4, and the MCP tool returns `{"error": "review", ...}`.
 `--force` stores the entry anyway; the review then runs after the write, as in warn mode.
 A model that is off, unreachable or slow never blocks a write: the memory is stored
-without a verdict and the server logs one line.
+without a verdict and the server logs one line. The server also checks on its own
+whether the model is back: every `AGENT_MEMORY_REVIEW_POLL` seconds (default 300; 0 turns
+this off) it sends one cheap request to the Ollama server, and when it answers and
+unverified memories exist, it runs the same catch-up as `memory review --catch-up`, so
+memories written while the model was off get their verdict without anyone running a
+command. One catch-up runs at a time: `memory review --catch-up` while one is running
+says so and schedules nothing. `GET /health` reports what the last check found as
+`review_model`: `reachable`, `unreachable`, or `off` when the review or the poll is off.
+Editing a memory's text with `memory update` sets it back to `unverified` and drops its
+verdict, so the next catch-up reads the new text; a change of tags or project alone
+keeps the verdict.
 
 - **[skills/memory/SKILL.md](skills/memory/SKILL.md)** — the logging protocol, as a
   Claude Code skill each project installs; see [Claude Code skill](#claude-code-skill)
