@@ -97,6 +97,10 @@ class Memory:
     score: float | None = None
     # The review status the surface reported: unverified, verified or flagged.
     status: str | None = None
+    # The older memory this one supersedes, and the newest one that
+    # supersedes it, as the surface reported them.
+    supersedes: int | None = None
+    superseded_by: int | None = None
 
 
 class CliDriver:
@@ -155,6 +159,8 @@ class CliDriver:
         for flag in ("since", "until", "project", "agent", "tag", "type", "status"):
             if filters.get(flag):
                 args += [f"--{flag}", str(filters[flag])]
+        if filters.get("current"):
+            args += ["--current"]
         if filters.get("limit") is not None:
             args += ["--limit", str(filters["limit"])]
         return self._parse_memories(self.raw(*args).stdout)
@@ -166,6 +172,8 @@ class CliDriver:
         for flag in ("project", "agent", "since", "tag"):
             if filters.get(flag):
                 args += [f"--{flag}", str(filters[flag])]
+        if filters.get("current"):
+            args += ["--current"]
         if filters.get("limit") is not None:
             args += ["--limit", str(filters["limit"])]
         out = self.raw(*args).stdout
@@ -267,8 +275,9 @@ class CliDriver:
     def _parse_memories(self, text, snippet=False):
         if "No memories found" in text:
             return []
-        # Each header is `━━━ #<id> status: <status> [score <n>] ━━━…`; keep
-        # the rest of the line so the status and the score can be read out of it.
+        # Each header is `━━━ #<id> status: <status> [supersedes #<n>]
+        # [superseded by #<n>] [score <n>] ━━━…`; keep the rest of the line so
+        # the status, the links and the score can be read out of it.
         parts = re.split(r"━+ #(\d+)([^\n]*)\n", text)
         out = []
         it = iter(parts[1:])  # parts[0] is the preamble before the first block
@@ -277,11 +286,16 @@ class CliDriver:
             score = float(sm.group(1)) if sm else None
             st = re.search(r"status: (\w+)", header)
             status = st.group(1) if st else None
+            sup = re.search(r"supersedes #(\d+)", header)
+            by = re.search(r"superseded by #(\d+)", header)
             out.append(self._parse_block(int(mid), body, snippet=snippet, score=score,
-                                         status=status))
+                                         status=status,
+                                         supersedes=int(sup.group(1)) if sup else None,
+                                         superseded_by=int(by.group(1)) if by else None))
         return out
 
-    def _parse_block(self, mid, body, snippet=False, score=None, status=None):
+    def _parse_block(self, mid, body, snippet=False, score=None, status=None,
+                     supersedes=None, superseded_by=None):
         agent = project = type_ = None
         tags = []
         collected = []
@@ -326,6 +340,8 @@ class CliDriver:
             snippet=text_body if snippet else None,
             score=score,
             status=status,
+            supersedes=supersedes,
+            superseded_by=superseded_by,
         )
 
 
@@ -366,6 +382,8 @@ class ApiDriver:
             snippet=d.get("snippet") if snippet else None,
             score=d.get("score"),
             status=d.get("review_status"),
+            supersedes=d.get("supersedes"),
+            superseded_by=d.get("superseded_by"),
         )
 
     # ---- semantic operations --------------------------------------------
@@ -387,6 +405,7 @@ class ApiDriver:
             project=filters.get("project"), agent=filters.get("agent"),
             tag=filters.get("tag"), type=filters.get("type"),
             status=filters.get("status"), limit=filters.get("limit"),
+            current="true" if filters.get("current") else None,
         )
         return [self._to_memory(d) for d in resp.json()]
 
@@ -396,6 +415,7 @@ class ApiDriver:
             project=filters.get("project"), agent=filters.get("agent"),
             since=filters.get("since"), tag=filters.get("tag"),
             limit=filters.get("limit"),
+            current="true" if filters.get("current") else None,
         )
         return [self._to_memory(d, snippet=True) for d in resp.json()]
 
@@ -492,6 +512,8 @@ class McpDriver:
             snippet=d.get("snippet") if snippet else None,
             score=d.get("score"),
             status=d.get("review_status"),
+            supersedes=d.get("supersedes"),
+            superseded_by=d.get("superseded_by"),
         )
 
     # ---- semantic operations --------------------------------------------
@@ -510,6 +532,7 @@ class McpDriver:
             project=filters.get("project"), agent=filters.get("agent"),
             tag=filters.get("tag"), type=filters.get("type"),
             status=filters.get("status"), limit=filters.get("limit"),
+            current=True if filters.get("current") else None,
         )
         return [self._to_memory(d) for d in data["memories"]]
 
@@ -519,6 +542,7 @@ class McpDriver:
             project=filters.get("project"), agent=filters.get("agent"),
             since=filters.get("since"), tag=filters.get("tag"),
             limit=filters.get("limit"),
+            current=True if filters.get("current") else None,
         )
         return [self._to_memory(d, snippet=True) for d in data["memories"]]
 

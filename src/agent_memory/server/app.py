@@ -402,7 +402,9 @@ def create_app(
                              body.project, body.tags, body.type, embedder=embedder)
         if verdict is not None:
             # The approve from just now is the review: no second model call,
-            # and the memory is `verified` from the start.
+            # and the memory is `verified` from the start. When the model
+            # said the entry supersedes an older memory, the link is set
+            # here too; the request body can never set it.
             await repo.set_review(session, mid, verdict, reviewer.model_name)
         elif _has_model(reviewer) and not enforced:
             # Warn mode, or a forced write: the review runs after the response
@@ -427,13 +429,16 @@ def create_app(
         agent: str | None = None,
         type: str | None = None,
         status: ReviewStatus | None = None,
+        current: bool = Query(
+            default=False,
+            description="Hide the memories a newer one supersedes"),
         order: str = "date_desc",
         limit: int = Query(default=100, ge=0, description="0 = no limit"),
         offset: int = Query(default=0, ge=0),
     ):
         items, total = await repo.list_memories(
             session, q=q, tags=tag, project=project, agent=agent, mtype=type,
-            status=status, since_days=since_days, since=since, until=until,
+            status=status, current=current, since_days=since_days, since=since, until=until,
             order=order, limit=limit, offset=offset)
         response.headers["X-Total-Count"] = str(total)
         return items
@@ -457,9 +462,13 @@ def create_app(
         agent: str | None = None,
         since: str | None = None,
         tag: str | None = None,
+        current: bool = Query(
+            default=False,
+            description="Hide the memories a newer one supersedes"),
         limit: int = Query(default=20, ge=0, description="0 = no limit"),
     ):
-        filters = dict(project=project, agent=agent, since=since, tag=tag, limit=limit)
+        filters = dict(project=project, agent=agent, since=since, tag=tag, current=current,
+                       limit=limit)
         if mode == "keyword":
             return await repo.search(session, q, **filters)
         # The other two modes need a real model. A NullEmbedder knows why it has none.

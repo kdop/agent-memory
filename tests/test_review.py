@@ -98,7 +98,8 @@ def test_parse_verdict_reads_the_full_shape():
     v = parse_verdict(_answer(verdict="rewrite", rule=3, rewrite="better text"))
     assert v == Verdict("rewrite", 3, "diary", "better text", None)
     assert v.as_dict() == {"verdict": "rewrite", "rule": 3, "reason": "diary",
-                           "rewrite": "better text", "duplicate_of": None, "tags": []}
+                           "rewrite": "better text", "duplicate_of": None, "tags": [],
+                           "supersedes": None}
 
 
 def test_parse_verdict_keeps_a_duplicate_of_a_listed_neighbour():

@@ -111,7 +111,17 @@ right after its id as `status: unverified` (until the model has checked it), `ve
 (approved) or `flagged` (rejected, or a rewrite suggested), and `--status` on `query` and
 `review` filters by it; only verified memories serve as reference for the duplicate check
 and for the neighbours the model sees, so an unchecked entry can never vouch for another.
-In enforce mode a reject or rewrite refuses the write and nothing is stored: the API
+Two more cases look at those neighbours. An entry that reverses or replaces an older
+memory (a new choice on the same question) is approved and stored with `supersedes` set
+to the old id: both stay in the timeline, the new one's header says `supersedes #<id>`,
+the old one's says `superseded by #<id>`, and `--current` on `query` and `search`
+(`current=true` on the API and the MCP tools) hides the superseded ones; off by default,
+so nothing disappears on its own. An entry that repeats an older memory and adds to it
+gets a `rewrite` whose text is the old and the new merged, with `duplicate_of` the old
+id: in warn mode the new memory is stored and flagged with that suggestion; in enforce
+mode the write is refused and the CLI ends with `Apply it with 'memory update <old id>'
+instead of adding.` The model never changes or removes a memory; the writer applies a
+merge. In enforce mode a reject or rewrite refuses the write and nothing is stored: the API
 answers `422` with the verdict and the suggestion, the CLI prints `✗ Review: rewrite,
 rule 3: <reason>`, the suggestion, and `Fix the entry, or pass --force to store it as
 written.` and exits with code 4, and the MCP tool returns `{"error": "review", ...}`.
@@ -126,8 +136,8 @@ command. One catch-up runs at a time: `memory review --catch-up` while one is ru
 says so and schedules nothing. `GET /health` reports what the last check found as
 `review_model`: `reachable`, `unreachable`, or `off` when the review or the poll is off.
 Editing a memory's text with `memory update` sets it back to `unverified` and drops its
-verdict, so the next catch-up reads the new text; a change of tags or project alone
-keeps the verdict.
+verdict and its `supersedes` link, so the next catch-up reads the new text; a change of
+tags or project alone keeps both.
 
 - **[skills/memory/SKILL.md](skills/memory/SKILL.md)** — the logging protocol, as a
   Claude Code skill each project installs; see [Claude Code skill](#claude-code-skill)

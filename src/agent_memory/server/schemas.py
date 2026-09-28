@@ -72,6 +72,9 @@ class ReviewOut(BaseModel):
     # Tags suggested for the rewrite, from the tags that existed at the time.
     # Empty unless the verdict is rewrite.
     tags: list[str] = []
+    # The memory this one reverses or replaces, when the model said so. The
+    # same value as the memory's own `supersedes`.
+    supersedes: int | None = None
 
 
 class MemoryOut(BaseModel):
@@ -92,6 +95,11 @@ class MemoryOut(BaseModel):
     # Whether the model has checked this memory: `unverified` until a verdict
     # is stored, then `verified` (approve) or `flagged` (reject or rewrite).
     review_status: str = "unverified"
+    # The older memory this one reverses or replaces, set from the model's
+    # verdict, never from a request; and the newest memory that supersedes
+    # this one, if any. Both None for a memory that stands on its own.
+    supersedes: int | None = None
+    superseded_by: int | None = None
 
 
 class UpdateIn(BaseModel):

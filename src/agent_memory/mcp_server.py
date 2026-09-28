@@ -51,7 +51,12 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
         "rewrite": <suggested text or null>, "tags": [<suggested tag names>],
         "duplicate_of": <id or null>}. Fix the entry (the rewrite is a
         suggestion to check, not to paste), or pass force=true to store it as
-        written."""
+        written. A "rewrite" with "duplicate_of" set is a merge: the entry
+        repeats that memory and adds to it, and "rewrite" is the merged
+        text; apply it to that memory with memory_update instead of adding.
+        A stored memory that reverses or replaces an older one carries the
+        old id as `supersedes`, set by the review model, never by the
+        caller; the old one then carries `superseded_by`."""
         try:
             mid, warnings = api.add_with_warnings(
                 content, agent or get_agent_name(), project, tags or [], type, force=force)
@@ -68,13 +73,16 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
                      since: Optional[str] = None, until: Optional[str] = None,
                      project: Optional[str] = None, agent: Optional[str] = None,
                      tag: Optional[str] = None, type: Optional[str] = None,
-                     status: Optional[str] = None, limit: Optional[int] = None) -> dict:
+                     status: Optional[str] = None, current: bool = False,
+                     limit: Optional[int] = None) -> dict:
         """Query memories by time/project/agent/tag/type/status. since_days is a
         rolling window: everything since the start of the day N days ago (0=today,
         7=past week). `status` keeps to one review status: "unverified" (the
         review model has not checked the memory), "verified" (approved) or
         "flagged" (rejected, or a rewrite suggested); every memory carries its
-        own as `review_status`. limit defaults to 100 on the server; pass 0 for
+        own as `review_status`. `current=true` hides the memories a newer one
+        supersedes (those with a `superseded_by`); by default every memory is
+        returned. limit defaults to 100 on the server; pass 0 for
         every match. Returns {"memories": [...]}; a `status` that is not one of
         the three returns {"error": "<why>"}."""
         bad = _bad_status(status)
@@ -82,22 +90,24 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
             return bad
         return {"memories": api.query(
             since_days=since_days, since=since, until=until, project=project,
-            agent=agent, tag=tag, mtype=type, status=status, limit=limit)}
+            agent=agent, tag=tag, mtype=type, status=status, current=current, limit=limit)}
 
     @mcp.tool()
     def memory_search(q: str, project: Optional[str] = None, agent: Optional[str] = None,
                       since: Optional[str] = None, tag: Optional[str] = None,
-                      limit: int = 20, mode: str = "keyword") -> dict:
+                      limit: int = 20, mode: str = "keyword", current: bool = False) -> dict:
         """Search memories. `mode` picks how to match: "keyword" finds memories
         that contain the words in `q`; "semantic" finds memories that mean the
         same thing as `q`, even in other words, and needs the embedding model on
-        the server; "hybrid" combines both. limit 0 returns every match. Returns
+        the server; "hybrid" combines both. `current=true` hides the memories a
+        newer one supersedes; by default every match is returned. limit 0
+        returns every match. Returns
         {"memories": [...]}, best match first, each with a `score` and, for
         keyword mode, a `snippet` with the matches marked. When the server cannot
         serve the mode it returns {"error": "<why>"}."""
         try:
             rows = api.search(q, project=project, agent=agent, since=since, tag=tag,
-                              limit=limit, mode=mode)
+                              limit=limit, mode=mode, current=current)
         except ApiRefused as e:
             return {"error": str(e)}
         return {"memories": rows}

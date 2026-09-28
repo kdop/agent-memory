@@ -38,6 +38,7 @@ EMBEDDING_COLUMNS = "62fcc84d6c84"
 MEMORY_REVIEWS = "2906ffedb42f"
 REVIEW_TAGS = "7c3e1a9d5b20"
 REVIEW_STATUS = "b8e2f4a6c9d1"
+SUPERSEDES = "d3f9a7c2e6b4"
 
 
 def _alembic(*args: str) -> None:
@@ -127,6 +128,7 @@ async def test_alembic_upgrade_head_builds_working_schema():
                     assert row["content"] == "migrated in"
                     assert row["tags"] == ["net"]
                     assert row["review_status"] == "unverified"
+                    assert row["supersedes"] is None and row["superseded_by"] is None
                     hits = await repo.search(s, "migrated")
                     assert len(hits) == 1
         finally:
@@ -331,19 +333,15 @@ async def test_review_status_revision_fills_existing_rows_and_downgrades():
             await _insert_memory("a made-up status", review_status="maybe")
         assert await _scalar("SELECT count(*) FROM memories") == 5
 
-        # The repository sees the column at this revision (it is head): a
-        # verdict stored now sets the status, and every read carries it.
-        eng = make_test_engine()
-        sm = make_sessionmaker(eng)
-        try:
-            async with sm() as s, s.begin():
-                from agent_memory.server.review import Verdict
-
-                await repo.set_review(s, bare, Verdict("approve", None, "fine", None, None), "m")
-                assert (await repo.get(s, bare))["review_status"] == "verified"
-                assert (await repo.get(s, new))["review_status"] == "unverified"
-        finally:
-            await eng.dispose()
+        # A verdict stored now sets the status, the way `set_review` does.
+        # Plain SQL: the models have since grown a column this revision does
+        # not have (see the module docstring).
+        await _exec(
+            "INSERT INTO memory_reviews (memory_id, verdict, reason, model) VALUES "
+            f"({bare}, 'approve', 'fine', 'm'); "
+            f"UPDATE memories SET review_status = 'verified' WHERE id = {bare}")
+        assert await _scalar("SELECT review_status FROM memories WHERE id = :m", m=bare) == "verified"
+        assert await _scalar("SELECT review_status FROM memories WHERE id = :m", m=new) == "unverified"
 
         # Downgrade one step: the column, the CHECK and the index are gone;
         # the memories and their reviews stay.
@@ -359,6 +357,70 @@ async def test_review_status_revision_fills_existing_rows_and_downgrades():
         # now among the approved ones.
         _alembic("upgrade", REVIEW_STATUS)
         assert await _statuses() == ["verified", "flagged", "flagged", "verified", "unverified"]
+    finally:
+        await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        await _create_all()
+
+
+async def _index_exists(name: str) -> bool:
+    return await _scalar("SELECT count(*) FROM pg_indexes WHERE indexname = :n", n=name) == 1
+
+
+async def test_supersedes_revision_upgrades_and_downgrades():
+    # Clean slate, then stop one step short: the column must not exist yet.
+    await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    try:
+        _alembic("upgrade", REVIEW_STATUS)
+        assert await _columns("memories", "supersedes") == {}
+        assert not await _constraint_exists("fk_memories_supersedes")
+        old = await _insert_memory("Chose SQLite because one agent writes at a time.")
+
+        # Upgrade one step: the column appears, nullable, as bigint, with its
+        # foreign key onto memories itself and its index; existing rows get
+        # NULL.
+        _alembic("upgrade", SUPERSEDES)
+        assert await _columns("memories", "supersedes") == {"supersedes": ("int8", True)}
+        assert await _constraint_exists("fk_memories_supersedes")
+        assert await _index_exists("ix_memories_supersedes")
+        assert await _scalar("SELECT supersedes FROM memories WHERE id = :m", m=old) is None
+
+        # A link can be written and read back; one to a memory that does not
+        # exist is refused; deleting the old memory clears the link on the
+        # new one and keeps the new one.
+        new = await _insert_memory("Moved to Postgres because several agents write at once.",
+                                   supersedes=old)
+        assert await _scalar("SELECT supersedes FROM memories WHERE id = :m", m=new) == old
+        with pytest.raises(IntegrityError, match="fk_memories_supersedes"):
+            await _insert_memory("points nowhere", supersedes=999)
+        await _exec(f"DELETE FROM memories WHERE id = {old}")
+        assert await _scalar("SELECT supersedes FROM memories WHERE id = :m", m=new) is None
+        assert await _scalar("SELECT count(*) FROM memories") == 1
+
+        # The repository sees the column at this revision (it is head): a
+        # verdict with `supersedes` sets the link, and a read carries both
+        # ends of it.
+        eng = make_test_engine()
+        sm = make_sessionmaker(eng)
+        try:
+            async with sm() as s, s.begin():
+                from agent_memory.server.review import Verdict
+
+                again = await repo.add(s, "the old one, again", "tester", "proj", [], None)
+                verdict = Verdict("approve", None, "fine", None, None, [], supersedes=again)
+                await repo.set_review(s, new, verdict, "m")
+                assert (await repo.get(s, new))["supersedes"] == again
+                assert (await repo.get(s, again))["superseded_by"] == new
+        finally:
+            await eng.dispose()
+
+        # Downgrade one step: the index, the foreign key and the column are
+        # gone; the memories and their reviews stay.
+        _alembic("downgrade", REVIEW_STATUS)
+        assert await _columns("memories", "supersedes") == {}
+        assert not await _constraint_exists("fk_memories_supersedes")
+        assert not await _index_exists("ix_memories_supersedes")
+        assert await _scalar("SELECT count(*) FROM memories") == 2
+        assert await _scalar("SELECT count(*) FROM memory_reviews") == 1
     finally:
         await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
         await _create_all()

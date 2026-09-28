@@ -43,8 +43,11 @@ class ReviewRefused(RuntimeError):
     the number of the rule it breaks (None for a repeat, then `duplicate_of`
     names the memory it repeats), `explanation` the model's one sentence.
     For a rewrite, `rewrite` is the suggested text and `tags` the suggested
-    tag names (None and [] for a reject). Nothing was stored. Pass
-    `force=True` to store the entry as written."""
+    tag names (None and [] for a reject). A rewrite with `duplicate_of` set
+    is a merge: the entry repeats that memory and adds to it, and `rewrite`
+    is the merged text, to apply to that memory with `update` instead of
+    adding. Nothing was stored. Pass `force=True` to store the entry as
+    written."""
 
     def __init__(self, verdict: str, rule: int | None, explanation: str,
                  rewrite: str | None = None, tags: list[str] | None = None,
@@ -183,35 +186,39 @@ class ApiClient:
         return data["id"], data.get("warnings") or []
 
     def query(self, *, since_days=None, since=None, until=None, project=None,
-              agent=None, tag=None, mtype=None, status=None, limit=None):
+              agent=None, tag=None, mtype=None, status=None, current=False, limit=None):
         """Rows only. `status` keeps to one review status ("unverified",
-        "verified" or "flagged"; None for all). `limit=0` returns everything;
+        "verified" or "flagged"; None for all). `current=True` hides the
+        memories a newer one supersedes. `limit=0` returns everything;
         None uses the server default."""
         rows, _ = self.query_with_total(
             since_days=since_days, since=since, until=until, project=project,
-            agent=agent, tag=tag, mtype=mtype, status=status, limit=limit)
+            agent=agent, tag=tag, mtype=mtype, status=status, current=current, limit=limit)
         return rows
 
     def query_with_total(self, *, since_days=None, since=None, until=None, project=None,
-                         agent=None, tag=None, mtype=None, status=None, limit=None):
+                         agent=None, tag=None, mtype=None, status=None, current=False,
+                         limit=None):
         """(rows, total): total is the match count ignoring the limit."""
         _, headers, data = self._request("GET", "/memories", params={
             "since_days": since_days, "since": since, "until": until,
             "project": project, "agent": agent, "tag": tag, "type": mtype,
-            "status": status, "limit": limit,
+            "status": status, "current": "true" if current else None, "limit": limit,
         })
         rows = data or []
         total = int((headers or {}).get("X-Total-Count") or len(rows))
         return rows, total
 
     def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None,
-               mode=None):
+               mode=None, current=False):
         """Rows with a `snippet` and a `score`. `mode` is "keyword", "semantic"
         or "hybrid"; None leaves it out, so the server picks its default
-        (keyword). A mode the server cannot serve raises `ApiRefused`."""
+        (keyword). `current=True` hides the memories a newer one supersedes.
+        A mode the server cannot serve raises `ApiRefused`."""
         _, data = self._call("GET", "/memories/search", params={
             "q": text, "project": project, "agent": agent,
             "since": since, "tag": tag, "limit": limit, "mode": mode,
+            "current": "true" if current else None,
         })
         return data or []
 
