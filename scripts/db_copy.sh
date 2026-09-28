@@ -41,7 +41,9 @@ usage() {
 }
 
 # pg <tool> <args>: run a Postgres client tool inside the container.
-pg() { podman exec -i "$CONTAINER" "$@"; }
+# PGPORT is set on the container to move the copy to 5434; drop it here so a
+# source DSN without a port dials the source's default port, not 5434.
+pg() { podman exec -i "$CONTAINER" env -u PGPORT "$@"; }
 
 running() { [ "$(podman inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; }
 

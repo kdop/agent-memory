@@ -32,3 +32,4 @@ backups/
 
 # Downloaded embedding model files (AGENT_MEMORY_EMBED_CACHE default).
 .cache/
+.test-instance/
