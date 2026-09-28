@@ -35,6 +35,7 @@ src/agent_memory/
     auth.py            #   bearer-token guard (constant-time)
     embedding.py       #   Embedder interface; local fastembed model — [embed] extra, optional
     checks.py          #   the warnings on add (short, no-project, no-reasoning); never block
+    review.py          #   the review of each new memory by a model on an Ollama server; off by default
     __main__.py        #   `python -m agent_memory.server` (uvicorn launcher)
 alembic/               # migrations; env.py autogenerates from models.Base.metadata
 memory-cli             # thin shim on PATH -> agent_memory.cli:main (rule #5)
@@ -119,6 +120,20 @@ CREATE TABLE memory_tags (
     PRIMARY KEY (memory_id, tag_id)
 );
 CREATE INDEX ix_memory_tags_tag_id ON memory_tags (tag_id);
+
+-- What the review model said about a memory (Checks on write below). One row per
+-- memory, replaced when it is reviewed again; the row goes with its memory.
+CREATE TABLE memory_reviews (
+    memory_id    BIGINT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    verdict      TEXT NOT NULL,       -- approve, reject or rewrite
+    rule         INTEGER,             -- the rule the entry breaks; NULL on approve
+    reason       TEXT NOT NULL,       -- one sentence
+    rewrite      TEXT,                -- the suggested text, when the verdict is rewrite
+    duplicate_of BIGINT REFERENCES memories(id) ON DELETE SET NULL,  -- the memory it repeats
+    tags         TEXT[],              -- suggested tags for the rewrite; NULL when none
+    model        TEXT NOT NULL,       -- the name of the model that answered
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
 
 ## Full-text search
@@ -189,23 +204,70 @@ have the same length.
   the entry breaks come back next to the new id. They never block; the memory is
   stored either way.
 
-Before a check goes live, `scripts/replay_write_checks.py` runs both over a copy of
-the database in write order and prints what each would have said (see README).
+- **Review by a model.** `review.py` asks a model on an Ollama server what it thinks
+  of the entry (`OllamaReviewer`: `POST /api/chat` through `urllib` in a thread, so no
+  new package and the event loop stays free). The prompt holds the five rules from the
+  skill, copied into `RULES` as data (a test reads the skill file and checks they still
+  match; the server never reads that file), the new entry, the five memories of the
+  same project closest to it by cosine over the stored vectors (`_nearest`; none when
+  there are no vectors), and the ten tags in use closest to it in meaning
+  (`tags_for_review`: the entry and each tag's `name: description` are embedded on the
+  fly, never stored; without an embedding model the ten most used tags are offered).
+  The model answers one JSON object with six keys: `verdict` (`approve`, `reject` or
+  `rewrite`), `rule`, `reason`, `rewrite`, `duplicate_of` and `tags`. `parse_verdict`
+  turns it into a `Verdict` and treats anything else as no answer: a missing key, a
+  rule number that is not a rule, a `duplicate_of` the model was not shown; a tag not on
+  the offered list is dropped, and tags on an approve or reject are dropped too. Four
+  request settings matter: `think: false` and `format: json`, because otherwise the
+  model thinks out loud and returns prose instead of JSON; `temperature: 0`, so the
+  same entry gets the same verdict; and `num_ctx: 8192`, so the rules, the entry and
+  five neighbours fit. The verdict is stored in `memory_reviews` (schema above), one
+  row per memory; `set_review` replaces it on a re-review, and every read carries it
+  as `review` next to the tags.
 
-**Planned, not built:** a review by a language model of each new entry, first as a
-warning only, then suggestions, a list of flagged entries, and only after that any
-enforcement. Issues #30 to #34. Nothing in the code depends on it.
+  `AGENT_MEMORY_REVIEW` picks how the review runs (`review_mode`, `make_reviewer`):
+  `off` (the default, also for an unknown value or a missing `AGENT_MEMORY_REVIEW_URL`)
+  gives a `NullReviewer` that is never called. In **warn** mode the add route stores the
+  memory, the session commits, the answer goes out, and then a FastAPI background task
+  runs the review: it reads the memory, its neighbours and the tags on offer in one
+  session, closes it, calls the model in a thread, and writes the row in a second
+  session, so no database connection sits idle while the model thinks. The writer
+  never waits, and nothing is refused or changed because of a verdict. In **enforce**
+  mode the route builds the entry from the request, finds its neighbours
+  (`neighbours_for`, the same rules as `_nearest` for an entry that has no id yet) and
+  the tags, and calls the model before storing, with the request's session open while
+  the model thinks. A `reject` or `rewrite` answers `422` with
+  `{"reason": "review", "verdict", "rule", "explanation", "rewrite", "tags", "duplicate_of"}`
+  and stores nothing; an `approve` stores the memory and its row in one go, with no
+  second call. The duplicate check comes first (`409` before any model call), and
+  `?force=true` skips the review as it skips that check; the review then runs in the
+  background as in warn mode, so the row is still written.
+
+  **The fallback rule, in every mode:** a model that is off, unreachable, slow (past
+  `AGENT_MEMORY_REVIEW_TIMEOUT`, default 30 s) or answering with something that is not
+  the expected JSON never blocks a write. The memory is stored, no row is written, and
+  the server logs one line. `POST /admin/review` (`memory review --missing`) reviews the
+  memories that have no row yet, newest first, in the background, so memories written
+  while the model was off or down get their verdict later; `POST /admin/review/{id}`
+  reviews one memory now and replaces its row. `GET /memories/flagged`
+  (`memory review`, MCP `memory_flagged`) lists the memories whose verdict is `reject`
+  or `rewrite`, newest review first.
+
+Before a check goes live, `scripts/replay_write_checks.py` runs the duplicate check and
+the warnings over a copy of the database in write order and prints what each would
+have said (see README).
 
 ## Data flow
 
-**Add** — run the checks above (a duplicate is refused, warnings are collected), then
-insert a `Memory`; for each `{"name", "description"}` tag, reuse the existing
+**Add** — run the checks above (a duplicate is refused, warnings are collected, in
+enforce mode the model reads the entry first), then insert a `Memory`; for each `{"name", "description"}` tag, reuse the existing
 row (updating its descriptor only if a new non-blank one is given) or create it
 (defaulting a new tag's descriptor to its own name), then link in `memory_tags`;
 `content_tsv` is generated automatically. When the server has an embedding model, `add` also
 stores the content's vector in `embedding` and the model's name in `embedding_model`;
 an update that changes the content recomputes both, any other update leaves them alone.
-With no model both stay NULL. **Query** — build a `SELECT` with
+With no model both stay NULL. In warn mode the review runs after the response and
+writes its row to `memory_reviews`. **Query** — build a `SELECT` with
 `selectinload(tags)` and `WHERE` clauses from the filters (date window, project, agent,
 type, `tags.any(lower(name)=…)`), `ORDER BY timestamp DESC`. **Search** — `mode`
 picks keyword search (Full-text search above), search by meaning, or the combined
@@ -227,17 +289,20 @@ Three ways in beyond the CLI:
 
 - **The HTTP API** — routes mirror the operations 1:1: `POST /memories`,
   `GET /memories` (query), `GET /memories/search`, `GET /memories/{id}`,
-  `GET /memories/bulk`, `PATCH /memories/{id}`, `DELETE /memories`, `GET /tags`,
-  `GET /projects`, `GET /stats`, `POST /admin/reindex`. Bearer auth via `AGENT_MEMORY_API_TOKEN`;
+  `GET /memories/bulk`, `GET /memories/flagged`, `PATCH /memories/{id}`,
+  `DELETE /memories`, `GET /tags`, `GET /projects`, `GET /stats`, `POST /admin/reindex`,
+  `POST /admin/review` (review the memories that have no verdict yet),
+  `POST /admin/review/{id}` (review one memory now). Bearer auth via `AGENT_MEMORY_API_TOKEN`;
   `GET /health` is unauthenticated. Call it with any HTTP client, or reuse
   `agent_memory.client.ApiClient`.
 - **The MCP server** — `python -m agent_memory.mcp_server` (needs `[mcp]`); tools
-  `memory_add/query/search/show/update/delete/tags/projects/stats` over stdio, each a
-  thin wrapper over `ApiClient`.
+  `memory_add/query/search/flagged/show/update/delete/tags/projects/stats` over stdio,
+  each a thin wrapper over `ApiClient`.
 - **The repository** — for in-process server code/tests, `agent_memory.server.repository`
   is plain async functions over an `AsyncSession` (`add`, `find_duplicate`, `query`,
   `search`, `search_semantic`, `search_hybrid`, `get`, `update`, `get_many`, `delete`,
-  `list_tags`, `list_projects`, `stats`, `reindex`).
+  `list_tags`, `list_projects`, `stats`, `reindex`, `review_input`, `neighbours_for`,
+  `tags_for_review`, `set_review`, `flagged`, `count_flagged`, `without_review`).
 
 A minimal client using the packaged wrapper:
 
