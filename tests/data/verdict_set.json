@@ -7,7 +7,7 @@
     "expected.duplicate_of and expected.supersedes say whether that id must be set (true) or must be unset (false).",
     "floor is the overall pass rate the test asserts; it is the rate seen on the first run, rounded down, and is raised when the prompt improves."
   ],
-  "floor": 0.56,
+  "floor": 0.96,
   "tags": ["database", "performance", "api", "config", "pipeline", "cli", "time", "errors", "outage", "packaging"],
   "entries": [
     {

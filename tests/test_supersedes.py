@@ -177,7 +177,7 @@ def test_ollama_reviewer_a_supersedes_of_an_unlisted_entry_is_bad_json(monkeypat
 # ── the prompt ───────────────────────────────────────────────────────────────
 def test_system_prompt_asks_for_supersedes_and_lists_the_two_cases():
     prompt = review_mod.SYSTEM_PROMPT
-    assert "exactly these seven keys" in prompt
+    assert "exactly these nine keys" in prompt
     assert '"supersedes": <id or null>' in prompt
     # The two cases sit in the checklist, each with one example.
     assert "reverses or replaces what a listed existing entry says" in prompt

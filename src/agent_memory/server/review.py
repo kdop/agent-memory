@@ -248,61 +248,86 @@ def _cause(e: Exception) -> str:
 
 
 # ---- the prompt ------------------------------------------------------------
+# The answer starts with two keys the server drops, `why` and `new_facts`: the model
+# fills them before the verdict, so it looks at the entry before it judges. Without
+# them it judged first and made up a reason to fit. Two more rules, both learned
+# from the verdict set (tests/data/verdict_set.json): an example never carries an
+# id (the model copies it), and never shares a subject with a test entry (the model
+# borrows the example's reason for an entry on the same subject). Measure a change
+# here with tests/test_verdict_quality.py before keeping it.
 SYSTEM_PROMPT = (
     "You review entries that AI agents write to a shared memory. Memory is for what "
-    "will still matter in a later session. Judge each new entry against these rules:\n"
+    "will still matter in a later session. The rules:\n"
     + "\n".join(f"{n}. {text}" for n, text in RULES)
     + "\n\n"
     "You get one new entry, up to five existing entries from the same project, and a "
     "list of existing tag names. Answer with one JSON object and nothing else, with "
-    "exactly these seven keys:\n"
-    '{"verdict": "approve" | "reject" | "rewrite", "rule": <number or null>, '
-    '"reason": "<one sentence>", "rewrite": "<text>" or null, "duplicate_of": <id or null>, '
-    '"tags": [<names from the list only>], "supersedes": <id or null>}\n'
+    "exactly these nine keys, in this order:\n"
+    '{"why": "<the words of the new entry that give its reason, or \\"\\">", '
+    '"new_facts": "<what the new entry adds to the closest listed entry, or \\"\\">", '
+    '"supersedes": <id or null>, "duplicate_of": <id or null>, '
+    '"verdict": "approve" | "reject" | "rewrite", "rule": <number or null>, '
+    '"reason": "<one sentence>", "rewrite": "<text>" or null, '
+    '"tags": [<names from the list only>]}\n'
+    "why: copy the words of the new entry that give the reason or the cause, in any "
+    "form: a because, since or so that clause, a cause, what went wrong, what the other "
+    "choice would cost, who asked for it and what happened before. It is the part of "
+    "the entry that answers the question why, never the whole entry. Naming the "
+    "other choice (X, not Y; X instead of Y; X over Y) is not a reason. When there "
+    'are no such words, why is "". Example: \'Picked Redis over Memcached for the '
+    'cache.\' gives no reason, so why is "".\n'
+    "new_facts: what a reader who knows the closest listed entry would learn from the "
+    "new entry, in a few words: a number, a date, a later change, another cause. Other "
+    "words for the same thing (a synonym, another unit, another order of the sentences) "
+    'teach nothing. With no listed entry, or nothing to learn, new_facts is "".\n'
+    "supersedes: the id of the listed entry the new entry makes out of date, because it "
+    "changes a choice, a value or a behaviour that entry states (now X instead of Y, "
+    "moved from A to B, no longer Z), so that what the listed entry says no longer "
+    "holds; null when no listed entry is changed. An entry that keeps what the listed "
+    "entry says and adds to it changes nothing: that is duplicate_of, not supersedes.\n"
+    "duplicate_of: the id of the listed entry the new entry repeats, with or without "
+    "more; null when it repeats none. Never set both supersedes and duplicate_of.\n"
     "\n"
-    "- approve: the entry follows the rules. rule, rewrite and duplicate_of are null; "
-    "tags is [].\n"
-    "- reject: the entry breaks a rule, or says the same as an existing entry in other "
-    "words. Set rule to the number of the rule it breaks. For a repeat of an existing "
-    "entry set duplicate_of to that entry's id and rule to null. rewrite is null; "
-    "tags is [].\n"
-    "- rewrite: the entry is worth keeping but would follow the rules better in other "
-    "words, for example a decision that has a why buried in it. Put the new text in "
-    "rewrite and the rule it falls short of in rule. duplicate_of is null, except for an "
-    "entry that repeats a listed entry and adds to it (case 4 below): then rewrite is "
-    "the merged text and duplicate_of is that entry's id. In tags put "
+    "Go through these steps in order and stop at the first that applies:\n"
+    "1. Out of date. supersedes is set: the new entry reverses or replaces what a listed "
+    "existing entry says, with a why. Answer approve, supersedes that entry's id, "
+    "everything else null and tags []. Example: the listed entry says 'Kept the weekly "
+    "report as a PDF because the board reads it on paper' and the new entry says 'Moved "
+    "the weekly report to a web page because the board now reads it on phones': "
+    "approve, supersedes that entry's id.\n"
+    '2. Repeat. duplicate_of is set and new_facts is "": the new entry says the same as '
+    "a listed existing entry, word for word or in other words, and nothing more. Reject, "
+    "duplicate_of that entry's id, rule null, rewrite null. A repeat is never approved "
+    "and never rewritten.\n"
+    '3. Repeat with more. duplicate_of is set and new_facts is not "": the new entry says '
+    "what a listed existing entry says and adds something to it. Rewrite, with one merged "
+    "text that keeps the listed entry's words and adds the new part, duplicate_of that "
+    "entry's id, and rule null. Example: the listed entry says 'Cache entries expire after "
+    "an hour because prices change hourly' and the new entry says 'Cache entries expire "
+    "after an hour because prices change hourly; the cache holds 10,000 entries': rewrite "
+    "'Cache entries expire after an hour because prices change hourly; the cache holds "
+    "10,000 entries', duplicate_of that entry's id.\n"
+    "4. Diary. The new entry tells what was done in a session (spent the morning on, "
+    "ran, fixed, pushed, will look at it tomorrow): reject, rule 2.\n"
+    "5. Git fact. The new entry states what git already records: which version or "
+    "release was tagged and what it contains, a commit hash and what it changed, a "
+    "file, function or setting that was moved, renamed or changed, a commit-shaped "
+    "sentence (added X to Y, raised the timeout from 5 to 10). Reject, rule 4. Such a "
+    "fact is true and durable and still does not belong here.\n"
+    '6. No why. why is "": the entry states what was decided, chosen, learned or must '
+    "be done, but not why. Reject, rule 3, however sensible the choice looks. Never add "
+    "a why yourself.\n"
+    "7. Otherwise the entry states the what and the why: approve, everything else null "
+    "and tags [].\n"
+    "\n"
+    "- rule is the number of the rule a rejected entry breaks; null for a repeat, an "
+    "approve or a rewrite.\n"
+    "- rewrite is the merged text from step 3, else null. tags go with a rewrite only: "
     "the names from the offered list that fit the new text, most fitting first, at most "
     "five; never a name that is not on the list, and [] when none fits.\n"
-    "- supersedes: the id of the listed entry the new entry reverses or replaces, else "
-    "null. An entry that reverses or replaces what an existing entry says is not a "
-    "repeat: approve it and set supersedes.\n"
-    "- duplicate_of and supersedes are the id of a listed entry as a number (12, not "
-    '"12"), or null.\n'
+    "- Ids are numbers, not strings.\n"
     "- A short entry is fine when it follows the rules. Do not reject for length.\n"
-    "- reason is one plain sentence a person can act on.\n"
-    "\n"
-    "Check the new entry in this order, and stop at the first that applies:\n"
-    "1. It tells what was done in a session (rule 2): reject, rule 2.\n"
-    "2. It reverses or replaces what a listed existing entry says (another choice on "
-    "the same question, or an old fact that no longer holds), and says why: approve, "
-    "supersedes that entry's id. Example: the listed entry says 'Chose SQLite because "
-    "one agent writes at a time' and the new entry says 'Moved to Postgres because "
-    "several agents now write at once': approve, supersedes the listed entry's id.\n"
-    "3. It says the same as a listed existing entry in other words, and nothing more: "
-    "reject, duplicate_of that entry's id.\n"
-    "4. It says what a listed existing entry says and adds something to it (a detail, "
-    "a number, a later fact): neither approve nor reject. Answer rewrite, with one "
-    "merged text that keeps the listed entry's words and adds the new part, "
-    "duplicate_of that entry's id, and rule null. Example: the listed entry says 'Chose "
-    "Postgres because several agents write at once' and the new entry says 'Chose "
-    "Postgres because several agents write at once; the pool holds 10 connections': "
-    "rewrite 'Chose Postgres because several agents write at once; the pool holds 10 "
-    "connections', duplicate_of the listed entry's id.\n"
-    "5. It states what was decided, chosen, learned or will be done, but not why: no "
-    "'because', no cause, no alternative that was rejected. Then it falls short of rule "
-    "3: rewrite it, keeping the writer's words and adding the why when the entry or the "
-    "existing entries state it; otherwise reject, rule 3.\n"
-    "6. It states the what and the why, in any order: approve."
+    "- reason is one plain sentence a person can act on."
 )
 
 
@@ -339,7 +364,8 @@ def parse_verdict(text: str, neighbour_ids: list[int] | None = None,
     Bad JSON, a missing key, a verdict outside `VERDICTS`, a rule number that
     is not one of the rules, or a `duplicate_of` or `supersedes` that names
     an entry the model was not shown all count as no answer. The caller
-    stores nothing then.
+    stores nothing then. Keys the prompt asks for on top of these (`why`,
+    `new_facts`) are ignored.
 
     `tags` may be left out (then it is empty) but must be a list of strings
     when present. Only a rewrite keeps its tags, and only the names in
