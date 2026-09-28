@@ -560,6 +560,58 @@ async def review_input(session, mid: int) -> tuple[dict, list[dict]] | None:
     return _dump(m), [_dump(other, score=score) for score, other in scored[:NEIGHBOUR_COUNT]]
 
 
+# The verdicts that mark a memory as flagged: the model said no, or said
+# it should be written differently. An approve is not a flag.
+FLAGGED_VERDICTS = ("reject", "rewrite")
+
+
+def _flagged_filters(stmt, *, project=None, verdict=None):
+    """The WHERE clauses of a flagged listing: joined to the review row, kept
+    to the flagged verdicts (or only `verdict`), and to `project` when given.
+    A `verdict` that is not one of the flagged ones is a caller's error."""
+    if verdict is not None and verdict not in FLAGGED_VERDICTS:
+        raise ValueError(f"verdict must be one of {', '.join(FLAGGED_VERDICTS)} (got {verdict!r})")
+    wanted = FLAGGED_VERDICTS if verdict is None else (verdict,)
+    stmt = stmt.join(Memory.review).where(MemoryReview.verdict.in_(wanted))
+    if project:
+        stmt = stmt.where(Memory.project == project)
+    return stmt
+
+
+async def flagged(session, *, project=None, verdict=None, limit=None) -> list[dict]:
+    """The memories the review flagged: those whose review says reject or
+    rewrite, or only `verdict` when given, newest review first (ties by id,
+    newest first). Same shape as `query`, the review included. `project`
+    narrows to one project. `limit` of 0 or None means all."""
+    stmt = _flagged_filters(select(Memory).options(*_LOAD), project=project, verdict=verdict)
+    stmt = stmt.order_by(MemoryReview.created_at.desc(), Memory.id.desc())
+    if limit:
+        stmt = stmt.limit(int(limit))
+    rows = (await session.execute(stmt)).scalars().all()
+    return [_dump(m) for m in rows]
+
+
+async def count_flagged(session, *, project=None, verdict=None) -> int:
+    """How many memories `flagged` would list with the same filters and no limit."""
+    stmt = _flagged_filters(select(func.count(Memory.id)), project=project, verdict=verdict)
+    return (await session.execute(stmt)).scalar()
+
+
+async def without_review(session, *, limit=None) -> list[int]:
+    """The ids of the memories that have no review row, newest first (ties by
+    id, newest first). These are the memories written while the review model
+    was off or could not answer. `limit` of 0 or None means all."""
+    stmt = (
+        select(Memory.id)
+        .outerjoin(Memory.review)
+        .where(MemoryReview.memory_id.is_(None))
+        .order_by(Memory.timestamp.desc(), Memory.id.desc())
+    )
+    if limit:
+        stmt = stmt.limit(int(limit))
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
     """Store `verdict` as the review of memory `mid`, replacing any earlier
     one, and return the API view of it. `model` names the model that gave it.

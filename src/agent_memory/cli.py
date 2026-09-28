@@ -87,6 +87,21 @@ def _effective_limit(args):
     return 0 if getattr(args, "all", False) else args.limit
 
 
+def _print_listing(rows, total, noun="memories"):
+    """Print a list of memories the way `query` does: one block per memory
+    with its meta lines (the review line included) and its content, then a
+    footer that says how many were shown out of `total`."""
+    for row in rows:
+        print(f"\n━━━ #{row['id']} {HBAR}")
+        _print_meta(row)
+        print(f"\n{row['content']}")
+    print(f"\n{FOOT}")
+    if total > len(rows):
+        print(f"Found {len(rows)} of {total} {noun} (use --all or --limit to see more)")
+    else:
+        print(f"Found {len(rows)} {noun}")
+
+
 def query_memories(args, client):
     rows, total = client.query_with_total(
         since_days=args.since_days, since=args.since, until=args.until,
@@ -95,15 +110,26 @@ def query_memories(args, client):
     if not rows:
         print("No memories found.")
         return
-    for row in rows:
-        print(f"\n━━━ #{row['id']} {HBAR}")
-        _print_meta(row)
-        print(f"\n{row['content']}")
-    print(f"\n{FOOT}")
-    if total > len(rows):
-        print(f"Found {len(rows)} of {total} memories (use --all or --limit to see more)")
-    else:
-        print(f"Found {len(rows)} memories")
+    _print_listing(rows, total)
+
+
+def review_memories(args, client):
+    """`memory review`: list the memories the review flagged. With
+    `--missing`, ask the server to review the memories that have no
+    review yet instead."""
+    if args.missing:
+        if args.project or args.verdict or args.all:
+            print("✗ --missing goes with --limit only, not with --project, --verdict or --all.")
+            sys.exit(2)
+        n = client.review_missing(limit=args.limit)
+        print(f"✓ Scheduled {n} reviews")
+        return
+    rows, total = client.flagged_with_total(
+        project=args.project, verdict=args.verdict, limit=_effective_limit(args))
+    if not rows:
+        print("No flagged memories.")
+        return
+    _print_listing(rows, total, noun="flagged memories")
 
 
 def _search_header(row):
@@ -354,6 +380,28 @@ def main():
     reindex_parser = subparsers.add_parser(
         "reindex", help="Give every memory a vector from the server's current embedding model")
     reindex_parser.set_defaults(func=reindex_memories)
+
+    review_parser = subparsers.add_parser(
+        "review",
+        help="List the memories the review model flagged (reject or rewrite), newest first",
+        description="List the memories the review model flagged: those whose verdict is "
+                    "reject or rewrite, newest review first, each with its verdict and "
+                    "reason. With --missing, ask the server to review the memories that "
+                    "have no verdict yet instead (written while the model was off).")
+    review_parser.add_argument("--project", help="Only this project")
+    review_parser.add_argument("--verdict", choices=["reject", "rewrite"],
+                               help="Only this verdict (default: both)")
+    review_parser.add_argument(
+        "--limit", type=int,
+        help="How many to show (default 100; 0 = all). With --missing: how many "
+             "memories to review (default 50; 0 = all)")
+    review_parser.add_argument("--all", action="store_true",
+                               help="Show every flagged memory (same as --limit 0)")
+    review_parser.add_argument(
+        "--missing", action="store_true",
+        help="Do not list; ask the server to review the memories that have no verdict "
+             "yet, newest first. Runs in the background; prints how many were scheduled")
+    review_parser.set_defaults(func=review_memories)
 
     config_parser = subparsers.add_parser("config", help="Get/set persistent client settings (api_url, api_token)")
     config_sub = config_parser.add_subparsers(dest="config_action")
