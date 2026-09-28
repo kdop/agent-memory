@@ -36,6 +36,7 @@ from .schemas import (
     MemoryIn,
     MemoryOut,
     ProjectCount,
+    ReviewEntry,
     ReviewOut,
     TagCount,
     TagDetachIn,
@@ -88,10 +89,10 @@ ReviewerDep = Depends(get_reviewer)
 
 
 def get_review_mode(request: Request) -> str:
-    """The review mode on `app.state`: `off`, `warn` or `enforce`. `warn`
+    """The review mode on `app.state`: `off`, `flag` or `refuse`. `flag`
     when nothing set it, so an app built for tests with a reviewer and no
     lifespan behaves as before."""
-    return getattr(request.app.state, "review_mode", "warn")
+    return getattr(request.app.state, "review_mode", "flag")
 
 
 ReviewModeDep = Depends(get_review_mode)
@@ -104,16 +105,16 @@ def _has_model(backend) -> bool:
 
 def _mode_for(reviewer: Reviewer | None, wanted: str | None) -> str:
     """The mode the server runs the review in. `off` without a model, whatever
-    was asked. With one, `enforce` only when asked for; otherwise `warn`, so a
+    was asked. With one, `refuse` only when asked for; otherwise `flag`, so a
     reviewer handed to `create_app` is used even when the environment says
     off."""
     if not _has_model(reviewer):
         return "off"
-    return "enforce" if wanted == "enforce" else "warn"
+    return "refuse" if wanted == "refuse" else "flag"
 
 
 def _refusal(verdict: Verdict) -> dict:
-    """The `detail` of the 422 an enforced review answers with. `explanation`
+    """The `detail` of the 422 a review in refuse mode answers with. `explanation`
     is the model's reason; `rewrite` and `tags` carry the suggestion when the
     verdict is a rewrite (None and [] for a reject)."""
     return {"reason": "review", "verdict": verdict.verdict, "rule": verdict.rule,
@@ -121,19 +122,39 @@ def _refusal(verdict: Verdict) -> dict:
             "tags": list(verdict.tags), "duplicate_of": verdict.duplicate_of}
 
 
-async def _review_before_store(session: AsyncSession, reviewer: Reviewer,
+async def _refuse_duplicate(session: AsyncSession, embedder: Embedder | None,
+                            body: MemoryIn) -> None:
+    """Raise the 409 when a memory in the entry's project already says the
+    same thing. Only verified memories (ones the model approved) count as
+    reference. A server without a model never refuses, since it has no
+    vectors to compare."""
+    dup = await repo.find_duplicate(session, embedder, body.content, body.project)
+    if dup is not None:
+        existing_id, score = dup
+        raise HTTPException(status_code=409, detail={
+            "reason": "duplicate", "existing_id": existing_id, "score": score})
+
+
+async def _review_before_store(sessionmaker: async_sessionmaker, reviewer: Reviewer,
                                embedder: Embedder | None, body: MemoryIn) -> Verdict | None:
-    """Ask the reviewer about an entry that is not stored yet. The memory it
-    sees has no id; its neighbours and the tags on offer are found the way
-    the stored path finds them. Returns the verdict, or None when the model
-    gave none or failed: then the caller stores the entry as warn mode would,
-    since an absent model must never block a write. The request's session
-    stays open while the model thinks; enforce mode pays that price so the
-    write can wait for the answer."""
+    """The refuse-mode check of an entry that is not stored yet: the
+    duplicate check, then the model. The memory the model sees has no id;
+    its neighbours and the tags on offer are found the way the stored path
+    finds them. Returns the verdict, or None when the model gave none or
+    failed: then the caller stores the entry as flag mode would, since an
+    absent model must never block a write.
+
+    The reads run in a short session of their own, closed before the model
+    is asked, so no pooled connection waits on the model (it may take up to
+    the review timeout, 30 s by default). The caller must not have used the
+    request's session yet: a session that has run nothing holds no
+    connection, and it stays that way until the insert after this call."""
     memory = {"id": None, "project": body.project, "type": body.type,
               "tags": [t.name for t in body.tags], "content": body.content}
-    neighbours = await repo.neighbours_for(session, embedder, body.content, body.project)
-    tags = await repo.tags_for_review(session, embedder, body.content)
+    async with sessionmaker() as session, session.begin():
+        await _refuse_duplicate(session, embedder, body)
+        neighbours = await repo.neighbours_for(session, embedder, body.content, body.project)
+        tags = await repo.tags_for_review(session, embedder, body.content)
     try:
         verdict = await asyncio.to_thread(reviewer.review, memory, neighbours, tags)
     except Exception as e:
@@ -283,8 +304,9 @@ async def _reindex_at_startup(app: FastAPI) -> None:
     rows can still be fixed later with `POST /admin/reindex`."""
     try:
         async with app.state.sessionmaker() as session, session.begin():
-            n = await repo.reindex(session, app.state.embedder)
-        log.info("reindex at startup: %d memories updated", n)
+            done = await repo.reindex(session, app.state.embedder)
+        log.info("reindex at startup: %d memories and %d tags updated",
+                 done["updated"], done["tags"])
     except Exception:
         log.exception("reindex at startup failed; the server keeps running")
 
@@ -304,10 +326,10 @@ def create_app(
     omitted, the lifespan builds one from the environment with `make_embedder()`
     (a `NullEmbedder` when the model is off or not installed). The reviewer
     lands on `app.state.reviewer` the same way, through `make_reviewer()`
-    (a `NullReviewer` unless AGENT_MEMORY_REVIEW is warn or enforce and a
+    (a `NullReviewer` unless AGENT_MEMORY_REVIEW is flag or refuse and a
     server is set). `app.state.review_mode` says how the review runs: `off`
-    without a model; else `enforce` when `review_mode` (or, when it is
-    omitted, AGENT_MEMORY_REVIEW) says so, and `warn` otherwise. When the
+    without a model; else `refuse` when `review_mode` (or, when it is
+    omitted, AGENT_MEMORY_REVIEW) says so, and `flag` otherwise. When the
     review is on, the lifespan also runs the poll (`_review_poll`): every
     `review_poll` seconds (or, when it is omitted, AGENT_MEMORY_REVIEW_POLL,
     default 300; 0 or less means no poll) it checks whether the model
@@ -379,24 +401,22 @@ def create_app(
                              description="Store even when a near-duplicate exists, or "
                                          "when the review model would refuse the entry")):
         # A memory that already exists in this project is refused, not stored
-        # twice. Only verified memories (ones the model approved) count as
-        # reference. `force=true` skips the check; a server without a model
-        # never refuses, since it has no vectors to compare.
-        if not force:
-            dup = await repo.find_duplicate(session, embedder, body.content, body.project)
-            if dup is not None:
-                existing_id, score = dup
-                raise HTTPException(status_code=409, detail={
-                    "reason": "duplicate", "existing_id": existing_id, "score": score})
-        # In enforce mode the model reads the entry first, and a reject or
-        # rewrite refuses it with the verdict and the suggestion. `force=true`
-        # skips this too. A model that gives no answer refuses nothing.
+        # twice (`_refuse_duplicate`). In refuse mode the model then reads
+        # the entry, and a reject or rewrite refuses it with the verdict and
+        # the suggestion. `force=true` skips both checks. A model that gives
+        # no answer refuses nothing.
         verdict = None
-        enforced = _has_model(reviewer) and mode == "enforce" and not force
-        if enforced:
-            verdict = await _review_before_store(session, reviewer, embedder, body)
+        refusing = _has_model(reviewer) and mode == "refuse" and not force
+        if refusing:
+            # Both checks read in a short session of their own; the request's
+            # session (`session`) is first used for the insert below, so it
+            # holds no connection while the model thinks.
+            verdict = await _review_before_store(request.app.state.sessionmaker,
+                                                 reviewer, embedder, body)
             if verdict is not None and verdict.verdict != "approve":
                 raise HTTPException(status_code=422, detail=_refusal(verdict))
+        elif not force:
+            await _refuse_duplicate(session, embedder, body)
         # Stored as `unverified`; the verdict, when one lands, sets the status.
         mid = await repo.add(session, body.content, body.agent or "unknown",
                              body.project, body.tags, body.type, embedder=embedder)
@@ -406,8 +426,8 @@ def create_app(
             # said the entry supersedes an older memory, the link is set
             # here too; the request body can never set it.
             await repo.set_review(session, mid, verdict, reviewer.model_name)
-        elif _has_model(reviewer) and not enforced:
-            # Warn mode, or a forced write: the review runs after the response
+        elif _has_model(reviewer) and not refusing:
+            # Flag mode, or a forced write: the review runs after the response
             # is sent, so the writer never waits for it. The session above
             # commits before the response goes out, so the task sees the new
             # row in its own session. The memory stays `unverified` until
@@ -515,6 +535,17 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"Memory #{mid} not found")
         return row
 
+    @app.get("/memories/{mid}/reviews", response_model=list[ReviewEntry], dependencies=guard)
+    async def list_reviews(mid: int, session: AsyncSession = SessionDep):
+        """The memory's review history: every verdict the model gave on it,
+        newest first. Every read of the memory shows only the newest as
+        `review`; this is where the earlier ones are. Empty for a memory
+        that has not been reviewed; 404 when there is no such memory."""
+        rows = await repo.reviews(session, mid)
+        if rows is None:
+            raise HTTPException(status_code=404, detail=f"Memory #{mid} not found")
+        return rows
+
     @app.patch("/memories/{mid}", response_model=UpdateResult, dependencies=guard)
     async def update_memory(mid: int, body: UpdateIn, session: AsyncSession = SessionDep,
                             embedder: Embedder | None = EmbedderDep):
@@ -546,12 +577,14 @@ def create_app(
         return await repo.list_tags(session)
 
     @app.patch("/tags/{name}", dependencies=guard)
-    async def patch_tag(name: str, body: TagPatch, session: AsyncSession = SessionDep):
+    async def patch_tag(name: str, body: TagPatch, session: AsyncSession = SessionDep,
+                        embedder: Embedder | None = EmbedderDep):
         sent = body.model_fields_set
         result = await repo.patch_tag(
             session, name,
             new_name=body.name if "name" in sent else None,
-            description=body.description if "description" in sent else None)
+            description=body.description if "description" in sent else None,
+            embedder=embedder)
         if result is None:
             raise HTTPException(status_code=404, detail=f"Tag '{name}' not found")
         return result
@@ -564,8 +597,10 @@ def create_app(
         return result
 
     @app.post("/tags/merge", dependencies=guard)
-    async def merge_tags(body: TagMergeIn, session: AsyncSession = SessionDep):
-        return await repo.merge_tags(session, body.sources, body.target, body.description)
+    async def merge_tags(body: TagMergeIn, session: AsyncSession = SessionDep,
+                         embedder: Embedder | None = EmbedderDep):
+        return await repo.merge_tags(session, body.sources, body.target, body.description,
+                                     embedder=embedder)
 
     @app.post("/tags/{name}/detach", dependencies=guard)
     async def detach_tag(name: str, body: TagDetachIn, session: AsyncSession = SessionDep):
@@ -589,12 +624,14 @@ def create_app(
     @app.post("/admin/reindex", dependencies=guard)
     async def reindex(session: AsyncSession = SessionDep,
                       embedder: Embedder | None = EmbedderDep):
-        """Give every row a vector from the current model: rows with none, and
-        rows embedded by another model. Returns how many rows changed."""
+        """Give every memory and every tag a vector from the current model:
+        rows with none, and rows embedded by another model. Returns how many
+        changed, as `{"updated": memories, "tags": tags}`. The model runs in
+        a thread, batch by batch, so other requests are answered meanwhile."""
         if embedder is None or embedder.model_name is None:
             reason = getattr(embedder, "reason", "the server has no embedding model")
             raise HTTPException(status_code=503, detail=f"Cannot reindex: {reason}")
-        return {"updated": await repo.reindex(session, embedder)}
+        return await repo.reindex(session, embedder)
 
     @app.post("/admin/review", dependencies=guard)
     async def review_catch_up(request: Request, background: BackgroundTasks,
@@ -624,9 +661,11 @@ def create_app(
     @app.post("/admin/review/{mid}", response_model=ReviewOut, dependencies=guard)
     async def review_memory(mid: int, request: Request,
                             reviewer: Reviewer | None = ReviewerDep):
-        """Run the review for one memory now, replacing any earlier verdict, and
-        return the new one. 503 when the server has no review model, 404 when
-        there is no such memory, 502 when the model gave no usable answer."""
+        """Run the review for one memory now and return the new verdict. It is
+        stored as one more row of the memory's history, next to the earlier
+        ones, and every read shows it from now on. 503 when the server has no
+        review model, 404 when there is no such memory, 502 when the model
+        gave no usable answer (then the earlier verdict still shows)."""
         if not _has_model(reviewer):
             reason = getattr(reviewer, "reason", "the server has no review model")
             raise HTTPException(status_code=503, detail=f"Cannot review: {reason}")

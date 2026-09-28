@@ -74,10 +74,12 @@ Without it, `semantic` answers with an error that says so and `hybrid` falls bac
 keyword. Two environment variables control the model, both read by the server at
 start: `AGENT_MEMORY_EMBED_MODEL` (default `BAAI/bge-small-en-v1.5`; `off` turns it
 off) and `AGENT_MEMORY_EMBED_CACHE` (where the model files are stored; default
-`.cache/fastembed` under the repo root). `memory reindex` gives every memory that has
-no vector, or a vector from another model, a vector from the current model. The server
-also runs this once at start, so after installing the model, or switching to another,
-a restart is enough.
+`.cache/fastembed` under the repo root). `memory reindex` gives every memory, and
+every tag, that has no vector, or a vector from another model, a vector from the
+current model, and prints both counts; a tag's vector is what the review uses to pick
+the tags it offers. The model runs in a thread, so the server answers other requests
+meanwhile. The server also runs this once at start, so after installing the model, or
+switching to another, a restart is enough.
 
 **Adding** checks the entry. A new memory whose meaning is nearly the same as one
 already in the same project (cosine 0.92 or above) is refused and nothing is stored:
@@ -95,15 +97,18 @@ block; the memory is stored either way.
 it against the five rules in the skill. The model answers `approve`, `reject` with the
 number of the rule the entry breaks (or the id of the memory it repeats), or `rewrite`
 with a suggested text and suggested tags. `AGENT_MEMORY_REVIEW`, read by the server at
-start, picks the mode: `off` (the default) asks no model; `warn` stores the memory,
-answers, and asks the model afterwards, so the verdict is advice only; `enforce` asks
-the model before storing, and a `reject` or `rewrite` refuses the write. The model runs
-on any Ollama server: `AGENT_MEMORY_REVIEW_URL` is its address, for example
+start, picks the mode: `off` (the default) asks no model; `flag` stores the memory,
+answers, and asks the model afterwards, so the verdict is advice only; `refuse` asks
+the model before storing, and a `reject` or `rewrite` refuses the write. The old names
+`warn` and `enforce` still work for one release and mean `flag` and `refuse`; the server
+logs one line asking for the new name. The model runs on any Ollama server: `AGENT_MEMORY_REVIEW_URL` is its address, for example
 `http://192.168.1.20:11434`, `AGENT_MEMORY_REVIEW_MODEL` names the model to ask (default
 `qwen3:14b`), and `AGENT_MEMORY_REVIEW_TIMEOUT` is how many seconds to wait for an answer
-(default 30). In warn mode the verdict shows as a `review:` line on `show`, `query` and
+(default 30). In flag mode the verdict shows as a `review:` line on `show`, `query` and
 `search`, for example `review: reject, rule 2: <reason>`; a rewrite adds the suggested
-text under `suggested:` and a `suggested tags:` line. `memory review` lists the memories
+text under `suggested:` and a `suggested tags:` line. A memory keeps every verdict it
+ever got (a re-review adds one, never replaces one); `memory show <id> --reviews` prints
+them all under the memory, oldest first, each with its date. `memory review` lists the memories
 with a reject or rewrite verdict, newest first (`--project`, `--verdict`, `--limit`,
 `--all`); `memory review --catch-up` reviews the memories written while the model was
 off, oldest first, one after another. Every memory also carries a review status, printed
@@ -118,14 +123,14 @@ the old one's says `superseded by #<id>`, and `--current` on `query` and `search
 (`current=true` on the API and the MCP tools) hides the superseded ones; off by default,
 so nothing disappears on its own. An entry that repeats an older memory and adds to it
 gets a `rewrite` whose text is the old and the new merged, with `duplicate_of` the old
-id: in warn mode the new memory is stored and flagged with that suggestion; in enforce
+id: in flag mode the new memory is stored and flagged with that suggestion; in refuse
 mode the write is refused and the CLI ends with `Apply it with 'memory update <old id>'
 instead of adding.` The model never changes or removes a memory; the writer applies a
-merge. In enforce mode a reject or rewrite refuses the write and nothing is stored: the API
+merge. In refuse mode a reject or rewrite refuses the write and nothing is stored: the API
 answers `422` with the verdict and the suggestion, the CLI prints `✗ Review: rewrite,
 rule 3: <reason>`, the suggestion, and `Fix the entry, or pass --force to store it as
 written.` and exits with code 4, and the MCP tool returns `{"error": "review", ...}`.
-`--force` stores the entry anyway; the review then runs after the write, as in warn mode.
+`--force` stores the entry anyway; the review then runs after the write, as in flag mode.
 A model that is off, unreachable or slow never blocks a write: the memory is stored
 without a verdict and the server logs one line. The server also checks on its own
 whether the model is back: every `AGENT_MEMORY_REVIEW_POLL` seconds (default 300; 0 turns
@@ -166,7 +171,7 @@ change that lowers it fails the test; raise it when the prompt improves.
 | **CLI client** | `memory-cli` — a presentation layer over `ApiClient`. Stdlib-only, never opens a DB. | none |
 | **MCP client** | Same `ApiClient`, exposed as MCP tools over stdio. | `[mcp]` |
 | **Dashboard** | Vue 3 + Quasar single-page app, served by the API service under `/app`. | `web/` (Node) |
-| **Review model** | A model on an Ollama server (default `qwen3:14b`) that reads each new memory against the rules in the skill and answers approve, reject or rewrite. Off by default; `AGENT_MEMORY_REVIEW=warn` or `enforce` plus `AGENT_MEMORY_REVIEW_URL` turns it on. The call is plain `urllib`, so nothing extra is installed. | none |
+| **Review model** | A model on an Ollama server (default `qwen3:14b`) that reads each new memory against the rules in the skill and answers approve, reject or rewrite. Off by default; `AGENT_MEMORY_REVIEW=flag` or `refuse` plus `AGENT_MEMORY_REVIEW_URL` turns it on. The call is plain `urllib`, so nothing extra is installed. | none |
 | **Meaning vectors** | A small local model (`BAAI/bge-small-en-v1.5`, 384 numbers per vector) run inside the API service through fastembed. It serves `--mode semantic`, `--mode hybrid` and the duplicate check on add. Optional: `pip install -e ".[embed]"`; without it the service runs with no vectors. `AGENT_MEMORY_EMBED_MODEL=off` turns it off; `AGENT_MEMORY_EMBED_CACHE` sets where model files land (default `.cache/fastembed`). | `[embed]` |
 
 ### Endpoint & auth resolution (clients)
@@ -297,3 +302,41 @@ quick check of the script itself.
 python scripts/replay_write_checks.py --dsn postgresql://memory:memory@127.0.0.1:5434/memory
 python scripts/replay_write_checks.py --dsn ... --since 2026-09-01 --until 2026-09-30
 ```
+
+## Releasing
+
+The live service never runs from a working checkout. It runs from a second checkout,
+`~/workspace/agent-memory-live`, that is always on a tag, with its own `.venv` and its
+own `.env`. `scripts/deploy.sh` is the only thing that changes it. To release, tag the
+commit on `main`, push the tag, and deploy it:
+
+```bash
+git tag v0.3.0 && git push origin v0.3.0
+scripts/deploy.sh deploy v0.3.0
+```
+
+`deploy` stops if the release checkout has changed or untracked files. Then it writes a
+`pg_dump` of the database to `backups/` in the release checkout and prints the row
+counts, fetches and checks out the tag, installs `.[server,mcp,embed]` into the release
+`.venv`, runs `alembic upgrade head`, prints the row counts again and stops if they
+changed, restarts the `agent-memory` user unit, waits for `/health`, and prints the
+reindex and poll lines from the log. `scripts/deploy.sh rollback v0.2.0` does the same
+in the other direction: it runs `alembic downgrade` to the schema of that tag first,
+then checks the tag out. `scripts/deploy.sh status` shows the tag the release checkout
+is on, the unit state and the health answer. `--release <path>` and `--unit <name>`
+point at another checkout or unit, `--dsn` names the database when it is not in the
+release `.env`, and `--no-restart` stops after the migration.
+
+The first time, create the release checkout and install the unit:
+
+```bash
+git clone git@github.com:kdop/agent-memory.git ~/workspace/agent-memory-live
+cp .env ~/workspace/agent-memory-live/.env          # the live DSN, token and port
+cp docs/agent-memory.service ~/.config/systemd/user/agent-memory.service
+systemctl --user daemon-reload
+scripts/deploy.sh deploy v0.3.0                      # creates the .venv, migrates, starts the unit
+systemctl --user enable agent-memory
+```
+
+Run the script from a working checkout; it refuses to run from the release checkout
+itself.

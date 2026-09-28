@@ -11,8 +11,8 @@ link (both memories stay); an entry that repeats one and adds to it gets a
 rewrite with the merged text and `duplicate_of` that id, for the writer to
 apply to the old memory. The model never changes a stored memory.
 
-In `warn` mode it is advice only: nothing is refused or changed because of
-it, and the write never waits for it. In `enforce` mode the model reads the
+In `flag` mode it is advice only: nothing is refused or changed because of
+it, and the write never waits for it. In `refuse` mode the model reads the
 entry before it is stored, and a reject or rewrite verdict refuses the write
 (HTTP 422 with the verdict and the suggestion); `force=true` stores it anyway.
 In both modes a model that does not answer never blocks a write: the memory
@@ -20,7 +20,9 @@ is stored and one log line says the review did not run.
 
 Settings, read once when `make_reviewer()` runs at server start:
 
-    AGENT_MEMORY_REVIEW          `off` (default), `warn` or `enforce`
+    AGENT_MEMORY_REVIEW          `off` (default), `flag` or `refuse`; the old
+                                 names `warn` and `enforce` still work for one
+                                 release, with one log line
     AGENT_MEMORY_REVIEW_URL      an Ollama server, for example http://host:11434
     AGENT_MEMORY_REVIEW_MODEL    the model to ask (default qwen3:14b)
     AGENT_MEMORY_REVIEW_TIMEOUT  seconds to wait for an answer (default 30)
@@ -91,9 +93,12 @@ def status_for(verdict: str) -> str:
 
 
 # The values AGENT_MEMORY_REVIEW may take. `off` means no model is asked;
-# `warn` stores the verdict after the write; `enforce` refuses a write the
+# `flag` stores the verdict after the write; `refuse` refuses a write the
 # model rejects or wants rewritten.
-MODES = ("off", "warn", "enforce")
+MODES = ("off", "flag", "refuse")
+# The names the modes had before: accepted for one release, with one log
+# line saying which name to use now.
+OLD_MODE_NAMES = {"warn": "flag", "enforce": "refuse"}
 
 
 @dataclass(frozen=True)
@@ -423,13 +428,27 @@ def _is_int(v) -> bool:
 
 
 # ---- setup -----------------------------------------------------------------
+def _mode_from(raw: str) -> str:
+    """`raw` (the setting, already stripped and lowered) as one of `MODES`:
+    an old name is mapped to its new one, and anything else that is not a
+    mode counts as `off`. Logs nothing; `review_mode` does that."""
+    if raw in OLD_MODE_NAMES:
+        return OLD_MODE_NAMES[raw]
+    return raw if raw in MODES else "off"
+
+
 def review_mode() -> str:
     """The mode AGENT_MEMORY_REVIEW asks for, as one of `MODES`. Unset, blank
-    or a value that is not one of them counts as `off`. Whether the server
-    can act on it is `make_reviewer`'s call: `warn` and `enforce` need a
-    server address too."""
-    mode = os.environ.get("AGENT_MEMORY_REVIEW", "off").strip().lower()
-    return mode if mode in MODES else "off"
+    or a value that is not one of them counts as `off`. An old name (`warn`,
+    `enforce`) still counts as its new one, with one log line that says so.
+    Whether the server can act on the mode is `make_reviewer`'s call: `flag`
+    and `refuse` need a server address too."""
+    raw = os.environ.get("AGENT_MEMORY_REVIEW", "off").strip().lower()
+    mode = _mode_from(raw)
+    if raw in OLD_MODE_NAMES:
+        log.warning("AGENT_MEMORY_REVIEW=%s is an old name and will stop working; "
+                    "use %s", raw, mode)
+    return mode
 
 
 def review_poll() -> float:
@@ -452,7 +471,9 @@ def make_reviewer() -> Reviewer:
     logs one line saying why, when review is off, the setting is not a known
     value, or no server address is given."""
     raw = os.environ.get("AGENT_MEMORY_REVIEW", "off").strip().lower()
-    mode = review_mode()
+    # Not `review_mode()`: the lifespan calls that too, and the old-name
+    # line should be logged once per start, not twice.
+    mode = _mode_from(raw)
     if mode == "off":
         if raw and raw != "off":
             reason = (f"review is off: AGENT_MEMORY_REVIEW={raw!r} is not one of "
@@ -463,7 +484,7 @@ def make_reviewer() -> Reviewer:
         return NullReviewer("review is off (AGENT_MEMORY_REVIEW=off)")
     url = os.environ.get("AGENT_MEMORY_REVIEW_URL", "").strip()
     if not url:
-        reason = (f"review is off: AGENT_MEMORY_REVIEW={mode} but "
+        reason = (f"review is off: AGENT_MEMORY_REVIEW={raw} but "
                   "AGENT_MEMORY_REVIEW_URL is not set")
         log.warning(reason)
         return NullReviewer(reason)

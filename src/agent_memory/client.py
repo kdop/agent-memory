@@ -174,7 +174,7 @@ class ApiClient:
         """(id, warnings): warnings is the list of rule names the entry breaks
         (see server/checks.py). The memory is stored either way, unless the
         server finds a near-duplicate in the same project (then it raises
-        `DuplicateMemory`) or its review model, in enforce mode, rejects the
+        `DuplicateMemory`) or its review model, in refuse mode, rejects the
         entry or wants it rewritten (then `ReviewRefused`); in both cases
         nothing is stored. `force=True` skips both checks."""
         body = {
@@ -226,6 +226,13 @@ class ApiClient:
         status, data = self._call("GET", f"/memories/{mid}")
         return None if status == 404 else data
 
+    def reviews(self, mid):
+        """The memory's review history: every verdict the model gave on it,
+        newest first, each with `created_at`. An empty list for a memory
+        that has not been reviewed; None when there is no such memory."""
+        status, data = self._call("GET", f"/memories/{mid}/reviews")
+        return None if status == 404 else (data or [])
+
     def update(self, mid, *, content=None, project=None, mtype=None,
                set_tags=None, add_tags=None, remove_tags=None):
         body = {}
@@ -265,10 +272,11 @@ class ApiClient:
         return data
 
     def reindex(self):
-        """Ask the server to give every memory a vector from its current model.
-        Returns the number of rows updated."""
+        """Ask the server to give every memory and every tag a vector from its
+        current model. Returns `{"updated": memories, "tags": tags}`: how
+        many rows of each changed."""
         _, data = self._call("POST", "/admin/reindex")
-        return data["updated"]
+        return data
 
     def flagged(self, project=None, verdict=None, status=None, limit=None):
         """The memories the review flagged, newest review first, each with its

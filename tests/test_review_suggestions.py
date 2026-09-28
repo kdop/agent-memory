@@ -2,8 +2,9 @@
 
 When the model says rewrite it also names tags for the new text, picked from
 a list of existing tags the server offers it: the ten closest in meaning to
-the entry (by cosine over `name: description`, embedded on the fly), or the
-ten most used when the server has no embedding model. Names off the list are
+the entry (by cosine of the entry against the vector each tag stores for its
+`name: description`), or the ten most used when the server has no embedding
+model. Names off the list are
 dropped before anything is stored. The CLI prints the suggestion under the
 verdict; nothing is applied.
 
@@ -166,7 +167,7 @@ async def test_offered_tags_are_the_nearest_by_meaning_capped_at_ten():
     assert set(offered) <= {name for name, _ in tags}
 
 
-async def test_offered_tags_are_embedded_as_name_and_description_on_the_fly():
+async def test_offered_tags_come_from_stored_vectors_and_the_review_embeds_only_the_entry():
     class Recording(FakeEmbedder):
         seen = []
 
@@ -180,10 +181,15 @@ async def test_offered_tags_are_embedded_as_name_and_description_on_the_fly():
             await a.client.post("/memories", json={
                 "content": f"carrier for {name}", "project": "alpha", "agent": "tester",
                 "tags": [{"name": name, "description": desc}]})
+        # Each tag was embedded once, as `name: description`, when it was created.
+        assert ["db: the database layer"] in Recording.seen
+        assert ["ui: the dashboard"] in Recording.seen
+        Recording.seen.clear()
         await a.add("Chose Postgres for the store.", project="alpha")
-    # One call for the review: the entry first, then each tag as `name: description`.
-    assert Recording.seen[-1] == ["Chose Postgres for the store.",
-                                  "db: the database layer", "ui: the dashboard"]
+    # The add embeds the entry for the duplicate check and for the row; the
+    # review embeds it once more and reads the tag vectors from the table.
+    # No call carries a tag's text.
+    assert Recording.seen == [["Chose Postgres for the store."]] * 3
     _, _, offered = fake.calls[-1]
     assert sorted(offered) == ["db", "ui"]
 

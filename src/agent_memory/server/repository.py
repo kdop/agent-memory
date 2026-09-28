@@ -8,12 +8,13 @@ Full-text search is the one place raw Postgres shows through (`plainto_tsquery`,
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import delete as sql_delete
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from .embedding import Embedder, cosine
 from .models import Memory, MemoryReview, MemoryTag, Tag
@@ -22,10 +23,10 @@ from .review import NEIGHBOUR_COUNT, STATUSES, TAG_COUNT, UNVERIFIED, VERIFIED, 
 # ts_headline markers match the old snippet() output so clients render identically.
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
 
-# What every memory read loads with it: its tags, its review and the memories
-# that supersede it, each in one extra query per result set, so `_dump` never
-# triggers a lazy load.
-_LOAD = (selectinload(Memory.tags), selectinload(Memory.review),
+# What every memory read loads with it: its tags, its reviews (newest first;
+# a read shows the first) and the memories that supersede it, each in one
+# extra query per result set, so `_dump` never triggers a lazy load.
+_LOAD = (selectinload(Memory.tags), selectinload(Memory.reviews),
          selectinload(Memory.superseded_by_rows))
 
 # A new memory whose vector scores this close to one already in its project is
@@ -53,13 +54,34 @@ def _as_dt(v):
     return datetime.fromisoformat(str(v))
 
 
-def _embed(embedder: Embedder | None, content: str) -> tuple[list[float] | None, str | None]:
+async def _embed_many(embedder: Embedder, texts: list[str]) -> list[list[float]]:
+    """Every call to the model goes through here, in a worker thread. The
+    model takes tens of milliseconds per text and hundreds per batch, all
+    of it CPU; on the event loop that time would stall every other request
+    (a `/health` call sat for a second during the catch-up before this)."""
+    return await asyncio.to_thread(embedder.embed, texts)
+
+
+async def _embed(embedder: Embedder | None, content: str) -> tuple[list[float] | None, str | None]:
     """The vector and model name to store for `content`. Both are None when there
     is no embedder or it has no model (a `NullEmbedder`), so a server without the
     model still writes memories, just without vectors."""
     if embedder is None or embedder.model_name is None:
         return None, None
-    return embedder.embed([content])[0], embedder.model_name
+    return (await _embed_many(embedder, [content]))[0], embedder.model_name
+
+
+def _tag_text(tag: Tag) -> str:
+    """What a tag's vector is made of: its name and its description in one line."""
+    return f"{tag.name}: {tag.description}"
+
+
+async def _embed_tag(tag: Tag, embedder: Embedder | None) -> None:
+    """Store the vector of `_tag_text(tag)` on the tag. Without a model the
+    tag keeps what it has (None on a new tag): reindex fills it later."""
+    vector, model = await _embed(embedder, _tag_text(tag))
+    if vector is not None:
+        tag.embedding, tag.embedding_model = vector, model
 
 
 def _dump_review(r: MemoryReview | None, supersedes: int | None = None) -> dict | None:
@@ -70,6 +92,16 @@ def _dump_review(r: MemoryReview | None, supersedes: int | None = None) -> dict 
     return {"verdict": r.verdict, "rule": r.rule, "reason": r.reason,
             "rewrite": r.rewrite, "duplicate_of": r.duplicate_of,
             "tags": list(r.tags or []), "supersedes": supersedes}
+
+
+def _dump_history(r: MemoryReview) -> dict:
+    """One entry of a memory's review history: the verdict and when it was
+    given. No `supersedes`: the link lives on the memory and follows the
+    newest verdict, so an older entry has none to show."""
+    return {"created_at": r.created_at.isoformat(sep=" ", timespec="seconds"),
+            "verdict": r.verdict, "rule": r.rule, "reason": r.reason,
+            "rewrite": r.rewrite, "duplicate_of": r.duplicate_of,
+            "tags": list(r.tags or [])}
 
 
 def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> dict:
@@ -106,18 +138,22 @@ def _check_status(status: str | None) -> None:
         raise ValueError(f"status must be one of {', '.join(STATUSES)} (got {status!r})")
 
 
-async def _get_or_create_tag(session: AsyncSession, name: str, description: str | None) -> Tag:
+async def _get_or_create_tag(session: AsyncSession, name: str, description: str | None,
+                             embedder: Embedder | None = None) -> Tag:
     """Reuse an existing tag (updating its descriptor only when a new one is given),
     or create it. A brand-new tag with no descriptor defaults to its own name — a
-    descriptor is required in the schema but never required from the caller."""
+    descriptor is required in the schema but never required from the caller.
+    A new tag, or a new descriptor, gets its vector here (see `_embed_tag`)."""
     tag = (
         await session.execute(select(Tag).where(func.lower(Tag.name) == func.lower(name)))
     ).scalar_one_or_none()
     if tag is not None:
         if description and description != tag.description:
             tag.description = description
+            await _embed_tag(tag, embedder)
         return tag
     tag = Tag(name=name, description=description or name)
+    await _embed_tag(tag, embedder)
     session.add(tag)
     await session.flush()
     return tag
@@ -125,12 +161,12 @@ async def _get_or_create_tag(session: AsyncSession, name: str, description: str 
 
 # ---- operations -----------------------------------------------------------
 async def add(session, content, agent, project, tags, mtype, embedder=None) -> int:
-    embedding, model = _embed(embedder, content)
+    embedding, model = await _embed(embedder, content)
     m = Memory(content=content, agent=agent, project=project, type=mtype,
                embedding=embedding, embedding_model=model)
     session.add(m)  # add before wiring tags so the back-reference resolves cleanly
     for spec in tags:
-        m.tags.append(await _get_or_create_tag(session, spec.name, spec.description))
+        m.tags.append(await _get_or_create_tag(session, spec.name, spec.description, embedder))
     await session.flush()
     return m.id
 
@@ -177,7 +213,7 @@ async def _scored_ids(session, embedder: Embedder, text, filters, k) -> list[tup
     """The search-by-meaning first step: embed `text`, take the candidates
     that pass the `_search_filters` in `filters`, and return the best `k`
     as `(id, score)` (see `_score`)."""
-    query_vec = embedder.embed([text])[0]
+    query_vec = (await _embed_many(embedder, [text]))[0]
     stmt = _search_filters(_candidates(embedder.model_name), **filters)
     return await _score(session, stmt, query_vec, k)
 
@@ -208,7 +244,7 @@ async def find_duplicate(session, embedder, content, project) -> tuple[int, floa
     `DUPLICATE_THRESHOLD`. Without a model (no embedder, or a `NullEmbedder`)
     there is nothing to compare, so it returns None and nothing is ever
     refused."""
-    vector, model = _embed(embedder, content)
+    vector, model = await _embed(embedder, content)
     if vector is None:
         return None
     # Only the best id and score are needed, so this is the one query.
@@ -368,15 +404,15 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
         m.content = content
         # New text, new vector. Without a model this clears the old one, since a
         # vector of the old text would be wrong for the new one.
-        m.embedding, m.embedding_model = _embed(embedder, content)
-        # New text, new check too: the verdict was about the old text. The
-        # memory goes back to unverified, and its review row and its
-        # `supersedes` link (which that verdict set) go with it, so the next
-        # catch-up reads the new text and sets the link again if it still
-        # holds. A change of tags or project alone leaves all three as they
-        # are.
+        m.embedding, m.embedding_model = await _embed(embedder, content)
+        # New text, new check too: every verdict was about the old text. The
+        # memory goes back to unverified, and its review rows and its
+        # `supersedes` link (which the newest verdict set) go with it, so the
+        # next catch-up reads the new text and sets the link again if it
+        # still holds. A change of tags or project alone leaves all three as
+        # they are.
         m.review_status = UNVERIFIED
-        m.review = None
+        m.reviews.clear()
         m.supersedes = None
         changes.append("content")
     if project is not None:
@@ -386,14 +422,15 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
         m.type = mtype or None
         changes.append(f"type → {m.type}")
     if set_tags is not None:
-        m.tags = [await _get_or_create_tag(session, s.name, s.description) for s in set_tags]
+        m.tags = [await _get_or_create_tag(session, s.name, s.description, embedder)
+                  for s in set_tags]
         names = [t.name for t in m.tags]
         changes.append(f"tags set to: {', '.join(names) if names else '(none)'}")
     if add_tags:
         have = {t.id for t in m.tags}
         added = []
         for s in add_tags:
-            tag = await _get_or_create_tag(session, s.name, s.description)
+            tag = await _get_or_create_tag(session, s.name, s.description, embedder)
             if tag.id not in have:
                 m.tags.append(tag)
                 have.add(tag.id)
@@ -552,11 +589,13 @@ async def _tag_count(session, tag_id) -> int:
         select(func.count()).select_from(MemoryTag).where(MemoryTag.tag_id == tag_id))).scalar()
 
 
-async def _reassign(session, sources, target, description=None) -> int:
+async def _reassign(session, sources, target, description=None, embedder=None) -> int:
     """Move every memory link from each source tag to `target`, delete the sources.
-    Returns the number of (memory, source) links reassigned."""
-    if description:
+    A new `description` on the target gets a new vector. Returns the number of
+    (memory, source) links reassigned."""
+    if description and description != target.description:
         target.description = description
+        await _embed_tag(target, embedder)
     affected = 0
     for src in sources:
         mids = (await session.execute(
@@ -572,19 +611,23 @@ async def _reassign(session, sources, target, description=None) -> int:
     return affected
 
 
-async def patch_tag(session, name, *, new_name=None, description=None) -> dict | None:
+async def patch_tag(session, name, *, new_name=None, description=None,
+                    embedder=None) -> dict | None:
+    """Rename a tag, change its description, or both. A new description gets
+    a new vector; a rename alone keeps the one it has."""
     tag = await _find_tag(session, name)
     if tag is None:
         return None
     if new_name and new_name.lower() != tag.name.lower():
         collision = await _find_tag(session, new_name)
         if collision is not None:  # rename onto an existing tag = merge into it
-            await _reassign(session, [tag], collision, description)
+            await _reassign(session, [tag], collision, description, embedder)
             return {"name": collision.name, "description": collision.description,
                     "count": await _tag_count(session, collision.id)}
         tag.name = new_name
-    if description is not None:
+    if description is not None and (description or tag.name) != tag.description:
         tag.description = description or tag.name
+        await _embed_tag(tag, embedder)
     await session.flush()
     return {"name": tag.name, "description": tag.description, "count": await _tag_count(session, tag.id)}
 
@@ -598,18 +641,16 @@ async def delete_tag(session, name) -> dict | None:
     return {"removed": tag.name, "memories_affected": affected}
 
 
-async def merge_tags(session, sources, target, description=None) -> dict:
+async def merge_tags(session, sources, target, description=None, embedder=None) -> dict:
     tgt = await _find_tag(session, target)
     if tgt is None:
-        tgt = Tag(name=target, description=description or target)
-        session.add(tgt)
-        await session.flush()
+        tgt = await _get_or_create_tag(session, target, description, embedder)
     src_tags = []
     for s in sources:
         t = await _find_tag(session, s)
         if t is not None and t.id != tgt.id:
             src_tags.append(t)
-    affected = await _reassign(session, src_tags, tgt, description)
+    affected = await _reassign(session, src_tags, tgt, description, embedder)
     return {"target": tgt.name, "memories_affected": affected, "removed": [t.name for t in src_tags]}
 
 
@@ -651,13 +692,13 @@ async def review_input(session, mid: int) -> tuple[dict, list[dict]] | None:
 async def neighbours_for(session, embedder: Embedder | None, content: str,
                          project: str | None) -> list[dict]:
     """The neighbours `review_input` would give a memory with this `content`
-    in this `project`, before it is stored: the enforce mode reviews the
+    in this `project`, before it is stored: the refuse mode reviews the
     entry first and writes it only when the model approves. The content is
     embedded here and now, and the same rules apply: same project (no
     project matches no project), verified memories only, same model, best
     first, at most `NEIGHBOUR_COUNT`. Without a model there are no
     neighbours."""
-    vector, model = _embed(embedder, content)
+    vector, model = await _embed(embedder, content)
     if vector is None:
         return []
     return await _nearest(session, vector, model, project)
@@ -683,39 +724,57 @@ async def _nearest(session, vector, model, project, exclude_id=None) -> list[dic
 FLAGGED_VERDICTS = ("reject", "rewrite")
 
 
+def _newest_reviews():
+    """The newest review row of each memory, as a `MemoryReview` alias to
+    join on. One `DISTINCT ON (memory_id)` over the table, newest first by
+    `created_at`, then `id`. The one place a query looks past the memory's
+    own `review_status` into the rows: everything that reads a verdict from
+    the table joins this, so no listing ever sees an older one."""
+    newest = (
+        select(MemoryReview)
+        .distinct(MemoryReview.memory_id)
+        .order_by(MemoryReview.memory_id, MemoryReview.created_at.desc(), MemoryReview.id.desc())
+        .subquery("newest_reviews")
+    )
+    return aliased(MemoryReview, newest)
+
+
 def _flagged_filters(stmt, *, project=None, verdict=None, status=None):
-    """The WHERE clauses of a review listing. Without `status`: joined to the
-    review row and kept to the flagged verdicts (or only `verdict`). With
-    `status`: kept to the memories with that review status (an outer join, so
-    unverified memories, which have no row, are listed too), and to `verdict`
-    when given. `project` narrows either. A `verdict` that is not one of the
-    flagged ones, or a `status` that is not one of `STATUSES`, is a caller's
-    error."""
+    """The WHERE clauses of a review listing, and the alias of the review row
+    they join (see `_newest_reviews`), as `(stmt, review)`. Without `status`:
+    joined to the newest review row and kept to the flagged verdicts (or only
+    `verdict`). With `status`: kept to the memories with that review status
+    (an outer join, so unverified memories, which have no row, are listed
+    too), and to `verdict` when given. `project` narrows either. A `verdict`
+    that is not one of the flagged ones, or a `status` that is not one of
+    `STATUSES`, is a caller's error."""
     if verdict is not None and verdict not in FLAGGED_VERDICTS:
         raise ValueError(f"verdict must be one of {', '.join(FLAGGED_VERDICTS)} (got {verdict!r})")
     _check_status(status)
+    review = _newest_reviews()
+    on = review.memory_id == Memory.id
     if status is None:
         wanted = FLAGGED_VERDICTS if verdict is None else (verdict,)
-        stmt = stmt.join(Memory.review).where(MemoryReview.verdict.in_(wanted))
+        stmt = stmt.join(review, on).where(review.verdict.in_(wanted))
     else:
-        stmt = stmt.outerjoin(Memory.review).where(Memory.review_status == status)
+        stmt = stmt.outerjoin(review, on).where(Memory.review_status == status)
         if verdict is not None:
-            stmt = stmt.where(MemoryReview.verdict == verdict)
+            stmt = stmt.where(review.verdict == verdict)
     if project:
         stmt = stmt.where(Memory.project == project)
-    return stmt
+    return stmt, review
 
 
 async def flagged(session, *, project=None, verdict=None, status=None, limit=None) -> list[dict]:
-    """The memories the review flagged: those whose review says reject or
-    rewrite, or only `verdict` when given, newest review first (ties: newest
-    memory first, then by id). With `status`, the memories with that review
-    status instead (`unverified` ones have no review, so they come newest
-    memory first). Same shape as `query`, the review included. `project`
-    narrows to one project. `limit` of 0 or None means all."""
-    stmt = _flagged_filters(select(Memory).options(*_LOAD), project=project, verdict=verdict,
-                            status=status)
-    stmt = stmt.order_by(MemoryReview.created_at.desc().nulls_last(),
+    """The memories the review flagged: those whose newest review says reject
+    or rewrite, or only `verdict` when given, newest review first (ties:
+    newest memory first, then by id). With `status`, the memories with that
+    review status instead (`unverified` ones have no review, so they come
+    newest memory first). Same shape as `query`, the review included.
+    `project` narrows to one project. `limit` of 0 or None means all."""
+    stmt, review = _flagged_filters(select(Memory).options(*_LOAD), project=project,
+                                    verdict=verdict, status=status)
+    stmt = stmt.order_by(review.created_at.desc().nulls_last(),
                          Memory.timestamp.desc(), Memory.id.desc())
     if limit:
         stmt = stmt.limit(int(limit))
@@ -725,8 +784,8 @@ async def flagged(session, *, project=None, verdict=None, status=None, limit=Non
 
 async def count_flagged(session, *, project=None, verdict=None, status=None) -> int:
     """How many memories `flagged` would list with the same filters and no limit."""
-    stmt = _flagged_filters(select(func.count(Memory.id)), project=project, verdict=verdict,
-                            status=status)
+    stmt, _ = _flagged_filters(select(func.count(Memory.id)), project=project,
+                               verdict=verdict, status=status)
     return (await session.execute(stmt)).scalar()
 
 
@@ -747,14 +806,15 @@ async def unverified_ids(session, *, limit=None) -> list[int]:
 
 
 async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
-    """Store `verdict` as the review of memory `mid`, replacing any earlier
-    one, set the memory's `review_status` from it (`verified` for an
-    approve, `flagged` for a reject or rewrite) and its `supersedes` link
-    from `verdict.supersedes` (None clears an earlier link), and return the
-    API view of the review. `model` names the model that gave it. Raises
-    `LookupError` when there is no such memory, or when the verdict names
-    a memory to supersede that does not exist, and `ValueError` when it
-    names the memory itself."""
+    """Store `verdict` as a new review row of memory `mid`, keeping every
+    earlier one (a verdict is part of the timeline and is never rewritten),
+    set the memory's `review_status` from it (`verified` for an approve,
+    `flagged` for a reject or rewrite) and its `supersedes` link from
+    `verdict.supersedes` (None clears an earlier link), and return the API
+    view of the review. Both follow the newest row, which this one now is.
+    `model` names the model that gave it. Raises `LookupError` when there
+    is no such memory, or when the verdict names a memory to supersede that
+    does not exist, and `ValueError` when it names the memory itself."""
     memory = await session.get(Memory, mid)
     if memory is None:
         raise LookupError(f"Memory #{mid} not found")
@@ -765,20 +825,33 @@ async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
             raise LookupError(f"Memory #{verdict.supersedes} not found")
     memory.review_status = status_for(verdict.verdict)
     memory.supersedes = verdict.supersedes
-    row = await session.get(MemoryReview, mid)
-    if row is None:
-        row = MemoryReview(memory_id=mid)
-        session.add(row)
-    row.verdict = verdict.verdict
-    row.rule = verdict.rule
-    row.reason = verdict.reason
-    row.rewrite = verdict.rewrite
-    row.duplicate_of = verdict.duplicate_of
-    row.tags = list(verdict.tags) or None
-    row.model = model
-    row.created_at = datetime.now(timezone.utc)
+    row = MemoryReview(memory_id=mid, verdict=verdict.verdict, rule=verdict.rule,
+                       reason=verdict.reason, rewrite=verdict.rewrite,
+                       duplicate_of=verdict.duplicate_of, tags=list(verdict.tags) or None,
+                       model=model, created_at=datetime.now(timezone.utc))
+    session.add(row)
+    if "reviews" not in inspect(memory).unloaded:
+        # The memory's rows are loaded in this session: put the new one in
+        # front, where the newest goes, so a read here shows it without
+        # going back to the database.
+        memory.reviews.insert(0, row)
     await session.flush()
     return _dump_review(row, memory.supersedes)
+
+
+async def reviews(session, mid: int) -> list[dict] | None:
+    """Every review row of memory `mid`, newest first: the memory's review
+    history, each entry as `_dump_history` gives it. None when there is no
+    such memory; an empty list when it has not been reviewed."""
+    if await session.get(Memory, mid) is None:
+        return None
+    stmt = (
+        select(MemoryReview)
+        .where(MemoryReview.memory_id == mid)
+        .order_by(MemoryReview.created_at.desc(), MemoryReview.id.desc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [_dump_history(r) for r in rows]
 
 
 async def tags_for_review(session, embedder: Embedder | None, content: str,
@@ -786,48 +859,65 @@ async def tags_for_review(session, embedder: Embedder | None, content: str,
     """The names of the tags the reviewer may suggest for `content`: at most
     `limit` of the tags in use, best first.
 
-    With a model, best means closest in meaning: each tag's `name: description`
-    and the content are embedded here and now (nothing is stored) and ranked
-    by cosine, ties broken by name. Without a model (no embedder, or a
-    `NullEmbedder`) the most used tags come first, as `list_tags` orders
-    them."""
-    rows = await list_tags(session)
+    With a model, best means closest in meaning: the content is embedded
+    here (one call, in a thread) and ranked by cosine against the vector
+    each tag stores for its `name: description`, ties broken by name. A tag
+    with no vector, or one from another model, is left out until reindex
+    fills it. Without a model (no embedder, or a `NullEmbedder`) the most
+    used tags come first, as `list_tags` orders them."""
+    count = func.count(Memory.id)
+    stmt = (
+        select(Tag.name, Tag.embedding, Tag.embedding_model)
+        .join(Tag.memories)
+        .group_by(Tag.id)
+        .order_by(count.desc(), Tag.name)
+    )
+    rows = (await session.execute(stmt)).all()
     if not rows:
         return []
     if embedder is None or embedder.model_name is None:
-        return [r["name"] for r in rows[:limit]]
-    texts = [f"{r['name']}: {r['description'] or r['name']}" for r in rows]
-    query_vec, *tag_vecs = embedder.embed([content, *texts])
-    scored = [(cosine(query_vec, vec), r["name"]) for vec, r in zip(tag_vecs, rows)]
+        return [name for name, _, _ in rows[:limit]]
+    query_vec = (await _embed_many(embedder, [content]))[0]
+    model = embedder.model_name
+    scored = [(cosine(query_vec, list(vec)), name) for name, vec, stored_model in rows
+              if vec is not None and stored_model == model]
     scored.sort(key=lambda pair: (-pair[0], pair[1]))
     return [name for _, name in scored[:limit]]
 
 
 # ---- reindex: fill in missing or stale vectors -----------------------------
-async def reindex(session, embedder: Embedder | None, batch: int = 64) -> int:
-    """Give every row a vector from the current model.
+async def reindex(session, embedder: Embedder | None, batch: int = 64) -> dict:
+    """Give every memory, and every tag, a vector from the current model.
 
     Picks rows with no vector, or with a vector from another model, in id
-    order, `batch` rows at a time; embeds each batch with one call; writes the
-    vectors back. Returns the number of rows updated. Does nothing and returns
-    0 when there is no embedder or it has no model."""
+    order, `batch` rows at a time; embeds each batch with one call, in a
+    thread; writes the vectors back. Memories first, then tags. Returns
+    `{"updated": memories, "tags": tags}`, the counts of rows changed. Does
+    nothing, and returns zeros, when there is no embedder or it has no
+    model."""
     if embedder is None or embedder.model_name is None:
-        return 0
+        return {"updated": 0, "tags": 0}
     model = embedder.model_name
-    stale = or_(Memory.embedding.is_(None), Memory.embedding_model.is_distinct_from(model))
-    updated = 0
-    last_id = 0
-    while True:
-        # Walk by id, not by offset: rows already done drop out of the filter,
-        # so an offset would skip rows.
-        stmt = (select(Memory).where(stale, Memory.id > last_id)
-                .order_by(Memory.id).limit(int(batch)))
-        rows = (await session.execute(stmt)).scalars().all()
-        if not rows:
-            return updated
-        vectors = embedder.embed([m.content for m in rows])
-        for m, vec in zip(rows, vectors):
-            m.embedding, m.embedding_model = vec, model
-        await session.flush()
-        updated += len(rows)
-        last_id = rows[-1].id
+
+    async def fill(table, text_of) -> int:
+        stale = or_(table.embedding.is_(None), table.embedding_model.is_distinct_from(model))
+        updated = 0
+        last_id = 0
+        while True:
+            # Walk by id, not by offset: rows already done drop out of the
+            # filter, so an offset would skip rows.
+            stmt = (select(table).where(stale, table.id > last_id)
+                    .order_by(table.id).limit(int(batch)))
+            rows = (await session.execute(stmt)).scalars().all()
+            if not rows:
+                return updated
+            vectors = await _embed_many(embedder, [text_of(r) for r in rows])
+            for row, vec in zip(rows, vectors):
+                row.embedding, row.embedding_model = vec, model
+            await session.flush()
+            updated += len(rows)
+            last_id = rows[-1].id
+
+    memories = await fill(Memory, lambda m: m.content)
+    tags = await fill(Tag, _tag_text)
+    return {"updated": memories, "tags": tags}

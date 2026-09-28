@@ -6,17 +6,17 @@ request; the old one reads as `superseded_by` the newest such memory. Both
 stay in the timeline, sorted as before; `current=true` (`--current`) hides
 the superseded ones and is off by default. A new entry that repeats an older
 one and adds to it gets a `rewrite` verdict with the merged text and
-`duplicate_of` the old id: in warn mode the memory is stored and flagged with
-that suggestion, in enforce mode the write is refused and the message says to
+`duplicate_of` the old id: in flag mode the memory is stored and flagged with
+that suggestion, in refuse mode the write is refused and the message says to
 apply the merged text to the old memory with `memory update`. The model never
 changes a stored memory.
 
 Layers: the verdict and the parser; the prompt; the link stored from a
-verdict on the three paths (warn background, enforce, catch-up) and on a
+verdict on the three paths (flag background, refuse, catch-up) and on a
 re-review, never from a request; `superseded_by`; deletion and the update
 reset; the CLI header and the drivers; `--current` on query and on each
-search mode on the three surfaces; the merge suggestion in warn and in
-enforce mode; the real model once, under the `review` marker. The migration
+search mode on the three surfaces; the merge suggestion in flag and in
+refuse mode; the real model once, under the `review` marker. The migration
 is in tests/test_migration.py.
 """
 
@@ -193,7 +193,7 @@ def test_system_prompt_asks_for_supersedes_and_lists_the_two_cases():
 
 
 # ── the link is stored from a verdict, on every path ─────────────────────────
-async def test_warn_stores_the_link_from_the_background_verdict():
+async def test_flag_mode_stores_the_link_from_the_background_verdict():
     fake = FakeReviewer(APPROVE)
     async with _App(reviewer=fake) as a:
         old = (await a.add(OLD))["id"]
@@ -224,9 +224,9 @@ async def test_warn_stores_the_link_from_the_background_verdict():
     assert await _links_in_db() == [(old, None), (new, old)]
 
 
-async def test_enforce_stores_the_link_with_the_write():
+async def test_refuse_mode_stores_the_link_with_the_write():
     fake = FakeReviewer(APPROVE)
-    async with _App(reviewer=fake, review_mode="enforce") as a:
+    async with _App(reviewer=fake, review_mode="refuse") as a:
         old = (await a.add(OLD))["id"]
         fake.verdict = SUPERSEDE
         resp = await _post(a, NEW)
@@ -565,8 +565,8 @@ def test_api_client_passes_current_through(live_server):
     assert api.get(2)["supersedes"] == 1 and api.get(1)["superseded_by"] == 2
 
 
-# ── the merge suggestion in warn mode ────────────────────────────────────────
-async def test_warn_stores_a_merge_flagged_with_the_suggestion_and_changes_nothing():
+# ── the merge suggestion in flag mode ────────────────────────────────────────
+async def test_flag_mode_stores_a_merge_flagged_with_the_suggestion_and_changes_nothing():
     fake = FakeReviewer(APPROVE)
     async with _App(reviewer=fake) as a:
         old = (await a.add("Chose Postgres, because several agents write at once.",
@@ -616,10 +616,10 @@ def test_cli_shows_the_merge_suggestion_and_the_writer_applies_it(live_server):
     assert cli.get(2).content.startswith("Chose Postgres, because several agents write at once; the pool")
 
 
-# ── the merge in enforce mode ────────────────────────────────────────────────
-async def test_enforce_refuses_a_merge_with_the_old_id_and_the_merged_text():
+# ── the merge in refuse mode ────────────────────────────────────────────────
+async def test_refuse_mode_refuses_a_merge_with_the_old_id_and_the_merged_text():
     fake = FakeReviewer(APPROVE)
-    async with _App(reviewer=fake, review_mode="enforce") as a:
+    async with _App(reviewer=fake, review_mode="refuse") as a:
         old = (await a.add("Chose Postgres, because several agents write at once."))["id"]
         fake.verdict = MERGE
         resp = await _post(a, "Chose Postgres, because several agents write at once; the pool "
@@ -636,13 +636,13 @@ async def test_enforce_refuses_a_merge_with_the_old_id_and_the_merged_text():
 
 
 @pytest.fixture(scope="module")
-def enforcing_server(_schema):
-    """A live server with a `FakeReviewer` in enforce mode. Yields
+def refusing_server(_schema):
+    """A live server with a `FakeReviewer` in refuse mode. Yields
     `(url, token, reviewer)`; a test sets `reviewer.verdict` as it needs."""
     fake = FakeReviewer(APPROVE)
     engine = make_test_engine()
     app = create_app(sessionmaker=make_sessionmaker(engine), token=TOKEN,
-                     embedder=FakeEmbedder(), reviewer=fake, review_mode="enforce",
+                     embedder=FakeEmbedder(), reviewer=fake, review_mode="refuse",
                      review_poll=0)
     with live_app(app) as url:
         yield url, TOKEN, fake
@@ -650,10 +650,10 @@ def enforcing_server(_schema):
 
 
 @pytest.fixture
-def enforcing(enforcing_server):
+def refusing(refusing_server):
     """The server above with #1 stored and verified, and the reviewer set to
     answer the merge for whatever comes next."""
-    url, token, fake = enforcing_server
+    url, token, fake = refusing_server
     fake.verdict = APPROVE
     fake.calls.clear()
     cli = CliDriver(url, token)
@@ -662,8 +662,8 @@ def enforcing(enforcing_server):
     return url, token, fake
 
 
-def test_cli_merge_message_says_to_update_the_old_memory(enforcing):
-    url, token, _ = enforcing
+def test_cli_merge_message_says_to_update_the_old_memory(refusing):
+    url, token, _ = refusing
     cli = CliDriver(url, token)
     proc = cli.raw("add", "Chose Postgres, because several agents write at once; the pool "
                           "holds 10 connections.", "--project", "p")
@@ -684,8 +684,8 @@ def test_cli_merge_message_says_to_update_the_old_memory(enforcing):
     assert [m.id for m in cli.query()] == [1]
 
 
-def test_cli_other_refusals_keep_their_last_line(enforcing):
-    url, token, fake = enforcing
+def test_cli_other_refusals_keep_their_last_line(refusing):
+    url, token, fake = refusing
     cli = CliDriver(url, token)
     fake.verdict = REPEAT
     proc = cli.raw("add", "Chose Postgres because several agents write at once.", "--project", "p")
@@ -701,8 +701,8 @@ def test_cli_other_refusals_keep_their_last_line(enforcing):
     assert "Apply it" not in proc.stdout
 
 
-def test_cli_enforce_stores_a_reversal_with_the_link(enforcing):
-    url, token, fake = enforcing
+def test_cli_refuse_mode_stores_a_reversal_with_the_link(refusing):
+    url, token, fake = refusing
     cli = CliDriver(url, token)
     fake.verdict = SUPERSEDE
     proc = cli.raw("add", "Moved to SQLite, because the server went away.", "--project", "p")
@@ -714,8 +714,8 @@ def test_cli_enforce_stores_a_reversal_with_the_link(enforcing):
     assert len(fake.calls) == 2
 
 
-def test_mcp_merge_error_carries_duplicate_of_and_the_merged_text(enforcing):
-    url, token, _ = enforcing
+def test_mcp_merge_error_carries_duplicate_of_and_the_merged_text(refusing):
+    url, token, _ = refusing
     mcp = McpDriver(url, token)
     out = mcp._call("memory_add", content="Chose Postgres, because several agents write at once; "
                                           "the pool holds 10 connections.",
@@ -729,8 +729,8 @@ def test_mcp_merge_error_carries_duplicate_of_and_the_merged_text(enforcing):
     assert mcp.get(1).content == MERGED
 
 
-def test_api_client_raises_review_refused_with_the_merge(enforcing):
-    url, token, _ = enforcing
+def test_api_client_raises_review_refused_with_the_merge(refusing):
+    url, token, _ = refusing
     api = ApiClient(url, token)
     with pytest.raises(ReviewRefused) as caught:
         api.add("Chose Postgres, because several agents write at once; the pool holds 10 "

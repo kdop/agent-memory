@@ -8,7 +8,7 @@ catch-up (`POST /admin/review`, `memory review --catch-up`) reviews the
 unverified memories oldest first, one after another, so each verdict is
 stored before the next memory is compared.
 
-Layers: the constants; the status on write in warn and enforce mode and
+Layers: the constants; the status on write in flag and refuse mode and
 after each verdict; the reference-set rule in the repository and through
 the app; the catch-up order and its one background task; the `status`
 filter on the CLI, the API and the MCP tools; the header line the CLI
@@ -144,7 +144,7 @@ def test_memory_out_defaults_to_unverified():
 
 
 # ── the status on write ──────────────────────────────────────────────────────
-async def test_warn_stores_unverified_and_the_verdict_sets_the_status():
+async def test_flag_mode_stores_unverified_and_the_verdict_sets_the_status():
     fake = FakeReviewer(REJECT)
     async with _App(reviewer=fake) as a:
         mid = (await a.add("Spent the afternoon tidying."))["id"]
@@ -185,9 +185,9 @@ async def test_no_verdict_or_a_failing_model_leaves_unverified(caplog):
     assert await _statuses_in_db() == [(1, "unverified"), (2, "unverified")]
 
 
-async def test_enforce_approve_is_verified_at_once():
+async def test_refuse_mode_approve_is_verified_at_once():
     fake = FakeReviewer(APPROVE)
-    async with _App(reviewer=fake, review_mode="enforce") as a:
+    async with _App(reviewer=fake, review_mode="refuse") as a:
         resp = await _post(a, "Chose Postgres, because several agents write at once.",
                            type="decision")
         assert resp.status_code == 201
@@ -201,15 +201,15 @@ async def test_enforce_approve_is_verified_at_once():
     assert await _statuses_in_db() == [(mid, "verified")]
 
 
-async def test_enforce_refusal_stores_nothing_so_there_is_no_status():
-    async with _App(reviewer=FakeReviewer(REJECT), review_mode="enforce") as a:
+async def test_refuse_mode_refusal_stores_nothing_so_there_is_no_status():
+    async with _App(reviewer=FakeReviewer(REJECT), review_mode="refuse") as a:
         assert (await _post(a, "Spent the afternoon tidying.")).status_code == 422
     assert await _statuses_in_db() == []
 
 
-async def test_enforce_force_is_unverified_until_the_background_verdict_lands():
+async def test_refuse_mode_force_is_unverified_until_the_background_verdict_lands():
     fake = FakeReviewer(REJECT)
-    async with _App(reviewer=fake, review_mode="enforce") as a:
+    async with _App(reviewer=fake, review_mode="refuse") as a:
         resp = await _post(a, "Spent the afternoon tidying.", force="true")
         assert resp.status_code == 201
         mid = resp.json()["id"]
@@ -350,7 +350,7 @@ async def test_neighbours_are_verified_memories_only_through_the_app():
     new = "alpha memory number 3 about topic 3, said again"
     expected = [ids[t] for t in _by_cosine(new, texts[:3])]
 
-    # Warn mode: the stored memory's neighbours.
+    # Flag mode: the stored memory's neighbours.
     fake = FakeReviewer(APPROVE)
     async with _App(reviewer=fake) as a:
         ids[new] = (await a.add(new))["id"]
@@ -358,11 +358,11 @@ async def test_neighbours_are_verified_memories_only_through_the_app():
     assert [n["id"] for n in neighbours] == expected
     assert all(n["review_status"] == "verified" for n in neighbours)
 
-    # Enforce mode: the neighbours of the entry before it is stored. The
+    # Refuse mode: the neighbours of the entry before it is stored. The
     # approved one from just above is verified now, so it is reference too.
     once_more = new + ", once more"
     fake = FakeReviewer(REJECT)
-    async with _App(reviewer=fake, review_mode="enforce") as a:
+    async with _App(reviewer=fake, review_mode="refuse") as a:
         assert (await _post(a, once_more)).status_code == 422
     _, neighbours = fake.calls[-1]
     assert [n["id"] for n in neighbours] == [ids[t] for t in _by_cosine(once_more, texts[:3] + [new])]
@@ -502,7 +502,7 @@ async def test_catch_up_skips_verified_and_flagged_memories():
 # ── the catch-up through the client and the CLI ──────────────────────────────
 @pytest.fixture(scope="module")
 def scripted_server(_schema):
-    """A live server with a `Scripted` reviewer in warn mode, for the CLI and
+    """A live server with a `Scripted` reviewer in flag mode, for the CLI and
     the client. Yields `(url, reviewer)`."""
     scripted = Scripted()
     engine = make_test_engine()
