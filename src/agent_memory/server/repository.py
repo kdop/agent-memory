@@ -8,6 +8,7 @@ Full-text search is the one place raw Postgres shows through (`plainto_tsquery`,
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import delete as sql_delete
@@ -53,13 +54,34 @@ def _as_dt(v):
     return datetime.fromisoformat(str(v))
 
 
-def _embed(embedder: Embedder | None, content: str) -> tuple[list[float] | None, str | None]:
+async def _embed_many(embedder: Embedder, texts: list[str]) -> list[list[float]]:
+    """Every call to the model goes through here, in a worker thread. The
+    model takes tens of milliseconds per text and hundreds per batch, all
+    of it CPU; on the event loop that time would stall every other request
+    (a `/health` call sat for a second during the catch-up before this)."""
+    return await asyncio.to_thread(embedder.embed, texts)
+
+
+async def _embed(embedder: Embedder | None, content: str) -> tuple[list[float] | None, str | None]:
     """The vector and model name to store for `content`. Both are None when there
     is no embedder or it has no model (a `NullEmbedder`), so a server without the
     model still writes memories, just without vectors."""
     if embedder is None or embedder.model_name is None:
         return None, None
-    return embedder.embed([content])[0], embedder.model_name
+    return (await _embed_many(embedder, [content]))[0], embedder.model_name
+
+
+def _tag_text(tag: Tag) -> str:
+    """What a tag's vector is made of: its name and its description in one line."""
+    return f"{tag.name}: {tag.description}"
+
+
+async def _embed_tag(tag: Tag, embedder: Embedder | None) -> None:
+    """Store the vector of `_tag_text(tag)` on the tag. Without a model the
+    tag keeps what it has (None on a new tag): reindex fills it later."""
+    vector, model = await _embed(embedder, _tag_text(tag))
+    if vector is not None:
+        tag.embedding, tag.embedding_model = vector, model
 
 
 def _dump_review(r: MemoryReview | None, supersedes: int | None = None) -> dict | None:
@@ -106,18 +128,22 @@ def _check_status(status: str | None) -> None:
         raise ValueError(f"status must be one of {', '.join(STATUSES)} (got {status!r})")
 
 
-async def _get_or_create_tag(session: AsyncSession, name: str, description: str | None) -> Tag:
+async def _get_or_create_tag(session: AsyncSession, name: str, description: str | None,
+                             embedder: Embedder | None = None) -> Tag:
     """Reuse an existing tag (updating its descriptor only when a new one is given),
     or create it. A brand-new tag with no descriptor defaults to its own name — a
-    descriptor is required in the schema but never required from the caller."""
+    descriptor is required in the schema but never required from the caller.
+    A new tag, or a new descriptor, gets its vector here (see `_embed_tag`)."""
     tag = (
         await session.execute(select(Tag).where(func.lower(Tag.name) == func.lower(name)))
     ).scalar_one_or_none()
     if tag is not None:
         if description and description != tag.description:
             tag.description = description
+            await _embed_tag(tag, embedder)
         return tag
     tag = Tag(name=name, description=description or name)
+    await _embed_tag(tag, embedder)
     session.add(tag)
     await session.flush()
     return tag
@@ -125,12 +151,12 @@ async def _get_or_create_tag(session: AsyncSession, name: str, description: str 
 
 # ---- operations -----------------------------------------------------------
 async def add(session, content, agent, project, tags, mtype, embedder=None) -> int:
-    embedding, model = _embed(embedder, content)
+    embedding, model = await _embed(embedder, content)
     m = Memory(content=content, agent=agent, project=project, type=mtype,
                embedding=embedding, embedding_model=model)
     session.add(m)  # add before wiring tags so the back-reference resolves cleanly
     for spec in tags:
-        m.tags.append(await _get_or_create_tag(session, spec.name, spec.description))
+        m.tags.append(await _get_or_create_tag(session, spec.name, spec.description, embedder))
     await session.flush()
     return m.id
 
@@ -177,7 +203,7 @@ async def _scored_ids(session, embedder: Embedder, text, filters, k) -> list[tup
     """The search-by-meaning first step: embed `text`, take the candidates
     that pass the `_search_filters` in `filters`, and return the best `k`
     as `(id, score)` (see `_score`)."""
-    query_vec = embedder.embed([text])[0]
+    query_vec = (await _embed_many(embedder, [text]))[0]
     stmt = _search_filters(_candidates(embedder.model_name), **filters)
     return await _score(session, stmt, query_vec, k)
 
@@ -208,7 +234,7 @@ async def find_duplicate(session, embedder, content, project) -> tuple[int, floa
     `DUPLICATE_THRESHOLD`. Without a model (no embedder, or a `NullEmbedder`)
     there is nothing to compare, so it returns None and nothing is ever
     refused."""
-    vector, model = _embed(embedder, content)
+    vector, model = await _embed(embedder, content)
     if vector is None:
         return None
     # Only the best id and score are needed, so this is the one query.
@@ -368,7 +394,7 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
         m.content = content
         # New text, new vector. Without a model this clears the old one, since a
         # vector of the old text would be wrong for the new one.
-        m.embedding, m.embedding_model = _embed(embedder, content)
+        m.embedding, m.embedding_model = await _embed(embedder, content)
         # New text, new check too: the verdict was about the old text. The
         # memory goes back to unverified, and its review row and its
         # `supersedes` link (which that verdict set) go with it, so the next
@@ -386,14 +412,15 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
         m.type = mtype or None
         changes.append(f"type → {m.type}")
     if set_tags is not None:
-        m.tags = [await _get_or_create_tag(session, s.name, s.description) for s in set_tags]
+        m.tags = [await _get_or_create_tag(session, s.name, s.description, embedder)
+                  for s in set_tags]
         names = [t.name for t in m.tags]
         changes.append(f"tags set to: {', '.join(names) if names else '(none)'}")
     if add_tags:
         have = {t.id for t in m.tags}
         added = []
         for s in add_tags:
-            tag = await _get_or_create_tag(session, s.name, s.description)
+            tag = await _get_or_create_tag(session, s.name, s.description, embedder)
             if tag.id not in have:
                 m.tags.append(tag)
                 have.add(tag.id)
@@ -552,11 +579,13 @@ async def _tag_count(session, tag_id) -> int:
         select(func.count()).select_from(MemoryTag).where(MemoryTag.tag_id == tag_id))).scalar()
 
 
-async def _reassign(session, sources, target, description=None) -> int:
+async def _reassign(session, sources, target, description=None, embedder=None) -> int:
     """Move every memory link from each source tag to `target`, delete the sources.
-    Returns the number of (memory, source) links reassigned."""
-    if description:
+    A new `description` on the target gets a new vector. Returns the number of
+    (memory, source) links reassigned."""
+    if description and description != target.description:
         target.description = description
+        await _embed_tag(target, embedder)
     affected = 0
     for src in sources:
         mids = (await session.execute(
@@ -572,19 +601,23 @@ async def _reassign(session, sources, target, description=None) -> int:
     return affected
 
 
-async def patch_tag(session, name, *, new_name=None, description=None) -> dict | None:
+async def patch_tag(session, name, *, new_name=None, description=None,
+                    embedder=None) -> dict | None:
+    """Rename a tag, change its description, or both. A new description gets
+    a new vector; a rename alone keeps the one it has."""
     tag = await _find_tag(session, name)
     if tag is None:
         return None
     if new_name and new_name.lower() != tag.name.lower():
         collision = await _find_tag(session, new_name)
         if collision is not None:  # rename onto an existing tag = merge into it
-            await _reassign(session, [tag], collision, description)
+            await _reassign(session, [tag], collision, description, embedder)
             return {"name": collision.name, "description": collision.description,
                     "count": await _tag_count(session, collision.id)}
         tag.name = new_name
-    if description is not None:
+    if description is not None and (description or tag.name) != tag.description:
         tag.description = description or tag.name
+        await _embed_tag(tag, embedder)
     await session.flush()
     return {"name": tag.name, "description": tag.description, "count": await _tag_count(session, tag.id)}
 
@@ -598,18 +631,16 @@ async def delete_tag(session, name) -> dict | None:
     return {"removed": tag.name, "memories_affected": affected}
 
 
-async def merge_tags(session, sources, target, description=None) -> dict:
+async def merge_tags(session, sources, target, description=None, embedder=None) -> dict:
     tgt = await _find_tag(session, target)
     if tgt is None:
-        tgt = Tag(name=target, description=description or target)
-        session.add(tgt)
-        await session.flush()
+        tgt = await _get_or_create_tag(session, target, description, embedder)
     src_tags = []
     for s in sources:
         t = await _find_tag(session, s)
         if t is not None and t.id != tgt.id:
             src_tags.append(t)
-    affected = await _reassign(session, src_tags, tgt, description)
+    affected = await _reassign(session, src_tags, tgt, description, embedder)
     return {"target": tgt.name, "memories_affected": affected, "removed": [t.name for t in src_tags]}
 
 
@@ -657,7 +688,7 @@ async def neighbours_for(session, embedder: Embedder | None, content: str,
     project matches no project), verified memories only, same model, best
     first, at most `NEIGHBOUR_COUNT`. Without a model there are no
     neighbours."""
-    vector, model = _embed(embedder, content)
+    vector, model = await _embed(embedder, content)
     if vector is None:
         return []
     return await _nearest(session, vector, model, project)
@@ -786,48 +817,65 @@ async def tags_for_review(session, embedder: Embedder | None, content: str,
     """The names of the tags the reviewer may suggest for `content`: at most
     `limit` of the tags in use, best first.
 
-    With a model, best means closest in meaning: each tag's `name: description`
-    and the content are embedded here and now (nothing is stored) and ranked
-    by cosine, ties broken by name. Without a model (no embedder, or a
-    `NullEmbedder`) the most used tags come first, as `list_tags` orders
-    them."""
-    rows = await list_tags(session)
+    With a model, best means closest in meaning: the content is embedded
+    here (one call, in a thread) and ranked by cosine against the vector
+    each tag stores for its `name: description`, ties broken by name. A tag
+    with no vector, or one from another model, is left out until reindex
+    fills it. Without a model (no embedder, or a `NullEmbedder`) the most
+    used tags come first, as `list_tags` orders them."""
+    count = func.count(Memory.id)
+    stmt = (
+        select(Tag.name, Tag.embedding, Tag.embedding_model)
+        .join(Tag.memories)
+        .group_by(Tag.id)
+        .order_by(count.desc(), Tag.name)
+    )
+    rows = (await session.execute(stmt)).all()
     if not rows:
         return []
     if embedder is None or embedder.model_name is None:
-        return [r["name"] for r in rows[:limit]]
-    texts = [f"{r['name']}: {r['description'] or r['name']}" for r in rows]
-    query_vec, *tag_vecs = embedder.embed([content, *texts])
-    scored = [(cosine(query_vec, vec), r["name"]) for vec, r in zip(tag_vecs, rows)]
+        return [name for name, _, _ in rows[:limit]]
+    query_vec = (await _embed_many(embedder, [content]))[0]
+    model = embedder.model_name
+    scored = [(cosine(query_vec, list(vec)), name) for name, vec, stored_model in rows
+              if vec is not None and stored_model == model]
     scored.sort(key=lambda pair: (-pair[0], pair[1]))
     return [name for _, name in scored[:limit]]
 
 
 # ---- reindex: fill in missing or stale vectors -----------------------------
-async def reindex(session, embedder: Embedder | None, batch: int = 64) -> int:
-    """Give every row a vector from the current model.
+async def reindex(session, embedder: Embedder | None, batch: int = 64) -> dict:
+    """Give every memory, and every tag, a vector from the current model.
 
     Picks rows with no vector, or with a vector from another model, in id
-    order, `batch` rows at a time; embeds each batch with one call; writes the
-    vectors back. Returns the number of rows updated. Does nothing and returns
-    0 when there is no embedder or it has no model."""
+    order, `batch` rows at a time; embeds each batch with one call, in a
+    thread; writes the vectors back. Memories first, then tags. Returns
+    `{"updated": memories, "tags": tags}`, the counts of rows changed. Does
+    nothing, and returns zeros, when there is no embedder or it has no
+    model."""
     if embedder is None or embedder.model_name is None:
-        return 0
+        return {"updated": 0, "tags": 0}
     model = embedder.model_name
-    stale = or_(Memory.embedding.is_(None), Memory.embedding_model.is_distinct_from(model))
-    updated = 0
-    last_id = 0
-    while True:
-        # Walk by id, not by offset: rows already done drop out of the filter,
-        # so an offset would skip rows.
-        stmt = (select(Memory).where(stale, Memory.id > last_id)
-                .order_by(Memory.id).limit(int(batch)))
-        rows = (await session.execute(stmt)).scalars().all()
-        if not rows:
-            return updated
-        vectors = embedder.embed([m.content for m in rows])
-        for m, vec in zip(rows, vectors):
-            m.embedding, m.embedding_model = vec, model
-        await session.flush()
-        updated += len(rows)
-        last_id = rows[-1].id
+
+    async def fill(table, text_of) -> int:
+        stale = or_(table.embedding.is_(None), table.embedding_model.is_distinct_from(model))
+        updated = 0
+        last_id = 0
+        while True:
+            # Walk by id, not by offset: rows already done drop out of the
+            # filter, so an offset would skip rows.
+            stmt = (select(table).where(stale, table.id > last_id)
+                    .order_by(table.id).limit(int(batch)))
+            rows = (await session.execute(stmt)).scalars().all()
+            if not rows:
+                return updated
+            vectors = await _embed_many(embedder, [text_of(r) for r in rows])
+            for row, vec in zip(rows, vectors):
+                row.embedding, row.embedding_model = vec, model
+            await session.flush()
+            updated += len(rows)
+            last_id = rows[-1].id
+
+    memories = await fill(Memory, lambda m: m.content)
+    tags = await fill(Tag, _tag_text)
+    return {"updated": memories, "tags": tags}

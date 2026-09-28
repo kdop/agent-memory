@@ -74,10 +74,12 @@ Without it, `semantic` answers with an error that says so and `hybrid` falls bac
 keyword. Two environment variables control the model, both read by the server at
 start: `AGENT_MEMORY_EMBED_MODEL` (default `BAAI/bge-small-en-v1.5`; `off` turns it
 off) and `AGENT_MEMORY_EMBED_CACHE` (where the model files are stored; default
-`.cache/fastembed` under the repo root). `memory reindex` gives every memory that has
-no vector, or a vector from another model, a vector from the current model. The server
-also runs this once at start, so after installing the model, or switching to another,
-a restart is enough.
+`.cache/fastembed` under the repo root). `memory reindex` gives every memory, and
+every tag, that has no vector, or a vector from another model, a vector from the
+current model, and prints both counts; a tag's vector is what the review uses to pick
+the tags it offers. The model runs in a thread, so the server answers other requests
+meanwhile. The server also runs this once at start, so after installing the model, or
+switching to another, a restart is enough.
 
 **Adding** checks the entry. A new memory whose meaning is nearly the same as one
 already in the same project (cosine 0.92 or above) is refused and nothing is stored:

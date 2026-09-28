@@ -283,8 +283,9 @@ async def _reindex_at_startup(app: FastAPI) -> None:
     rows can still be fixed later with `POST /admin/reindex`."""
     try:
         async with app.state.sessionmaker() as session, session.begin():
-            n = await repo.reindex(session, app.state.embedder)
-        log.info("reindex at startup: %d memories updated", n)
+            done = await repo.reindex(session, app.state.embedder)
+        log.info("reindex at startup: %d memories and %d tags updated",
+                 done["updated"], done["tags"])
     except Exception:
         log.exception("reindex at startup failed; the server keeps running")
 
@@ -546,12 +547,14 @@ def create_app(
         return await repo.list_tags(session)
 
     @app.patch("/tags/{name}", dependencies=guard)
-    async def patch_tag(name: str, body: TagPatch, session: AsyncSession = SessionDep):
+    async def patch_tag(name: str, body: TagPatch, session: AsyncSession = SessionDep,
+                        embedder: Embedder | None = EmbedderDep):
         sent = body.model_fields_set
         result = await repo.patch_tag(
             session, name,
             new_name=body.name if "name" in sent else None,
-            description=body.description if "description" in sent else None)
+            description=body.description if "description" in sent else None,
+            embedder=embedder)
         if result is None:
             raise HTTPException(status_code=404, detail=f"Tag '{name}' not found")
         return result
@@ -564,8 +567,10 @@ def create_app(
         return result
 
     @app.post("/tags/merge", dependencies=guard)
-    async def merge_tags(body: TagMergeIn, session: AsyncSession = SessionDep):
-        return await repo.merge_tags(session, body.sources, body.target, body.description)
+    async def merge_tags(body: TagMergeIn, session: AsyncSession = SessionDep,
+                         embedder: Embedder | None = EmbedderDep):
+        return await repo.merge_tags(session, body.sources, body.target, body.description,
+                                     embedder=embedder)
 
     @app.post("/tags/{name}/detach", dependencies=guard)
     async def detach_tag(name: str, body: TagDetachIn, session: AsyncSession = SessionDep):
@@ -589,12 +594,14 @@ def create_app(
     @app.post("/admin/reindex", dependencies=guard)
     async def reindex(session: AsyncSession = SessionDep,
                       embedder: Embedder | None = EmbedderDep):
-        """Give every row a vector from the current model: rows with none, and
-        rows embedded by another model. Returns how many rows changed."""
+        """Give every memory and every tag a vector from the current model:
+        rows with none, and rows embedded by another model. Returns how many
+        changed, as `{"updated": memories, "tags": tags}`. The model runs in
+        a thread, batch by batch, so other requests are answered meanwhile."""
         if embedder is None or embedder.model_name is None:
             reason = getattr(embedder, "reason", "the server has no embedding model")
             raise HTTPException(status_code=503, detail=f"Cannot reindex: {reason}")
-        return {"updated": await repo.reindex(session, embedder)}
+        return await repo.reindex(session, embedder)
 
     @app.post("/admin/review", dependencies=guard)
     async def review_catch_up(request: Request, background: BackgroundTasks,

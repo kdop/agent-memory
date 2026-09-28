@@ -67,7 +67,7 @@ async def test_retrieval_quality_by_mode(retrieval_set, record_property):
     try:
         async with make_sessionmaker(engine)() as session:
             t0 = time.perf_counter()
-            embedded = await repo.reindex(session, embedder)
+            embedded = (await repo.reindex(session, embedder))["updated"]
             reindex_s = time.perf_counter() - t0
             assert embedded == memory_count, "every memory in the set should get a vector"
 

@@ -437,7 +437,7 @@ async def test_reindex_returns_the_count_and_fills_vectors(live_server):
 
         resp = await c.post("/admin/reindex", headers=_auth())
         assert resp.status_code == 200
-        assert resp.json() == {"updated": 3}
+        assert resp.json() == {"updated": 3, "tags": 0}
         for mid, text in zip(ids, ("first", "second", "third")):
             vec, model = await _stored_vector(mid)
             assert model == "fake"
@@ -445,7 +445,7 @@ async def test_reindex_returns_the_count_and_fills_vectors(live_server):
 
         # Nothing left to do the second time.
         resp = await c.post("/admin/reindex", headers=_auth())
-        assert resp.json() == {"updated": 0}
+        assert resp.json() == {"updated": 0, "tags": 0}
 
 
 async def test_reindex_503_when_the_server_has_no_model():
