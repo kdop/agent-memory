@@ -459,16 +459,20 @@ have the same length.
   there are no vectors), and the ten tags in use closest to it in meaning
   (`tags_for_review`: the entry and each tag's `name: description` are embedded on the
   fly, never stored; without an embedding model the ten most used tags are offered).
-  The model answers one JSON object with seven keys: `verdict` (`approve`, `reject` or
-  `rewrite`), `rule`, `reason`, `rewrite`, `duplicate_of`, `tags` and `supersedes`.
+  The model answers one JSON object with nine keys. The first two, `why` (the words of
+  the entry that give its reason, or empty) and `new_facts` (what the entry adds to
+  the closest neighbour, or empty), make the model look before it judges: without
+  them it decided first and then made up a reason. The server drops both. The other
+  seven are the verdict: `supersedes`, `duplicate_of`, `verdict` (`approve`, `reject`
+  or `rewrite`), `rule`, `reason`, `rewrite` and `tags`.
   `parse_verdict` turns it into a `Verdict` and treats anything else as no answer: a
   missing key (`tags` and `supersedes` may be left out), a rule number that is not a
   rule, a `duplicate_of` or `supersedes` the model was not shown; a tag not on
   the offered list is dropped, and tags on an approve or reject are dropped too. Four
   request settings matter: `think: false` and `format: json`, because otherwise the
   model thinks out loud and returns prose instead of JSON; `temperature: 0`, so the
-  same entry gets the same verdict; and `num_ctx: 8192`, so the rules, the entry and
-  five neighbours fit. The verdict is stored in `memory_reviews` (schema above), one
+  answer is as steady as the server allows; and `num_ctx: 8192`, so the rules, the
+  entry and five neighbours fit. The verdict is stored in `memory_reviews` (schema above), one
   row per memory; `set_review` replaces it on a re-review, and every read carries it
   as `review` next to the tags. The memory's `review_status` follows the verdict
   (`unverified` until one is stored, `verified` on approve, `flagged` on reject or
@@ -494,6 +498,17 @@ have the same length.
   is merged by the writer, never by the model. `query` and `search` return superseded
   memories as before, sorted as before; `current=true` (`--current`, and the same
   parameter on the MCP tools) hides them, and is off by default.
+
+  **The same request can get two answers.** The Ollama server answers the same request
+  differently at times, even at temperature 0 with the same model and the same bytes
+  sent: the numbers it works with are rounded on the way, and the batch a request
+  lands in changes the rounding. So a re-review can differ from the first verdict, and
+  a borderline entry can go either way. The prompt is measured against the verdict set
+  in `tests/data/verdict_set.json` (`test_verdict_quality.py`, real model only): every
+  entry in it is sent once, no request is repeated, and the pass rate must stay at or
+  above the `floor` in that file, which is the lowest of three runs in a row. The
+  prompt's examples never share a subject with a test entry: the model borrows the
+  example's reason for an entry on the same subject and approves it.
 
   `AGENT_MEMORY_REVIEW` picks how the review runs (`review_mode`, `make_reviewer`):
   `off` (the default, also for an unknown value or a missing `AGENT_MEMORY_REVIEW_URL`)

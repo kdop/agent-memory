@@ -62,7 +62,7 @@ class FakeReviewer:
 def test_system_prompt_asks_for_tags_from_the_list_only():
     prompt = review_mod.SYSTEM_PROMPT
     assert '"tags": [<names from the list only>]' in prompt
-    assert "exactly these seven keys" in prompt
+    assert "exactly these nine keys" in prompt
     assert "never a name that is not on the list" in prompt
 
 
