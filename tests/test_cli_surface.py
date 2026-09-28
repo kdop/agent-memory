@@ -352,5 +352,5 @@ def test_reindex_chrome(cli):
 
     proc = cli.raw("reindex")
     assert proc.returncode == 0
-    assert "✓ Reindexed 2 memories" in proc.stdout
-    assert "✓ Reindexed 0 memories" in cli.raw("reindex").stdout
+    assert "✓ Reindexed 2 memories, 0 tags" in proc.stdout
+    assert "✓ Reindexed 0 memories, 0 tags" in cli.raw("reindex").stdout

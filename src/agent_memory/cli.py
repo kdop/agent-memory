@@ -335,8 +335,8 @@ def show_stats(args, client):
 
 
 def reindex_memories(args, client):
-    n = client.reindex()
-    print(f"✓ Reindexed {n} memories")
+    done = client.reindex()
+    print(f"✓ Reindexed {done['updated']} memories, {done['tags']} tags")
 
 
 def config_command(args, parser):

@@ -265,10 +265,11 @@ class ApiClient:
         return data
 
     def reindex(self):
-        """Ask the server to give every memory a vector from its current model.
-        Returns the number of rows updated."""
+        """Ask the server to give every memory and every tag a vector from its
+        current model. Returns `{"updated": memories, "tags": tags}`: how
+        many rows of each changed."""
         _, data = self._call("POST", "/admin/reindex")
-        return data["updated"]
+        return data
 
     def flagged(self, project=None, verdict=None, status=None, limit=None):
         """The memories the review flagged, newest review first, each with its

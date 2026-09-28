@@ -596,7 +596,7 @@ async def test_reindex_fills_rows_without_vectors(session):
     b = await repo.add(session, "also none", "t", None, _tags(), None)
     assert await _stored_vector(session, a) == (None, None)
 
-    assert await repo.reindex(session, FakeEmbedder()) == 2
+    assert await repo.reindex(session, FakeEmbedder()) == {"updated": 2, "tags": 0}
     for mid, text in ((a, "no vector yet"), (b, "also none")):
         vec, model = await _stored_vector(session, mid)
         assert model == "fake"
@@ -610,7 +610,7 @@ async def test_reindex_replaces_vectors_from_another_model(session):
                          embedder=FakeEmbedder())
     await _set_model(session, mid, "old-model")
 
-    assert await repo.reindex(session, FakeEmbedder()) == 1
+    assert await repo.reindex(session, FakeEmbedder()) == {"updated": 1, "tags": 0}
     vec, model = await _stored_vector(session, mid)
     assert model == "fake"
     assert vec == pytest.approx(_expected("old model text"), abs=1e-6)
@@ -621,7 +621,7 @@ async def test_reindex_leaves_current_model_rows_alone(session):
     mid = await repo.add(session, "already done", "t", None, _tags(), None, embedder=emb)
     emb.calls.clear()
 
-    assert await repo.reindex(session, emb) == 0
+    assert await repo.reindex(session, emb) == {"updated": 0, "tags": 0}
     assert emb.calls == []
     vec, model = await _stored_vector(session, mid)
     assert model == "fake"
@@ -636,13 +636,13 @@ async def test_reindex_touches_only_the_stale_rows(session):
     stale = await repo.add(session, "stale", "t", None, _tags(), None, embedder=FakeEmbedder())
     await _set_model(session, stale, "old-model")
 
-    assert await repo.reindex(session, FakeEmbedder()) == 2
+    assert await repo.reindex(session, FakeEmbedder()) == {"updated": 2, "tags": 0}
     for mid, text in ((done, "current"), (missing, "missing"), (stale, "stale")):
         vec, model = await _stored_vector(session, mid)
         assert model == "fake"
         assert vec == pytest.approx(_expected(text), abs=1e-6)
     # A second run finds nothing left to do.
-    assert await repo.reindex(session, FakeEmbedder()) == 0
+    assert await repo.reindex(session, FakeEmbedder()) == {"updated": 0, "tags": 0}
 
 
 async def test_reindex_embeds_in_batches_in_id_order(session):
@@ -650,7 +650,7 @@ async def test_reindex_embeds_in_batches_in_id_order(session):
         await repo.add(session, f"row {i}", "t", None, _tags(), None)
     emb = _CountingEmbedder()
 
-    assert await repo.reindex(session, emb, batch=2) == 5
+    assert await repo.reindex(session, emb, batch=2) == {"updated": 5, "tags": 0}
     assert emb.calls == [2, 2, 1]
     for mid in range(1, 6):
         vec, model = await _stored_vector(session, mid)
@@ -662,6 +662,6 @@ async def test_reindex_without_model_does_nothing(session):
     from agent_memory.server.embedding import NullEmbedder
 
     mid = await repo.add(session, "left alone", "t", None, _tags(), None)
-    assert await repo.reindex(session, None) == 0
-    assert await repo.reindex(session, NullEmbedder()) == 0
+    assert await repo.reindex(session, None) == {"updated": 0, "tags": 0}
+    assert await repo.reindex(session, NullEmbedder()) == {"updated": 0, "tags": 0}
     assert await _stored_vector(session, mid) == (None, None)

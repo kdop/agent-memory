@@ -39,6 +39,7 @@ MEMORY_REVIEWS = "2906ffedb42f"
 REVIEW_TAGS = "7c3e1a9d5b20"
 REVIEW_STATUS = "b8e2f4a6c9d1"
 SUPERSEDES = "d3f9a7c2e6b4"
+TAG_EMBEDDING = "e5a1c7d9f2b3"
 
 
 def _alembic(*args: str) -> None:
@@ -396,22 +397,16 @@ async def test_supersedes_revision_upgrades_and_downgrades():
         assert await _scalar("SELECT supersedes FROM memories WHERE id = :m", m=new) is None
         assert await _scalar("SELECT count(*) FROM memories") == 1
 
-        # The repository sees the column at this revision (it is head): a
-        # verdict with `supersedes` sets the link, and a read carries both
-        # ends of it.
-        eng = make_test_engine()
-        sm = make_sessionmaker(eng)
-        try:
-            async with sm() as s, s.begin():
-                from agent_memory.server.review import Verdict
-
-                again = await repo.add(s, "the old one, again", "tester", "proj", [], None)
-                verdict = Verdict("approve", None, "fine", None, None, [], supersedes=again)
-                await repo.set_review(s, new, verdict, "m")
-                assert (await repo.get(s, new))["supersedes"] == again
-                assert (await repo.get(s, again))["superseded_by"] == new
-        finally:
-            await eng.dispose()
+        # A verdict that names an older memory sets the link, the way
+        # `set_review` does. Plain SQL: the models have since grown columns
+        # this revision does not have (see the module docstring).
+        again = await _insert_memory("the old one, again")
+        await _exec(
+            "INSERT INTO memory_reviews (memory_id, verdict, reason, model) VALUES "
+            f"({new}, 'approve', 'fine', 'm'); "
+            f"UPDATE memories SET supersedes = {again} WHERE id = {new}")
+        assert await _scalar("SELECT supersedes FROM memories WHERE id = :m", m=new) == again
+        assert await _column_values("SELECT id FROM memories WHERE supersedes = :m", m=again) == [new]
 
         # Downgrade one step: the index, the foreign key and the column are
         # gone; the memories and their reviews stay.
@@ -421,6 +416,57 @@ async def test_supersedes_revision_upgrades_and_downgrades():
         assert not await _index_exists("ix_memories_supersedes")
         assert await _scalar("SELECT count(*) FROM memories") == 2
         assert await _scalar("SELECT count(*) FROM memory_reviews") == 1
+    finally:
+        await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        await _create_all()
+
+
+async def test_tag_embedding_revision_upgrades_and_downgrades():
+    # Clean slate, then stop one step short: the columns must not exist yet.
+    await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    try:
+        _alembic("upgrade", SUPERSEDES)
+        assert await _columns("tags", "embedding") == {}
+        old = await _scalar("INSERT INTO tags (name, description) "
+                            "VALUES ('db', 'the database layer') RETURNING id")
+
+        # Upgrade one step: both columns appear, nullable, as real[] and text,
+        # and the existing tag gets NULL.
+        _alembic("upgrade", TAG_EMBEDDING)
+        assert await _columns("tags", "embedding") == {
+            "embedding": ("_float4", True),
+            "embedding_model": ("text", True),
+        }
+        assert await _scalar("SELECT embedding FROM tags WHERE id = :t", t=old) is None
+        assert await _scalar("SELECT embedding_model FROM tags WHERE id = :t", t=old) is None
+        await _exec(f"UPDATE tags SET embedding = ARRAY[0.5, -1.25, 2.0]::real[], "
+                    f"embedding_model = 'test-model' WHERE id = {old}")
+        assert list(await _scalar("SELECT embedding FROM tags WHERE id = :t", t=old)) == [0.5, -1.25, 2.0]
+        assert await _scalar("SELECT embedding_model FROM tags WHERE id = :t", t=old) == "test-model"
+
+        # The repository sees the columns at this revision (it is head): a tag
+        # made through it stores a vector, and reindex replaces the one from
+        # the other model.
+        from conftest import FakeEmbedder
+
+        eng = make_test_engine()
+        sm = make_sessionmaker(eng)
+        try:
+            async with sm() as s, s.begin():
+                await repo.add(s, "a memory with a tag", "tester", "proj",
+                               [TagIn(name="ui", description="the dashboard")], "note",
+                               embedder=FakeEmbedder())
+                assert await repo.reindex(s, FakeEmbedder()) == {"updated": 0, "tags": 1}
+        finally:
+            await eng.dispose()
+        assert await _column_values("SELECT embedding_model FROM tags ORDER BY id") == ["fake", "fake"]
+        assert await _scalar("SELECT embedding FROM tags WHERE id = :t", t=old) != [0.5, -1.25, 2.0]
+
+        # Downgrade one step: both columns are gone, the tags stay.
+        _alembic("downgrade", SUPERSEDES)
+        assert await _columns("tags", "embedding") == {}
+        assert await _scalar("SELECT count(*) FROM tags") == 2
+        assert await _scalar("SELECT count(*) FROM memories") == 1
     finally:
         await _exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
         await _create_all()

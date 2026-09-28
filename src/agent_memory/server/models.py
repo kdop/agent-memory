@@ -144,6 +144,13 @@ class Tag(Base):
     name: Mapped[str] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text)
 
+    # The vector of `name: description`, and the model that made it, so the
+    # review can rank the tags on offer without embedding them again on
+    # every call. Set when the tag is created or its description changes,
+    # and by reindex for the rest. Internal, like the memory's vector.
+    embedding: Mapped[list[float] | None] = mapped_column(ARRAY(REAL))
+    embedding_model: Mapped[str | None] = mapped_column(Text)
+
     memories: Mapped[list[Memory]] = relationship(
         secondary="memory_tags", back_populates="tags",
     )
