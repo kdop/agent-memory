@@ -77,6 +77,21 @@ class ReviewOut(BaseModel):
     supersedes: int | None = None
 
 
+class ReviewEntry(BaseModel):
+    """One verdict in a memory's review history (`GET /memories/{id}/reviews`):
+    the fields of `ReviewOut` without `supersedes`, plus when it was given. The
+    link lives on the memory and follows the newest verdict, so an older
+    entry has none to show."""
+
+    created_at: str
+    verdict: str
+    rule: int | None = None
+    reason: str = ""
+    rewrite: str | None = None
+    duplicate_of: int | None = None
+    tags: list[str] = []
+
+
 class MemoryOut(BaseModel):
     id: int
     timestamp: str | None = None

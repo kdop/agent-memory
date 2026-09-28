@@ -17,9 +17,11 @@ from sqlalchemy import (
     Computed,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     Text,
+    desc,
     func,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
@@ -79,11 +81,19 @@ class Memory(Base):
         secondary="memory_tags", back_populates="memories", order_by="Tag.name",
     )
 
-    # What the review model said about this memory, if it has been reviewed.
-    review: Mapped[MemoryReview | None] = relationship(
-        back_populates="memory", uselist=False, foreign_keys="MemoryReview.memory_id",
+    # Every verdict the review model gave on this memory, newest first, so
+    # the first is the one a read reports as `review`. A re-review adds a
+    # row and never rewrites one: the history stays whole.
+    reviews: Mapped[list[MemoryReview]] = relationship(
+        back_populates="memory", foreign_keys="MemoryReview.memory_id",
+        order_by=lambda: (MemoryReview.created_at.desc(), MemoryReview.id.desc()),
         cascade="all, delete-orphan", passive_deletes=True,
     )
+
+    @property
+    def review(self) -> MemoryReview | None:
+        """The newest verdict, or None when the memory has not been reviewed."""
+        return self.reviews[0] if self.reviews else None
 
     # The memories whose `supersedes` points at this one, newest first, so
     # the first is the one a read reports as `superseded_by`. The database
@@ -104,14 +114,16 @@ class Memory(Base):
 
 
 class MemoryReview(Base):
-    """The model's verdict on one memory. One row per memory, replaced when the
-    memory is reviewed again. Advice only: the memory itself is never changed
-    because of it."""
+    """One verdict of the review model on one memory. A memory keeps every
+    verdict it ever got, one row each; a re-review adds a row, and the newest
+    (by `created_at`, then `id`) is the one a read shows. Advice only: the
+    memory itself is never changed because of it."""
 
     __tablename__ = "memory_reviews"
 
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     memory_id: Mapped[int] = mapped_column(
-        ForeignKey("memories.id", ondelete="CASCADE"), primary_key=True
+        BigInteger, ForeignKey("memories.id", ondelete="CASCADE")
     )
     # approve, reject or rewrite (see server/review.py).
     verdict: Mapped[str] = mapped_column(Text)
@@ -134,7 +146,12 @@ class MemoryReview(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    memory: Mapped[Memory] = relationship(back_populates="review", foreign_keys=[memory_id])
+    memory: Mapped[Memory] = relationship(back_populates="reviews", foreign_keys=[memory_id])
+
+    # The newest row per memory is what every read and listing wants.
+    __table_args__ = (
+        Index("ix_memory_reviews_memory_id_created_at", "memory_id", desc(created_at)),
+    )
 
 
 class Tag(Base):

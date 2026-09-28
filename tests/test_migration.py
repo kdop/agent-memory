@@ -40,6 +40,7 @@ REVIEW_TAGS = "7c3e1a9d5b20"
 REVIEW_STATUS = "b8e2f4a6c9d1"
 SUPERSEDES = "d3f9a7c2e6b4"
 TAG_EMBEDDING = "e5a1c7d9f2b3"
+REVIEW_HISTORY = "f4c2a8e6d1b9"  # walked in tests/test_review_history.py
 
 
 def _alembic(*args: str) -> None:

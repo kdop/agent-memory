@@ -36,6 +36,7 @@ from .schemas import (
     MemoryIn,
     MemoryOut,
     ProjectCount,
+    ReviewEntry,
     ReviewOut,
     TagCount,
     TagDetachIn,
@@ -516,6 +517,17 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"Memory #{mid} not found")
         return row
 
+    @app.get("/memories/{mid}/reviews", response_model=list[ReviewEntry], dependencies=guard)
+    async def list_reviews(mid: int, session: AsyncSession = SessionDep):
+        """The memory's review history: every verdict the model gave on it,
+        newest first. Every read of the memory shows only the newest as
+        `review`; this is where the earlier ones are. Empty for a memory
+        that has not been reviewed; 404 when there is no such memory."""
+        rows = await repo.reviews(session, mid)
+        if rows is None:
+            raise HTTPException(status_code=404, detail=f"Memory #{mid} not found")
+        return rows
+
     @app.patch("/memories/{mid}", response_model=UpdateResult, dependencies=guard)
     async def update_memory(mid: int, body: UpdateIn, session: AsyncSession = SessionDep,
                             embedder: Embedder | None = EmbedderDep):
@@ -631,9 +643,11 @@ def create_app(
     @app.post("/admin/review/{mid}", response_model=ReviewOut, dependencies=guard)
     async def review_memory(mid: int, request: Request,
                             reviewer: Reviewer | None = ReviewerDep):
-        """Run the review for one memory now, replacing any earlier verdict, and
-        return the new one. 503 when the server has no review model, 404 when
-        there is no such memory, 502 when the model gave no usable answer."""
+        """Run the review for one memory now and return the new verdict. It is
+        stored as one more row of the memory's history, next to the earlier
+        ones, and every read shows it from now on. 503 when the server has no
+        review model, 404 when there is no such memory, 502 when the model
+        gave no usable answer (then the earlier verdict still shows)."""
         if not _has_model(reviewer):
             reason = getattr(reviewer, "reason", "the server has no review model")
             raise HTTPException(status_code=503, detail=f"Cannot review: {reason}")

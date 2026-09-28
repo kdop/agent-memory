@@ -5,7 +5,7 @@ Three layers. The review module on its own: the rules, the verdict parser,
 is needed. The app with a `FakeReviewer`: the verdict is stored after an add
 and shown with the memory, review is off by default, a failing reviewer costs
 nothing, the neighbours are the nearest by vector in the project, and the
-re-review route replaces the row. The CLI line, against the live server. The
+re-review route adds a row and the newest is shown. The CLI line, against the live server. The
 real model runs once, under the `review` marker, only when
 AGENT_MEMORY_REVIEW_URL names a server that answers.
 """
@@ -361,7 +361,7 @@ async def _review_rows():
     try:
         async with engine.connect() as conn:
             stmt = select(MemoryReview.memory_id, MemoryReview.verdict, MemoryReview.model)
-            return (await conn.execute(stmt.order_by(MemoryReview.memory_id))).all()
+            return (await conn.execute(stmt.order_by(MemoryReview.memory_id, MemoryReview.id))).all()
     finally:
         await engine.dispose()
 
@@ -510,7 +510,8 @@ async def test_forced_add_is_reviewed_too():
     assert len(fake.calls) == 2
 
 
-async def test_re_review_replaces_the_row():
+async def test_re_review_adds_a_row_and_the_newest_is_shown():
+    # The history itself is covered in test_review_history.py.
     fake = FakeReviewer(REJECT)
     async with _App(reviewer=fake) as a:
         mid = (await a.add("first take"))["id"]
@@ -521,7 +522,8 @@ async def test_re_review_replaces_the_row():
         assert resp.status_code == 200
         assert resp.json() == fake.verdict.as_dict()
         assert (await a.get(mid))["review"] == fake.verdict.as_dict()
-        assert await _review_rows() == [(mid, "rewrite", "fake-reviewer")]
+        assert await _review_rows() == [(mid, "reject", "fake-reviewer"),
+                                        (mid, "rewrite", "fake-reviewer")]
 
 
 async def test_re_review_keeps_the_old_row_when_the_model_gives_nothing():

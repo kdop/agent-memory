@@ -226,6 +226,13 @@ class ApiClient:
         status, data = self._call("GET", f"/memories/{mid}")
         return None if status == 404 else data
 
+    def reviews(self, mid):
+        """The memory's review history: every verdict the model gave on it,
+        newest first, each with `created_at`. An empty list for a memory
+        that has not been reviewed; None when there is no such memory."""
+        status, data = self._call("GET", f"/memories/{mid}/reviews")
+        return None if status == 404 else (data or [])
+
     def update(self, mid, *, content=None, project=None, mtype=None,
                set_tags=None, add_tags=None, remove_tags=None):
         body = {}
