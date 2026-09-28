@@ -543,9 +543,17 @@ def test_a_live_server_catches_up_on_its_own_and_the_cli_sees_it(live_server):
             _wait_until(lambda: c.get("/health").json()["review_model"] == "reachable")
             _wait_until(lambda: asyncio.run(_statuses_in_db()) == [(1, "flagged"), (2, "flagged")])
         assert [m["id"] for m, _ in fake.calls] == [1, 2]
-        # Nothing left for a hand-run catch-up.
+        # Nothing left for a hand-run catch-up. The poll ticks every 50 ms and
+        # holds the lock while it looks for work, so a request can land inside
+        # a tick and be told a catch-up is running; ask again until it is not.
         cli = CliDriver(polling_url, token)
-        assert cli.raw("review", "--catch-up").stdout.strip() == "✓ Scheduled 0 reviews"
+        for _ in range(20):
+            out = cli.raw("review", "--catch-up").stdout.strip()
+            if out == "✓ Scheduled 0 reviews":
+                break
+            assert out == "✓ A catch-up is already running; nothing new scheduled", out
+            time.sleep(0.05)
+        assert out == "✓ Scheduled 0 reviews"
     asyncio.run(engine.dispose())
 
 
