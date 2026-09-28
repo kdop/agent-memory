@@ -337,10 +337,10 @@ async def test_review_missing_one_failure_does_not_stop_the_rest(caplog):
     import logging
 
     class FailsOnTwo(FakeReviewer):
-        def review(self, memory, neighbours):
+        def review(self, memory, neighbours, tags=()):
             if memory["content"] == "two":
                 raise RuntimeError("model blew up")
-            return super().review(memory, neighbours)
+            return super().review(memory, neighbours, tags)
 
     async with _App(reviewer=NullReviewer()) as off:
         ids = [(await off.client.post("/memories", json={"content": t, "agent": "t"})).json()["id"]
