@@ -74,7 +74,10 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
   nothing and exits with code 4. Fix the entry, or pass `--force` only when the entry is
   right as written. The header line of every memory says its status (`unverified` until
   the model has checked it, `verified` when it approved, `flagged` when it did not), and
-  only verified memories count as reference when a new entry is checked.
+  only verified memories count as reference when a new entry is checked. A memory that
+  reverses an older one is stored with `supersedes #<old id>` in its header, the old one
+  shows `superseded by #<new id>`, and `--current` on `query` and `search` hides the
+  superseded ones.
 - An agent's own cross-project working rules go under `--project=<agent-name>`.
 - Never write memories to Claude Code's md-file memory (`~/.claude/.../memory/*.md`):
   it is neither shared nor checked in. The DB is the single source of truth.
@@ -101,6 +104,8 @@ memory delete 49 --yes          # without --yes it's a dry run; takes multiple I
 
 When a logged decision is reversed, add a new `decision` that says so and why, rather
 than editing history — the timeline is the point. If that add is refused as a
-duplicate, `--force` is the right call here.
+duplicate, `--force` is the right call here. When the review answers `rewrite,
+duplicate of #<id>`, the suggested text is that memory plus what you added: apply it
+with `memory update <id> --content "…"` instead of adding a new memory.
 
 Full command reference: `memory --help`.

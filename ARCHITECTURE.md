@@ -101,7 +101,12 @@ CREATE TABLE memories (
     -- Whether the review model has checked the row: unverified until a verdict is
     -- stored, then verified (approve) or flagged (reject or rewrite).
     review_status   TEXT NOT NULL DEFAULT 'unverified'
-                    CHECK (review_status IN ('unverified', 'verified', 'flagged'))
+                    CHECK (review_status IN ('unverified', 'verified', 'flagged')),
+    -- The older memory this one reverses or replaces, set from the review
+    -- model's verdict and never from a request. Both rows stay; the old one
+    -- reads as superseded by the newest row that points at it. Cleared when
+    -- the old memory is deleted.
+    supersedes      BIGINT REFERENCES memories(id) ON DELETE SET NULL
 );
 CREATE INDEX idx_content_tsv ON memories USING gin (content_tsv);
 CREATE INDEX ix_memories_timestamp ON memories (timestamp);
@@ -109,6 +114,7 @@ CREATE INDEX ix_memories_agent     ON memories (agent);
 CREATE INDEX ix_memories_project   ON memories (project);
 CREATE INDEX ix_memories_type      ON memories (type);
 CREATE INDEX ix_memories_review_status ON memories (review_status);
+CREATE INDEX ix_memories_supersedes ON memories (supersedes);
 
 -- Canonical tags: case-insensitive-unique name + a required descriptor.
 CREATE TABLE tags (
@@ -218,10 +224,11 @@ have the same length.
   there are no vectors), and the ten tags in use closest to it in meaning
   (`tags_for_review`: the entry and each tag's `name: description` are embedded on the
   fly, never stored; without an embedding model the ten most used tags are offered).
-  The model answers one JSON object with six keys: `verdict` (`approve`, `reject` or
-  `rewrite`), `rule`, `reason`, `rewrite`, `duplicate_of` and `tags`. `parse_verdict`
-  turns it into a `Verdict` and treats anything else as no answer: a missing key, a
-  rule number that is not a rule, a `duplicate_of` the model was not shown; a tag not on
+  The model answers one JSON object with seven keys: `verdict` (`approve`, `reject` or
+  `rewrite`), `rule`, `reason`, `rewrite`, `duplicate_of`, `tags` and `supersedes`.
+  `parse_verdict` turns it into a `Verdict` and treats anything else as no answer: a
+  missing key (`tags` and `supersedes` may be left out), a rule number that is not a
+  rule, a `duplicate_of` or `supersedes` the model was not shown; a tag not on
   the offered list is dropped, and tags on an approve or reject are dropped too. Four
   request settings matter: `think: false` and `format: json`, because otherwise the
   model thinks out loud and returns prose instead of JSON; `temperature: 0`, so the
@@ -233,6 +240,25 @@ have the same length.
   rewrite; every read carries it too), and only verified memories are reference for
   `find_duplicate` and `_nearest`, so an entry the model has not checked can never
   vouch for another.
+
+  **Contradictions and partial repeats.** The prompt's checklist has two cases that
+  look at the listed neighbours, each with one short example. An entry that reverses or
+  replaces a neighbour (another choice on the same question, an old fact that no longer
+  holds) is approved with `supersedes` set to that id; `set_review` stores it in
+  `memories.supersedes` (schema above) on the new memory, on every path a verdict is
+  stored (the warn-mode background task, the enforce-mode write, the catch-up, a
+  re-review), and nothing else ever sets it: the request body has no such field. Every
+  read carries `supersedes` and `superseded_by`, the newest memory (by timestamp, then
+  id) whose link points at this one. An entry that repeats a neighbour and adds to it
+  gets a `rewrite` whose text is the old and the new merged, with `duplicate_of` that
+  id and no rule: in warn mode the new memory is stored and flagged with that
+  suggestion like any rewrite; in enforce mode the `422` carries `duplicate_of` and the
+  merged text, and the CLI ends with `Apply it with 'memory update <old id>' instead of
+  adding.` The timeline rule behind both: a memory is never rewritten or deleted on its
+  own. A contradiction keeps both records, with the current one marked; a partial repeat
+  is merged by the writer, never by the model. `query` and `search` return superseded
+  memories as before, sorted as before; `current=true` (`--current`, and the same
+  parameter on the MCP tools) hides them, and is off by default.
 
   `AGENT_MEMORY_REVIEW` picks how the review runs (`review_mode`, `make_reviewer`):
   `off` (the default, also for an unknown value or a missing `AGENT_MEMORY_REVIEW_URL`)
@@ -279,9 +305,9 @@ have the same length.
   raises counts as unreachable, any other error in a tick is one log line, and the
   loop goes on; the log also says when the loop starts, when a catch-up starts (with
   the count) and when it ends. `GET /health` returns `review_model`. `update` with new
-  content sets the memory back to `unverified` and deletes its review row (the verdict
-  was about the old text), so the next catch-up reads it again; a change of tags,
-  project or type alone keeps both.
+  content sets the memory back to `unverified` and deletes its review row and its
+  `supersedes` link (the verdict was about the old text), so the next catch-up reads it
+  again; a change of tags, project or type alone keeps all three.
 
 Before a check goes live, `scripts/replay_write_checks.py` runs the duplicate check and
 the warnings over a copy of the database in write order and prints what each would
@@ -301,8 +327,9 @@ writes its row to `memory_reviews`. **Query** — build a `SELECT` with
 `selectinload(tags)` and `WHERE` clauses from the filters (date window, project, agent,
 type, `tags.any(lower(name)=…)`), `ORDER BY timestamp DESC`. **Search** — `mode`
 picks keyword search (Full-text search above), search by meaning, or the combined
-search (Search by meaning above). One `AsyncSession` per request, committed if the
-handler returns and rolled back if it raises.
+search (Search by meaning above). Both take `current`, which adds `NOT EXISTS` a
+memory whose `supersedes` points at the row. One `AsyncSession` per request, committed
+if the handler returns and rolled back if it raises.
 
 ## Concurrency & performance
 

@@ -47,9 +47,15 @@ def _header(row):
     """The `━━━ #<id> status: <status> ━━━…` line that opens every memory
     block, on `show`, `query`, `search` and `review`. The status says whether
     the review model has checked the memory: `unverified`, `verified` or
-    `flagged`. A search result adds its score: `━━━ #12 status: verified
-    score 0.87 ━━━…`."""
+    `flagged`. A memory that reverses or replaces an older one adds
+    `supersedes #<id>` after the status, and the older one `superseded by
+    #<id>`. A search result adds its score last: `━━━ #12 status: verified
+    supersedes #3 score 0.87 ━━━…`."""
     head = f"━━━ #{row['id']} status: {row.get('review_status') or 'unverified'}"
+    if row.get("supersedes") is not None:
+        head += f" supersedes #{row['supersedes']}"
+    if row.get("superseded_by") is not None:
+        head += f" superseded by #{row['superseded_by']}"
     score = row.get("score")
     if score is not None:
         head += f" score {score:.2f}"
@@ -125,7 +131,13 @@ def add_memory(args, client):
         print(f"✗ Review: {_verdict_head(e.verdict, e.rule, e.duplicate_of)}: {e.explanation}")
         if e.verdict == "rewrite":
             _print_suggestion(e.rewrite, e.tags)
-        print("Fix the entry, or pass --force to store it as written.")
+        if e.verdict == "rewrite" and e.duplicate_of is not None:
+            # A merge: the entry repeats that memory and adds to it, and the
+            # suggestion is the merged text. It belongs on the old memory,
+            # not in a new one; the writer applies it, never the model.
+            print(f"Apply it with 'memory update {e.duplicate_of}' instead of adding.")
+        else:
+            print("Fix the entry, or pass --force to store it as written.")
         sys.exit(4)
     print(f"✓ Memory #{mid} added ({agent})")
     # One line per rule the entry breaks. The memory is stored either way.
@@ -158,7 +170,8 @@ def query_memories(args, client):
     rows, total = client.query_with_total(
         since_days=args.since_days, since=args.since, until=args.until,
         project=args.project, agent=args.agent, tag=args.tag,
-        mtype=args.type, status=args.status, limit=_effective_limit(args))
+        mtype=args.type, status=args.status, current=args.current,
+        limit=_effective_limit(args))
     if not rows:
         print("No memories found.")
         return
@@ -194,7 +207,8 @@ def review_memories(args, client):
 def search_memories(args, client):
     limit = _effective_limit(args)
     rows = client.search(args.query, project=args.project, agent=args.agent,
-                         since=args.since, tag=args.tag, limit=limit, mode=args.mode)
+                         since=args.since, tag=args.tag, limit=limit, mode=args.mode,
+                         current=args.current)
     if not rows:
         print(f"No memories found for: {args.query}")
         return
@@ -381,6 +395,10 @@ def main():
         "--status", choices=REVIEW_STATUSES,
         help="Only memories with this review status: unverified (the model has not "
              "checked it), verified (approved) or flagged (rejected or a rewrite suggested)")
+    query_parser.add_argument(
+        "--current", action="store_true",
+        help="Hide the memories a newer one supersedes (those whose header says "
+             "'superseded by'); by default every memory is shown")
     query_parser.add_argument("--limit", type=int, help="Limit results (default 100; 0 = all)")
     query_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     query_parser.set_defaults(func=query_memories)
@@ -399,6 +417,9 @@ def main():
     search_parser.add_argument("--agent", help="Filter by agent")
     search_parser.add_argument("--tag", help="Filter by tag")
     search_parser.add_argument("--since", help="Since date (YYYY-MM-DD)")
+    search_parser.add_argument(
+        "--current", action="store_true",
+        help="Hide the memories a newer one supersedes; by default every match is shown")
     search_parser.add_argument("--limit", type=int, default=20, help="Limit results (default 20; 0 = all)")
     search_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     search_parser.set_defaults(func=search_memories)

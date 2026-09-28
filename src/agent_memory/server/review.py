@@ -4,7 +4,12 @@ The model sees the five rules from the memory skill, the new memory, the
 five memories closest to it in the same project, and the ten existing tags
 closest to it in meaning. It answers approve, reject (with the rule the entry
 breaks) or rewrite (with better text and the tags from that list that fit it).
-The verdict is stored next to the memory and shown with it.
+The verdict is stored next to the memory and shown with it. Two cases look
+at the neighbours: an entry that reverses or replaces one is approved with
+`supersedes` set to that id, which the server stores on the new memory as a
+link (both memories stay); an entry that repeats one and adds to it gets a
+rewrite with the merged text and `duplicate_of` that id, for the writer to
+apply to the old memory. The model never changes a stored memory.
 
 In `warn` mode it is advice only: nothing is refused or changed because of
 it, and the write never waits for it. In `enforce` mode the model reads the
@@ -99,9 +104,13 @@ class Verdict:
     breaks or falls short of (None for an approve). `reason` is one sentence.
     `rewrite` is the suggested text when the verdict is `rewrite`, else None.
     `duplicate_of` is the id of the listed neighbour this entry repeats, when
-    the verdict is a reject for that reason, else None. `tags` are the tags
-    the model suggests for the rewritten text, chosen from the ones it was
-    offered; empty unless the verdict is `rewrite`."""
+    the verdict is a reject for that reason, or the listed neighbour this
+    entry repeats and adds to, when the verdict is a rewrite with the merged
+    text, else None. `tags` are the tags the model suggests for the
+    rewritten text, chosen from the ones it was offered; empty unless the
+    verdict is `rewrite`. `supersedes` is the id of the listed neighbour this
+    entry reverses or replaces, else None; it is stored on the memory as its
+    `supersedes` link."""
 
     verdict: str
     rule: int | None
@@ -109,6 +118,7 @@ class Verdict:
     rewrite: str | None
     duplicate_of: int | None
     tags: list[str] = field(default_factory=list)
+    supersedes: int | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -240,10 +250,10 @@ SYSTEM_PROMPT = (
     + "\n\n"
     "You get one new entry, up to five existing entries from the same project, and a "
     "list of existing tag names. Answer with one JSON object and nothing else, with "
-    "exactly these six keys:\n"
+    "exactly these seven keys:\n"
     '{"verdict": "approve" | "reject" | "rewrite", "rule": <number or null>, '
     '"reason": "<one sentence>", "rewrite": "<text>" or null, "duplicate_of": <id or null>, '
-    '"tags": [<names from the list only>]}\n'
+    '"tags": [<names from the list only>], "supersedes": <id or null>}\n'
     "\n"
     "- approve: the entry follows the rules. rule, rewrite and duplicate_of are null; "
     "tags is [].\n"
@@ -253,23 +263,41 @@ SYSTEM_PROMPT = (
     "tags is [].\n"
     "- rewrite: the entry is worth keeping but would follow the rules better in other "
     "words, for example a decision that has a why buried in it. Put the new text in "
-    "rewrite and the rule it falls short of in rule. duplicate_of is null. In tags put "
+    "rewrite and the rule it falls short of in rule. duplicate_of is null, except for an "
+    "entry that repeats a listed entry and adds to it (case 4 below): then rewrite is "
+    "the merged text and duplicate_of is that entry's id. In tags put "
     "the names from the offered list that fit the new text, most fitting first, at most "
     "five; never a name that is not on the list, and [] when none fits.\n"
-    "- An entry that reverses or replaces what an existing entry says is not a repeat: "
-    "approve it.\n"
+    "- supersedes: the id of the listed entry the new entry reverses or replaces, else "
+    "null. An entry that reverses or replaces what an existing entry says is not a "
+    "repeat: approve it and set supersedes.\n"
+    "- duplicate_of and supersedes are the id of a listed entry as a number (12, not "
+    '"12"), or null.\n'
     "- A short entry is fine when it follows the rules. Do not reject for length.\n"
     "- reason is one plain sentence a person can act on.\n"
     "\n"
     "Check the new entry in this order, and stop at the first that applies:\n"
     "1. It tells what was done in a session (rule 2): reject, rule 2.\n"
-    "2. It says the same as a listed existing entry in other words: reject, duplicate_of "
-    "that id.\n"
-    "3. It states what was decided, chosen, learned or will be done, but not why: no "
+    "2. It reverses or replaces what a listed existing entry says (another choice on "
+    "the same question, or an old fact that no longer holds), and says why: approve, "
+    "supersedes that entry's id. Example: the listed entry says 'Chose SQLite because "
+    "one agent writes at a time' and the new entry says 'Moved to Postgres because "
+    "several agents now write at once': approve, supersedes the listed entry's id.\n"
+    "3. It says the same as a listed existing entry in other words, and nothing more: "
+    "reject, duplicate_of that entry's id.\n"
+    "4. It says what a listed existing entry says and adds something to it (a detail, "
+    "a number, a later fact): neither approve nor reject. Answer rewrite, with one "
+    "merged text that keeps the listed entry's words and adds the new part, "
+    "duplicate_of that entry's id, and rule null. Example: the listed entry says 'Chose "
+    "Postgres because several agents write at once' and the new entry says 'Chose "
+    "Postgres because several agents write at once; the pool holds 10 connections': "
+    "rewrite 'Chose Postgres because several agents write at once; the pool holds 10 "
+    "connections', duplicate_of the listed entry's id.\n"
+    "5. It states what was decided, chosen, learned or will be done, but not why: no "
     "'because', no cause, no alternative that was rejected. Then it falls short of rule "
     "3: rewrite it, keeping the writer's words and adding the why when the entry or the "
     "existing entries state it; otherwise reject, rule 3.\n"
-    "4. It states the what and the why, in any order: approve."
+    "6. It states the what and the why, in any order: approve."
 )
 
 
@@ -304,14 +332,17 @@ def parse_verdict(text: str, neighbour_ids: list[int] | None = None,
     expected shape.
 
     Bad JSON, a missing key, a verdict outside `VERDICTS`, a rule number that
-    is not one of the rules, or a `duplicate_of` that names an entry the model
-    was not shown all count as no answer. The caller stores nothing then.
+    is not one of the rules, or a `duplicate_of` or `supersedes` that names
+    an entry the model was not shown all count as no answer. The caller
+    stores nothing then.
 
     `tags` may be left out (then it is empty) but must be a list of strings
     when present. Only a rewrite keeps its tags, and only the names in
     `offered_tags`, matched without regard to case and returned in the offered
     spelling; the rest are dropped. With `offered_tags` None the names are
-    kept as given."""
+    kept as given. `supersedes` may be left out too (then it is None); when
+    present it must be null or the id of a listed neighbour, like
+    `duplicate_of`."""
     try:
         data = json.loads(text)
     except (TypeError, ValueError):
@@ -329,17 +360,20 @@ def parse_verdict(text: str, neighbour_ids: list[int] | None = None,
         return None
     if rewrite is not None and not isinstance(rewrite, str):
         return None
-    if duplicate_of is not None:
-        if not _is_int(duplicate_of):
-            return None
-        if neighbour_ids is not None and duplicate_of not in neighbour_ids:
-            return None
+    supersedes = data.get("supersedes")
+    for ref in (duplicate_of, supersedes):
+        if ref is not None:
+            if not _is_int(ref):
+                return None
+            if neighbour_ids is not None and ref not in neighbour_ids:
+                return None
     raw_tags = data.get("tags") or []
     if not isinstance(raw_tags, list) or not all(isinstance(t, str) for t in raw_tags):
         return None
     tags = _keep_offered(raw_tags, offered_tags) if verdict == "rewrite" else []
     return Verdict(verdict=verdict, rule=rule, reason=reason.strip(),
-                   rewrite=rewrite, duplicate_of=duplicate_of, tags=tags)
+                   rewrite=rewrite, duplicate_of=duplicate_of, tags=tags,
+                   supersedes=supersedes)
 
 
 def _keep_offered(names: list[str], offered: list[str] | None) -> list[str]:

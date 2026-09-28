@@ -22,9 +22,11 @@ from .review import NEIGHBOUR_COUNT, STATUSES, TAG_COUNT, UNVERIFIED, VERIFIED, 
 # ts_headline markers match the old snippet() output so clients render identically.
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
 
-# What every memory read loads with it: its tags and its review, each in one
-# extra query per result set, so `_dump` never triggers a lazy load.
-_LOAD = (selectinload(Memory.tags), selectinload(Memory.review))
+# What every memory read loads with it: its tags, its review and the memories
+# that supersede it, each in one extra query per result set, so `_dump` never
+# triggers a lazy load.
+_LOAD = (selectinload(Memory.tags), selectinload(Memory.review),
+         selectinload(Memory.superseded_by_rows))
 
 # A new memory whose vector scores this close to one already in its project is
 # a duplicate. Cosine on unit vectors: 1.0 is the same text, 0.92 is a rewording.
@@ -60,13 +62,14 @@ def _embed(embedder: Embedder | None, content: str) -> tuple[list[float] | None,
     return embedder.embed([content])[0], embedder.model_name
 
 
-def _dump_review(r: MemoryReview | None) -> dict | None:
-    """The API view of a review row: the verdict and nothing about how it was made."""
+def _dump_review(r: MemoryReview | None, supersedes: int | None = None) -> dict | None:
+    """The API view of a review row: the verdict and nothing about how it was
+    made. `supersedes` is the memory's own link, which the verdict set."""
     if r is None:
         return None
     return {"verdict": r.verdict, "rule": r.rule, "reason": r.reason,
             "rewrite": r.rewrite, "duplicate_of": r.duplicate_of,
-            "tags": list(r.tags or [])}
+            "tags": list(r.tags or []), "supersedes": supersedes}
 
 
 def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> dict:
@@ -81,9 +84,19 @@ def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> 
         "tags": [t.name for t in m.tags],
         "snippet": snippet,
         "score": score,
-        "review": _dump_review(m.review),
+        "review": _dump_review(m.review, m.supersedes),
         "review_status": m.review_status,
+        "supersedes": m.supersedes,
+        # The newest memory that supersedes this one; the rows come newest first.
+        "superseded_by": m.superseded_by_rows[0].id if m.superseded_by_rows else None,
     }
+
+
+def _current_only(stmt):
+    """Keep to the memories nothing supersedes: the `current=True` filter
+    on a query or search. A superseded memory stays in the timeline; this
+    only hides it from a read that asked for the current state."""
+    return stmt.where(~Memory.superseded_by_rows.any())
 
 
 def _check_status(status: str | None) -> None:
@@ -156,9 +169,11 @@ async def find_duplicate(session, embedder, content, project) -> tuple[int, floa
 
 
 async def query(session, *, since_days=None, since=None, until=None, project=None,
-                agent=None, tag=None, mtype=None, status=None, limit=None) -> list[dict]:
+                agent=None, tag=None, mtype=None, status=None, current=False,
+                limit=None) -> list[dict]:
     """The timeline, newest first, narrowed by the filters. `status` keeps to
-    one review status (`unverified`, `verified` or `flagged`)."""
+    one review status (`unverified`, `verified` or `flagged`); `current`
+    hides the memories a newer one supersedes."""
     _check_status(status)
     if since_days is not None:
         since, until = _since_days_window(since_days)
@@ -166,6 +181,8 @@ async def query(session, *, since_days=None, since=None, until=None, project=Non
     stmt = select(Memory).options(*_LOAD)
     if status:
         stmt = stmt.where(Memory.review_status == status)
+    if current:
+        stmt = _current_only(stmt)
     if since:
         stmt = stmt.where(Memory.timestamp >= _as_dt(since))
     if until:
@@ -185,8 +202,11 @@ async def query(session, *, since_days=None, since=None, until=None, project=Non
     return [_dump(m) for m in rows]
 
 
-def _search_filters(stmt, *, project=None, agent=None, since=None, tag=None):
-    """The WHERE clauses every search mode shares."""
+def _search_filters(stmt, *, project=None, agent=None, since=None, tag=None, current=False):
+    """The WHERE clauses every search mode shares. `current` hides the
+    memories a newer one supersedes."""
+    if current:
+        stmt = _current_only(stmt)
     if project:
         stmt = stmt.where(Memory.project == project)
     if agent:
@@ -198,9 +218,11 @@ def _search_filters(stmt, *, project=None, agent=None, since=None, tag=None):
     return stmt
 
 
-async def search(session, text, *, project=None, agent=None, since=None, tag=None, limit=None) -> list[dict]:
+async def search(session, text, *, project=None, agent=None, since=None, tag=None,
+                 current=False, limit=None) -> list[dict]:
     """Keyword search: rows whose words match `text`, best ts_rank first. Each
-    row carries its rank as `score` and a highlighted `snippet`."""
+    row carries its rank as `score` and a highlighted `snippet`. `current`
+    hides the memories a newer one supersedes."""
     tsquery = func.plainto_tsquery("english", text)
     snippet = func.ts_headline("english", Memory.content, tsquery, _HEADLINE)
     rank = func.ts_rank(Memory.content_tsv, tsquery)
@@ -210,7 +232,8 @@ async def search(session, text, *, project=None, agent=None, since=None, tag=Non
         .options(*_LOAD)
         .where(Memory.content_tsv.op("@@")(tsquery))
     )
-    stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag)
+    stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag,
+                           current=current)
     stmt = stmt.order_by(rank.desc())
     if limit:
         stmt = stmt.limit(int(limit))
@@ -219,7 +242,7 @@ async def search(session, text, *, project=None, agent=None, since=None, tag=Non
 
 
 async def search_semantic(session, embedder: Embedder, text, *, project=None, agent=None,
-                          since=None, tag=None, limit=None) -> list[dict]:
+                          since=None, tag=None, current=False, limit=None) -> list[dict]:
     """Search by meaning: rows closest to `text` in vector space, best first.
 
     Takes the same filters as `search`, but only rows that have a vector can
@@ -237,7 +260,8 @@ async def search_semantic(session, embedder: Embedder, text, *, project=None, ag
         # different width, and cosine of two widths is an error, not a low score.
         .where(Memory.embedding.is_not(None), Memory.embedding_model == embedder.model_name)
     )
-    stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag)
+    stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag,
+                           current=current)
     rows = (await session.execute(stmt)).scalars().all()
 
     scored = [(cosine(query_vec, m.embedding), m) for m in rows]
@@ -248,7 +272,7 @@ async def search_semantic(session, embedder: Embedder, text, *, project=None, ag
 
 
 async def search_hybrid(session, embedder: Embedder, text, *, project=None, agent=None,
-                        since=None, tag=None, limit=None) -> list[dict]:
+                        since=None, tag=None, current=False, limit=None) -> list[dict]:
     """Search by words and by meaning at once, fused by rank.
 
     Runs `search` and `search_semantic` with the same filters and no limit,
@@ -261,7 +285,7 @@ async def search_hybrid(session, embedder: Embedder, text, *, project=None, agen
     Best fused score first, ties broken by id, newest first. `limit` of 0 or
     None means all rows. `score` is the fused score; `snippet` comes from the
     keyword hit when there is one, else None."""
-    filters = dict(project=project, agent=agent, since=since, tag=tag, limit=0)
+    filters = dict(project=project, agent=agent, since=since, tag=tag, current=current, limit=0)
     by_words = await search(session, text, **filters)
     by_meaning = await search_semantic(session, embedder, text, **filters)
 
@@ -307,11 +331,14 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
         # vector of the old text would be wrong for the new one.
         m.embedding, m.embedding_model = _embed(embedder, content)
         # New text, new check too: the verdict was about the old text. The
-        # memory goes back to unverified and its review row goes with it, so
-        # the next catch-up picks it up again. A change of tags or project
-        # alone leaves both as they are.
+        # memory goes back to unverified, and its review row and its
+        # `supersedes` link (which that verdict set) go with it, so the next
+        # catch-up reads the new text and sets the link again if it still
+        # holds. A change of tags or project alone leaves all three as they
+        # are.
         m.review_status = UNVERIFIED
         m.review = None
+        m.supersedes = None
         changes.append("content")
     if project is not None:
         m.project = project or None
@@ -417,10 +444,11 @@ async def _ts(session, agg):
 
 # ---- dashboard: unified list + tag management (D1) ------------------------
 async def list_memories(session, *, q=None, tags=(), project=None, agent=None, mtype=None,
-                        status=None, since_days=None, since=None, until=None,
+                        status=None, current=False, since_days=None, since=None, until=None,
                         order="date_desc", limit=100, offset=0) -> tuple[list[dict], int]:
     """The one list endpoint: full-text (`q`) + multi-tag + filters + order +
-    pagination. `status` keeps to one review status. `limit=0` means no limit.
+    pagination. `status` keeps to one review status; `current` hides the
+    memories a newer one supersedes. `limit=0` means no limit.
     Returns (items, total) where total ignores limit/offset."""
     _check_status(status)
     if since_days is not None:
@@ -429,6 +457,8 @@ async def list_memories(session, *, q=None, tags=(), project=None, agent=None, m
     conds = []
     if status:
         conds.append(Memory.review_status == status)
+    if current:
+        conds.append(~Memory.superseded_by_rows.any())
     if since:
         conds.append(Memory.timestamp >= _as_dt(since))
     if until:
@@ -689,13 +719,22 @@ async def unverified_ids(session, *, limit=None) -> list[int]:
 async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
     """Store `verdict` as the review of memory `mid`, replacing any earlier
     one, set the memory's `review_status` from it (`verified` for an
-    approve, `flagged` for a reject or rewrite), and return the API view of
-    the review. `model` names the model that gave it. Raises `LookupError`
-    when there is no such memory."""
+    approve, `flagged` for a reject or rewrite) and its `supersedes` link
+    from `verdict.supersedes` (None clears an earlier link), and return the
+    API view of the review. `model` names the model that gave it. Raises
+    `LookupError` when there is no such memory, or when the verdict names
+    a memory to supersede that does not exist, and `ValueError` when it
+    names the memory itself."""
     memory = await session.get(Memory, mid)
     if memory is None:
         raise LookupError(f"Memory #{mid} not found")
+    if verdict.supersedes is not None:
+        if verdict.supersedes == mid:
+            raise ValueError(f"Memory #{mid} cannot supersede itself")
+        if await session.get(Memory, verdict.supersedes) is None:
+            raise LookupError(f"Memory #{verdict.supersedes} not found")
     memory.review_status = status_for(verdict.verdict)
+    memory.supersedes = verdict.supersedes
     row = await session.get(MemoryReview, mid)
     if row is None:
         row = MemoryReview(memory_id=mid)
@@ -709,7 +748,7 @@ async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
     row.model = model
     row.created_at = datetime.now(timezone.utc)
     await session.flush()
-    return _dump_review(row)
+    return _dump_review(row, memory.supersedes)
 
 
 async def tags_for_review(session, embedder: Embedder | None, content: str,

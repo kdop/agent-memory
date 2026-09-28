@@ -67,6 +67,14 @@ class Memory(Base):
         Text, default=UNVERIFIED, server_default=UNVERIFIED, index=True
     )
 
+    # The older memory this one reverses or replaces, set from the review
+    # model's verdict and never from a request. Both memories stay; the old
+    # one shows as superseded by this one. Cleared, not cascaded, when the
+    # old memory is deleted.
+    supersedes: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("memories.id", ondelete="SET NULL"), index=True
+    )
+
     tags: Mapped[list[Tag]] = relationship(
         secondary="memory_tags", back_populates="memories", order_by="Tag.name",
     )
@@ -75,6 +83,18 @@ class Memory(Base):
     review: Mapped[MemoryReview | None] = relationship(
         back_populates="memory", uselist=False, foreign_keys="MemoryReview.memory_id",
         cascade="all, delete-orphan", passive_deletes=True,
+    )
+
+    # The memories whose `supersedes` points at this one, newest first, so
+    # the first is the one a read reports as `superseded_by`. The database
+    # clears the link when this memory is deleted (`passive_deletes`).
+    superseded_by_rows: Mapped[list[Memory]] = relationship(
+        back_populates="supersedes_memory", foreign_keys=[supersedes],
+        order_by=lambda: (Memory.timestamp.desc(), Memory.id.desc()),
+        passive_deletes=True,
+    )
+    supersedes_memory: Mapped[Memory | None] = relationship(
+        back_populates="superseded_by_rows", foreign_keys=[supersedes], remote_side=[id],
     )
 
     __table_args__ = (
