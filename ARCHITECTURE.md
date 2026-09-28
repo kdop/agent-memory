@@ -18,6 +18,234 @@ Client (CLI / MCP)  ──HTTP──▶  FastAPI service  ──asyncpg──▶
   stdlib-only                    → repository → SQLAlchemy 2.0 async
 ```
 
+## System design
+
+The pictures below say the same as the sections that follow, in one page. They render
+on GitHub and in any editor that draws mermaid.
+
+### The parts and who talks to whom
+
+```mermaid
+flowchart LR
+    subgraph clients [Clients, stdlib only]
+        CLI[memory-cli]
+        MCP[MCP server]
+        WEB[Dashboard in the browser]
+    end
+    subgraph service [The service, one process]
+        API[FastAPI routes]
+        REPO[repository.py]
+        EMB[Embedder<br/>bge-small, in process]
+        REV[OllamaReviewer<br/>urllib in a thread]
+        POLL[Review poll<br/>one asyncio task]
+    end
+    PG[(Postgres<br/>memory-bank)]
+    OLL[Ollama on the GPU machine<br/>qwen3:14b]
+
+    CLI -- HTTP + bearer token --> API
+    MCP -- HTTP + bearer token --> API
+    WEB -- HTTP + bearer token --> API
+    API --> REPO
+    REPO -- asyncpg --> PG
+    REPO --> EMB
+    API --> REV
+    POLL --> REV
+    REV -- HTTP over Tailscale --> OLL
+```
+
+The clients never see a database address. The service is the only thing that opens
+Postgres, the only thing that runs the vector model, and the only thing that calls the
+review model.
+
+### What is stored
+
+```mermaid
+erDiagram
+    memories ||--o{ memory_tags : has
+    tags ||--o{ memory_tags : has
+    memories ||--o| memory_reviews : "reviewed by"
+    memories o|--o| memories : supersedes
+
+    memories {
+        bigint id PK
+        timestamptz timestamp
+        text agent
+        text project
+        text content
+        text type
+        tsvector content_tsv "generated from content"
+        real_array embedding "meaning vector, 384 wide"
+        text embedding_model
+        text review_status "unverified, verified, flagged"
+        bigint supersedes FK "older memory this one replaces"
+    }
+    memory_reviews {
+        bigint memory_id PK, FK
+        text verdict "approve, reject, rewrite"
+        int rule
+        text reason
+        text rewrite
+        bigint duplicate_of FK
+        text_array tags
+        text model
+        timestamptz created_at
+    }
+    tags {
+        bigint id PK
+        text name "unique, case-insensitive"
+        text description
+    }
+    memory_tags {
+        bigint memory_id PK, FK
+        bigint tag_id PK, FK
+    }
+```
+
+### A write, review in warn mode
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as Add route
+    participant D as Postgres
+    participant M as Review model
+
+    C->>A: POST /memories
+    A->>A: warnings (short, no-project, no-reasoning)
+    A->>A: vector of the content
+    A->>D: nearest verified memories in the project
+    alt cosine >= 0.92 and not force
+        A-->>C: 409 duplicate, existing id
+    else
+        A->>D: INSERT memory, status unverified
+        A-->>C: 201 id + warnings
+        Note over A,M: after the response, in the background
+        A->>D: memory, 5 nearest verified neighbours, 10 candidate tags
+        A->>M: rules + entry + neighbours + tags
+        M-->>A: JSON verdict
+        A->>D: memory_reviews row, review_status, supersedes
+    end
+```
+
+The writer never waits for the model. A model that is off, down, slow or answers badly
+means no row and one log line; the memory stays stored.
+
+### A write, review in enforce mode
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as Add route
+    participant D as Postgres
+    participant M as Review model
+
+    C->>A: POST /memories
+    A->>D: duplicate check against verified memories
+    alt duplicate and not force
+        A-->>C: 409
+    else force
+        A->>D: INSERT, status unverified
+        A-->>C: 201 (review runs in the background)
+    else
+        A->>M: rules + entry + neighbours + tags
+        alt reject or rewrite
+            A-->>C: 422 verdict, rule, explanation, suggested text and tags
+        else approve
+            A->>D: INSERT, status verified, review row
+            A-->>C: 201
+        else no verdict
+            A->>D: INSERT, status unverified
+            A-->>C: 201 (one log line)
+        end
+    end
+```
+
+### The life of a memory's status
+
+```mermaid
+stateDiagram-v2
+    [*] --> unverified: written
+    unverified --> verified: model approves
+    unverified --> flagged: model rejects or asks for a rewrite
+    verified --> unverified: content edited
+    flagged --> unverified: content edited
+    flagged --> verified: reviewed again, approved
+    verified --> flagged: reviewed again, rejected
+    note right of verified
+        Only verified memories serve as
+        reference: for the duplicate check
+        and as the model's neighbours.
+    end note
+```
+
+A memory that is superseded keeps its status; `superseded_by` is a link, not a state.
+Queries return superseded memories unless `current` is asked for.
+
+### Search
+
+```mermaid
+flowchart TD
+    Q[query text + filters] --> MODE{mode}
+    MODE -- keyword --> K[tsvector match<br/>ranked by ts_rank<br/>snippet]
+    MODE -- semantic --> S[vector of the query<br/>cosine against stored vectors<br/>in Python]
+    MODE -- hybrid --> K2[keyword list, no limit]
+    MODE -- hybrid --> S2[semantic list, no limit]
+    K2 --> F[fuse by rank:<br/>score = sum of 1 / 60 + rank]
+    S2 --> F
+    K --> OUT[results with score]
+    S --> OUT
+    F --> OUT
+```
+
+Rank fusion, not score fusion, because `ts_rank` and cosine live on different scales.
+A memory found both ways always outranks one found one way at the same rank.
+
+### The poll and the catch-up
+
+```mermaid
+flowchart TD
+    T[tick, every AGENT_MEMORY_REVIEW_POLL s] --> R{model answers<br/>GET /api/tags?}
+    R -- no --> U[health: unreachable] --> T
+    R -- yes --> L{catch-up<br/>already running?}
+    L -- yes --> T
+    L -- no --> P[pick unverified ids,<br/>oldest first]
+    P --> E[review one, store verdict]
+    E --> N{more?}
+    N -- yes --> E
+    N -- no --> T
+```
+
+Oldest first, one at a time, so each memory is verified before the next one is compared
+against it. `POST /admin/review` and `memory review --catch-up` enter the same path and
+share the same lock.
+
+### Where things run
+
+```mermaid
+flowchart LR
+    subgraph vm [This machine, fedora]
+        SVC[Live service<br/>systemd user unit<br/>runs from the main checkout, port 8099]
+        TEST[Test instance<br/>scripts/test_instance.sh<br/>runs from a worktree, port 8001]
+        COPY[(Copy of the database<br/>podman memcopy, port 5434)]
+        MT[(Test database<br/>podman memtest, port 5433)]
+    end
+    subgraph db [ocean-main, over Tailscale]
+        PG[(Postgres memory-bank)]
+    end
+    subgraph gpu [kks-desktop, over Tailscale]
+        OLL[Ollama, RX 9070<br/>qwen3:14b, nomic-embed-text]
+    end
+    SVC --> PG
+    TEST --> COPY
+    SVC -. review, when on .-> OLL
+    TEST -. review .-> OLL
+    PG -. pg_dump, read only .-> COPY
+```
+
+The live service runs whatever branch the main checkout is on, so that checkout stays
+on `main`; branch work happens in worktrees. The test instance is how new code meets
+real data before anything goes live.
+
 ## Package layout
 
 ```
