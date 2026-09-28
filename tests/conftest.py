@@ -278,14 +278,14 @@ def retrieval_set():
 
 
 def pytest_terminal_summary(terminalreporter):
-    """Print recorded retrieval scores at the end of the run, so they show even
-    under `-q`, where a passing test's stdout is hidden."""
+    """Print recorded retrieval and verdict scores at the end of the run, so
+    they show even under `-q`, where a passing test's stdout is hidden."""
     lines = []
     for rep in terminalreporter.stats.get("passed", []):
         for name, value in getattr(rep, "user_properties", []):
-            if name.startswith("recall@"):
+            if name.startswith(("recall@", "verdict ")):
                 lines.append(f"{rep.nodeid}: {name} = {value}")
     if lines:
-        terminalreporter.write_sep("-", "retrieval scores")
+        terminalreporter.write_sep("-", "quality scores")
         for line in lines:
             terminalreporter.write_line(line)
