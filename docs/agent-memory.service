@@ -1,0 +1,28 @@
+# The systemd user unit for the live agent-memory service.
+#
+# Install it once:
+#   cp docs/agent-memory.service ~/.config/systemd/user/agent-memory.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agent-memory
+#
+# The service runs from the release checkout, %h/workspace/agent-memory-live,
+# which scripts/deploy.sh keeps on a tag. If your release checkout lives
+# elsewhere, change the two paths below. The server reads AGENT_MEMORY_DB and
+# AGENT_MEMORY_API_TOKEN from that checkout's .env, so no secrets live here.
+
+[Unit]
+Description=agent-memory API server (FastAPI, Postgres-backed)
+Documentation=https://github.com/kdop/agent-memory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/workspace/agent-memory-live
+ExecStart=%h/workspace/agent-memory-live/.venv/bin/python -m agent_memory.server
+# The DB is reached over Tailscale; keep retrying until the network is up.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
