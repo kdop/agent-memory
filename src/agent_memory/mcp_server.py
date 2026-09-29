@@ -43,8 +43,11 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
         note (reference), or omitted; any other value is refused.
         `tags` is a list of {"name": str, "description": str (optional)}
         — a brand-new tag with no description auto-defaults to its own name. Returns
-        {"id": <new id>, "warnings": [...]}: warnings are rule names the entry breaks
-        (short, no-project, no-reasoning). The memory is stored either way, unless a
+        {"id": <new id>, "warnings": [...], "notes": [...]}: warnings are rule names
+        the entry breaks (short, no-project, no-reasoning, too-many-tags); notes say
+        which tags were stored under another name, e.g. 'tag "Skills" stored as
+        "skill"' (a tag name is cleaned, and a plural or a tag of the same meaning
+        reuses the existing tag). The memory is stored either way, unless a
         near-duplicate already exists in the same project: then nothing is stored and
         the result is {"error": "duplicate", "existing_id": <id>, "score": <cosine>}.
         Update that memory instead, or pass force=true to store this one anyway.
@@ -61,7 +64,7 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
         old id as `supersedes`, set by the review model, never by the
         caller; the old one then carries `superseded_by`."""
         try:
-            mid, warnings = api.add_with_warnings(
+            added = api.add_full(
                 content, agent or get_agent_name(), project, tags or [], type, force=force)
         except DuplicateMemory as e:
             return {"error": "duplicate", "existing_id": e.existing_id, "score": e.score}
@@ -69,7 +72,7 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
             return {"error": "review", "verdict": e.verdict, "rule": e.rule,
                     "explanation": e.explanation, "rewrite": e.rewrite, "tags": e.tags,
                     "duplicate_of": e.duplicate_of}
-        return {"id": mid, "warnings": warnings}
+        return added
 
     @mcp.tool()
     def memory_query(since_days: Optional[int] = None,

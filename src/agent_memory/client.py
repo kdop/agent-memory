@@ -167,12 +167,18 @@ class ApiClient:
     # ---- operations ------------------------------------------------------
     def add(self, content, agent, project, tags, mtype, force=False):
         """The new id only."""
-        mid, _ = self.add_with_warnings(content, agent, project, tags, mtype, force=force)
-        return mid
+        return self.add_full(content, agent, project, tags, mtype, force=force)["id"]
 
     def add_with_warnings(self, content, agent, project, tags, mtype, force=False):
         """(id, warnings): warnings is the list of rule names the entry breaks
-        (see server/checks.py). The memory is stored either way, unless the
+        (see server/checks.py). See `add_full`."""
+        data = self.add_full(content, agent, project, tags, mtype, force=force)
+        return data["id"], data["warnings"]
+
+    def add_full(self, content, agent, project, tags, mtype, force=False):
+        """{"id", "warnings", "notes"}: warnings are the rule names the entry
+        breaks (see server/checks.py), notes say which tags were stored under
+        another name than written. The memory is stored either way, unless the
         server finds a near-duplicate in the same project (then it raises
         `DuplicateMemory`) or its review model, in refuse mode, rejects the
         entry or wants it rewritten (then `ReviewRefused`); in both cases
@@ -183,7 +189,8 @@ class ApiClient:
         }
         params = {"force": "true"} if force else None
         _, data = self._call("POST", "/memories", params=params, body=body)
-        return data["id"], data.get("warnings") or []
+        return {"id": data["id"], "warnings": data.get("warnings") or [],
+                "notes": data.get("notes") or []}
 
     def query(self, *, since_days=None, since=None, until=None, project=None,
               agent=None, tag=None, mtype=None, status=None, current=False,

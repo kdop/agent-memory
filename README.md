@@ -95,6 +95,7 @@ warnings can print after the id, one per line: `warning: short` (under 40 charac
 `warning: no-project` (no `--project`), and `warning: no-reasoning` (a `decision`,
 `lesson` or `constraint` with no word that says why, such as "because" or "rejected"). Warnings never
 block; the memory is stored either way.
+Tag names are cleaned on write (lowercase, hyphens for spaces and underscores), and a plural, or a tag whose vector is at cosine 0.90 or more to an existing one, reuses that tag; each reuse prints `note: tag "comms" stored as "communication"`, and more than 10 tags prints `warning: too-many-tags`.
 
 **Review by a model.** The server can also have a model read each new memory and judge
 it against the five rules in the skill. The model answers `approve`, `reject` with the

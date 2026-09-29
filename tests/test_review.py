@@ -449,7 +449,7 @@ async def test_flag_mode_stores_the_verdict_and_every_read_shows_it():
         resp = await a.post("Spent the afternoon tidying the config module.", type="note",
                             tags=["work-log"])
         # The add response is as before: the id and the warnings.
-        assert set(resp.json()) == {"id", "warnings"}
+        assert set(resp.json()) == {"id", "warnings", "notes"}
         mid = resp.json()["id"]
         # The model read the memory as stored, unverified at that point.
         memory, neighbours, _ = fake.calls[-1]
@@ -774,7 +774,7 @@ async def test_refuse_mode_approve_stores_the_memory_verified_with_one_call():
     async with App(reviewer=fake, review_mode="refuse") as a:
         resp = await a.post("Chose Postgres, because several agents write at once.",
                             type="decision")
-        assert resp.status_code == 201 and set(resp.json()) == {"id", "warnings"}
+        assert resp.status_code == 201 and set(resp.json()) == {"id", "warnings", "notes"}
         row = await a.get(resp.json()["id"])
         assert row["review"] == APPROVE.as_dict() and row["review_status"] == "verified"
     assert await review_rows() == [(1, "approve", "fake-reviewer")]
