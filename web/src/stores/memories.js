@@ -9,9 +9,16 @@ export const SEARCH_MODES = ['keyword', 'semantic', 'hybrid']
 // The review statuses a memory can carry (see CONTRACT.md, MemoryOut).
 export const REVIEW_STATUSES = ['unverified', 'verified', 'flagged']
 
+// The memory types the server accepts (server/schemas.py ALLOWED_MEMORY_TYPES).
+// A constraint is a hard rule, so it gets the strongest badge.
+export const MEMORY_TYPES = ['constraint', 'decision', 'lesson', 'note', 'preference']
+export const TYPE_COLOR = {
+  constraint: 'negative', decision: 'primary', lesson: 'teal', note: 'grey-7', preference: 'indigo-4',
+}
+
 // The shared memories view-state. The table, the search bar,
 // and the multi-tag filter all drive it. The view-state fields (q/mode/tags/
-// status/current/order/limit/offset) round-trip to the URL via
+// type/status/current/order/limit/offset) round-trip to the URL via
 // composables/useUrlSync.js.
 export const useMemoriesStore = defineStore('memories', () => {
   // ---- view-state (URL-synced) ----
@@ -20,6 +27,7 @@ export const useMemoriesStore = defineStore('memories', () => {
   const tags = ref([])         // array of tag names, OR-combined
   const agent = ref('')        // right-rail: exact agent filter ('' = any)
   const project = ref('')      // right-rail: exact project filter ('' = any)
+  const type = ref('')         // right-rail: memory type filter ('' = any)
   const status = ref('')       // right-rail: review status filter ('' = any)
   const current = ref(false)   // right-rail: hide the memories a newer one supersedes
   const order = ref('date_desc') // '<field>_<asc|desc>'
@@ -75,6 +83,7 @@ export const useMemoriesStore = defineStore('memories', () => {
     tags.value = []
     agent.value = ''
     project.value = ''
+    type.value = ''
     status.value = ''
     current.value = false
     order.value = 'date_desc'
@@ -89,7 +98,7 @@ export const useMemoriesStore = defineStore('memories', () => {
     try {
       if (ranked.value) {
         // Semantic and hybrid live on /memories/search: one ranked list, no
-        // pages, one tag filter, no status filter. The list route's keyword
+        // pages, one tag filter, no type or status filter. The list route's keyword
         // search keeps its pages and filters, so keyword mode stays there.
         const { items, fallback: fb } = await api.searchMemories({
           q: q.value,
@@ -109,6 +118,7 @@ export const useMemoriesStore = defineStore('memories', () => {
           tag: tags.value.length ? tags.value : undefined,
           agent: agent.value || undefined,
           project: project.value || undefined,
+          type: type.value || undefined,
           status: status.value || undefined,
           current: current.value || undefined,
           order: order.value,
@@ -129,7 +139,7 @@ export const useMemoriesStore = defineStore('memories', () => {
 
   return {
     // view-state
-    q, mode, tags, agent, project, status, current, order, limit, offset,
+    q, mode, tags, agent, project, type, status, current, order, limit, offset,
     // results
     results, total, loading, error, fallback, ranked,
     // derived + helpers

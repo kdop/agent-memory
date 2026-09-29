@@ -393,7 +393,7 @@ def main():
         "--tags",
         help='JSON array of tag objects, e.g. \'[{"name":"auth","description":"authentication flow"},{"name":"db"}]\'. '
              "description is optional (a new tag with none defaults to its own name).")
-    add_parser.add_argument("--type", help="Memory type (decision, lesson, note, preference)")
+    add_parser.add_argument("--type", help="Memory type (constraint, decision, lesson, note, preference)")
     add_parser.add_argument("--force", action="store_true",
                             help="Store even when a near-duplicate exists in the project "
                                  "(without it, a duplicate is refused with exit code 3), "
@@ -408,7 +408,8 @@ def main():
     query_parser.add_argument("--project", help="Filter by project")
     query_parser.add_argument("--agent", help="Filter by agent")
     query_parser.add_argument("--tag", help="Filter by tag")
-    query_parser.add_argument("--type", help="Filter by type")
+    query_parser.add_argument(
+        "--type", help="Filter by type (constraint, decision, lesson, note, preference)")
     query_parser.add_argument(
         "--status", choices=REVIEW_STATUSES,
         help="Only memories with this review status: unverified (the model has not "
@@ -466,7 +467,9 @@ def main():
     content_group.add_argument("--content", help="New content (use '-' to read from stdin)")
     content_group.add_argument("--content-file", help="Read new content from file")
     update_parser.add_argument("--project", help="Set project (empty string clears)")
-    update_parser.add_argument("--type", help="Set type (empty string clears)")
+    update_parser.add_argument(
+        "--type", help="Set type (constraint, decision, lesson, note, preference; "
+                        "empty string clears)")
     update_parser.add_argument("--set-tags", help='Replace all tags: JSON array of tag objects, e.g. \'[{"name":"auth"}]\' ("[]" removes all)')
     update_parser.add_argument("--add-tags", help='Add tags (idempotent): JSON array of tag objects, e.g. \'[{"name":"db","description":"the database"}]\'')
     update_parser.add_argument("--remove-tags", help="Remove tags by name (comma-separated)")

@@ -99,7 +99,7 @@ def build_embedder(kind: str) -> Embedder:
 def memory_in(m: Memory) -> MemoryIn:
     """The request the memory would have been written with. A type the API no
     longer accepts is treated as no type: the warnings only care whether it is a
-    decision or a lesson."""
+    decision, a lesson or a constraint."""
     tags = [TagIn(name=t.name, description=t.description) for t in m.tags]
     try:
         return MemoryIn(content=m.content, project=m.project, agent=m.agent,

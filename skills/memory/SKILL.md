@@ -45,24 +45,33 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
   --tags='[{"name":"auth","description":"authentication"},{"name":"feature"}]'
 ```
 
-- **Types** (the API accepts only these; anything else is a 422): `decision` (architecture,
-  tooling, judgment calls — include the rejected alternatives), `lesson` (mistakes,
-  insights), `preference` (standing behavioral rules — user corrections or
-  confirmations about how to work), `note` (everything else: changes, refactors,
-  status, work log). Omitting `--type` is valid.
+- **Types** (the API accepts only these; anything else is a 422). The type says how
+  to act on a memory, when you write it and when you read it back:
+
+  | Type | What it is | How to act on it |
+  |---|---|---|
+  | `constraint` | A hard rule ("remote jobs only"). | Never break it. If a task conflicts with it, stop and ask. |
+  | `preference` | A soft rule: how the user likes things done. | Follow it by default. If you trade it off, say so and why. |
+  | `decision` | A settled choice, with the options turned down. | Don't reopen it without new information. |
+  | `lesson` | A past cause and effect: a mistake, an insight. | Check it before doing similar work. |
+  | `note` | Reference: anything else worth keeping. | No weight on how you act. |
+
+  Rule 3 (the why) is expected for decisions, lessons and constraints; preferences and
+  notes are exempt. Omitting `--type` is valid.
 - **Tags** are a JSON array of `{"name", "description"}`; `description` is optional
   and a new tag without one defaults to its own name. Tag liberally — tags are what
   make future searches land.
 - **Log:** what will still matter in a later session — decisions with their reasoning
-  and the alternatives rejected, lessons with their cause, stated preferences, a
-  deliberate non-action, an environment gotcha. Log as it happens, not at the end.
+  and the alternatives rejected, lessons with their cause, hard rules the user sets,
+  stated preferences, a deliberate non-action, an environment gotcha. Log as it
+  happens, not at the end.
 - **Skip:** diary entries. Before adding, ask: could a future session reconstruct this
   from `git log`? If yes, skip it. "Did X, shipped Y" with no reasoning is git's job.
   The what is usually in git; the why is not, and the why is what to write down.
 - **Warnings:** `add` may print `warning: short`, `warning: no-project` or
   `warning: no-reasoning` after the id. The memory is stored; the line says what the
-  entry lacks (under 40 characters, no `--project`, a decision or lesson with no why).
-  If the warning is right, fix the entry with `memory update <id>`.
+  entry lacks (under 40 characters, no `--project`, a decision, lesson or constraint
+  with no why). If the warning is right, fix the entry with `memory update <id>`.
 - **Duplicate refusal:** `add` refuses an entry whose meaning is nearly the same as one
   already in the project. Nothing is stored; the message names the existing id and the
   exit code is 3. Update that memory instead. Use `--force` only when the new entry is

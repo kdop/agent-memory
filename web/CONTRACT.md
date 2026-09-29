@@ -23,7 +23,7 @@ and validates it on login by calling `GET /tags`.
   "agent": "my-agent",
   "project": "agent-memory",                    // may be null
   "content": "…",
-  "type": "decision",                           // may be null
+  "type": "decision",                           // constraint | decision | lesson | note | preference, or null
   "tags": ["auth", "db"],                       // tag NAMES, alphabetical
   "snippet": "→match← …",                       // only present on search (q=), else null
   "score": 0.42,                                // only on GET /memories/search, else null
@@ -62,7 +62,7 @@ Query params (all optional):
 | `tag` | string (repeatable) | **AND** — a memory must have *every* listed tag. `?tag=a&tag=b` |
 | `project` | string | exact |
 | `agent` | string | exact |
-| `type` | string | exact |
+| `type` | string | exact: `constraint`\|`decision`\|`lesson`\|`note`\|`preference` |
 | `status` | `unverified`\|`verified`\|`flagged` | one review status |
 | `current` | bool | `true` hides the memories a newer one supersedes |
 | `since_days` | int | rolling window: since the start of the day N days ago (0=today, 7=past week); overrides since/until |
@@ -105,6 +105,9 @@ the model has not read yet), `limit` (default 100, 0 = all).
 Body: `{ "content": str, "agent"?: str, "project"?: str, "type"?: str, "tags"?: TagIn[] }`
 **`201`** → `{ "id": 42, "warnings": [] }`. Empty/blank tag name → `422`. In enforce
 mode a review the model refuses → `422` with `detail.reason = "review"` and the verdict.
+Any `type` other than the five (`constraint`, `decision`, `lesson`, `note`,
+`preference`) → `422`. The table shows the type as a badge: a filled red one for a
+`constraint` (a hard rule), an outline one for the rest.
 
 ### `GET /memories/bulk?ids=1&ids=2` — compact rows
 **`200`** → `[{ "id", "agent", "project", "type", "content" }]`.
@@ -175,7 +178,7 @@ the model gave no verdict; **`503`** without a model. The dashboard then re-read
 ## Mock seed (for `web/src/mocks/`)
 
 Seed the mock with ~250 memories across agents `alpha`/`beta`, projects
-`agent-memory`/`web-app`/null, types `decision`/`lesson`/`note`/`preference`, and ~40 tags with
+`agent-memory`/`web-app`/null, types `constraint`/`decision`/`lesson`/`note`/`preference`, and ~40 tags with
 descriptions and realistic counts, timestamps spread over the last ~60 days — enough to
 exercise pagination (3 pages), search, AND-filtering, and tag merge. Most memories are
 `verified`, some `flagged` (a mix of `reject` and `rewrite` verdicts), the newest

@@ -109,6 +109,22 @@ def test_cli_add_refuses_malformed_tags_and_stores_nothing(cli, url, tags, messa
     assert httpx.get(f"{url}/memories", headers=AUTH).json() == []
 
 
+def test_cli_passes_the_constraint_type_through(cli):
+    out = cli.raw("add", "Apply for remote jobs only, because the user will not move.",
+                  "--project", "jobs", "--type", "constraint").stdout
+    assert out == "✓ Memory #1 added (tester)\n"
+    cli.raw("add", "Prefer short cover letters over long ones.", "--project", "jobs",
+            "--type", "preference")
+    (m,) = cli.query(type="constraint")
+    assert (m.id, m.type) == (1, "constraint")
+    assert "✓ Memory #2 updated: type → constraint" in cli.raw(
+        "update", "2", "--type", "constraint").stdout
+    assert [m.id for m in cli.query(type="constraint")] == [2, 1]
+    assert "constraint" in cli.raw("add", "--help").stdout
+    proc = cli.raw("add", "Some rule for the jobs project.", "--type", "rule")
+    assert proc.returncode == 1 and "422" in proc.stdout + proc.stderr
+
+
 def test_cli_add_duplicate_exits_3_and_force_stores_it(cli):
     cli.raw("add", "dup me", "--project", "proj")
     verify(1)
@@ -559,6 +575,26 @@ async def test_mcp_tools_and_their_result_shapes(url):
                                                        "description": "animals"}]}
         assert await call("memory_projects") == {"projects": [{"project": "p", "count": 3}]}
         assert (await call("memory_stats"))["total"] == 3
+
+
+async def test_mcp_passes_the_constraint_type_through(url):
+    async with mcp_session(url) as call:
+        added = await call("memory_add", content="Apply for remote jobs only, because the "
+                           "user will not move.", project="jobs", type="constraint")
+        assert added == {"id": 1, "warnings": []}
+        await call("memory_add", content="Prefer short cover letters over long ones.",
+                   project="jobs", type="note")
+        rows = (await call("memory_query", type="constraint"))["memories"]
+        assert [(m["id"], m["type"]) for m in rows] == [(1, "constraint")]
+        assert await call("memory_update", id=2, type="constraint") == {
+            "found": True, "changes": ["type → constraint"]}
+        # An unknown type is refused and nothing is stored.
+        bad = await call.session.call_tool("memory_add", {"content": "x", "type": "rule"})
+        assert bad.isError and "422" in bad.content[0].text
+        assert (await call("memory_stats"))["total"] == 2
+        tools = {t.name: t for t in (await call.session.list_tools()).tools}
+    for name in ("memory_add", "memory_query", "memory_update"):
+        assert "constraint" in tools[name].description
 
 
 async def test_mcp_flagged_and_the_history(url):

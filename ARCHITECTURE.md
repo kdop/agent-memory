@@ -469,8 +469,8 @@ have the same length.
   `--force`, MCP `force=true`) skips the check. Without the model there are no vectors
   to compare, so nothing is refused.
 - **Warnings.** `checks.py` holds three rules as data: `short` (content under 40
-  characters), `no-project` (no project given), `no-reasoning` (a `decision` or
-  `lesson` whose text has none of the words that say why: because, since, reason, why,
+  characters), `no-project` (no project given), `no-reasoning` (a `decision`,
+  `lesson` or `constraint` whose text has none of the words that say why: because, since, reason, why,
   rejected, instead, so that, cause, trade-off, alternative). The names of the rules
   the entry breaks come back next to the new id. They never block; the memory is
   stored either way.

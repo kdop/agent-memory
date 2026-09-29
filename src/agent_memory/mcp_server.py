@@ -38,7 +38,10 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
     def memory_add(content: str, agent: Optional[str] = None,
                    project: Optional[str] = None, tags: Optional[list[dict]] = None,
                    type: Optional[str] = None, force: bool = False) -> dict:
-        """Add a memory. `tags` is a list of {"name": str, "description": str (optional)}
+        """Add a memory. `type` is one of constraint (a hard rule), preference (a
+        soft rule), decision (a settled choice), lesson (a past cause and effect) or
+        note (reference), or omitted; any other value is refused.
+        `tags` is a list of {"name": str, "description": str (optional)}
         — a brand-new tag with no description auto-defaults to its own name. Returns
         {"id": <new id>, "warnings": [...]}: warnings are rule names the entry breaks
         (short, no-project, no-reasoning). The memory is stored either way, unless a
@@ -77,7 +80,8 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
                      limit: Optional[int] = None) -> dict:
         """Query memories by time/project/agent/tag/type/status. since_days is a
         rolling window: everything since the start of the day N days ago (0=today,
-        7=past week). `status` keeps to one review status: "unverified" (the
+        7=past week). `type` is one of constraint, decision, lesson, note or
+        preference. `status` keeps to one review status: "unverified" (the
         review model has not checked the memory), "verified" (approved) or
         "flagged" (rejected, or a rewrite suggested); every memory carries its
         own as `review_status`. `current=true` hides the memories a newer one
@@ -149,7 +153,8 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
     def memory_update(id: int, content: Optional[str] = None, project: Optional[str] = None,
                       type: Optional[str] = None, set_tags: Optional[list[dict]] = None,
                       add_tags: Optional[list[dict]] = None, remove_tags: Optional[list[str]] = None) -> dict:
-        """Update fields of a memory. `set_tags`/`add_tags` are lists of
+        """Update fields of a memory. `type` is one of constraint, decision, lesson,
+        note or preference; "" clears it. `set_tags`/`add_tags` are lists of
         {"name": str, "description": str (optional)}; `remove_tags` is a list of names.
         Returns {"found": bool, "changes": [...]}."""
         changes = api.update(

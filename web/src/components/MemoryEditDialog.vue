@@ -8,6 +8,7 @@
 // the verdict and the supersedes links, which emit `open` with the other id.
 import { reactive, computed, watch } from 'vue'
 import { useTagsStore } from '@/stores/tags'
+import { MEMORY_TYPES } from '@/stores/memories'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -16,7 +17,6 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue', 'submit', 'open'])
 
 const tags = useTagsStore()
-const TYPES = ['decision', 'code', 'lesson', 'note']
 
 const isEdit = computed(() => !!props.memory)
 
@@ -139,7 +139,7 @@ function close() {
             outlined
             dense
             clearable
-            :options="TYPES"
+            :options="MEMORY_TYPES"
           />
         </div>
 

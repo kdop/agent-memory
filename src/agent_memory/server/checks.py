@@ -1,7 +1,7 @@
 """Write-time checks on a new memory.
 
 The memory skill has rules a program can partly see: an entry should be more than a
-stub, should name its project, and a decision or lesson should say why. `warnings_for`
+stub, should name its project, and a decision, lesson or constraint should say why. `warnings_for`
 looks at a `MemoryIn` and returns one fixed string per rule it breaks. Nothing here
 blocks a write. The memory is stored either way; the warning only tells the writer,
 at the moment of writing, while the reason is still in their head.
@@ -17,7 +17,7 @@ from .schemas import MemoryIn
 SHORT_LIMIT = 40
 
 # Only these types must carry a why.
-REASONING_TYPES = {"decision", "lesson"}
+REASONING_TYPES = {"constraint", "decision", "lesson"}
 
 # Words that show the entry says why. Matched case-insensitively, anywhere in the text.
 REASONING_WORDS = (

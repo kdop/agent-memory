@@ -35,6 +35,8 @@ LONG_WITH_WHY = "Switched the build to run on every push because the nightly was
     (LONG_NO_WHY, "  ", None, ["no-project"]),
     (LONG_NO_WHY, "proj", "decision", ["no-reasoning"]),
     (LONG_NO_WHY, "proj", "lesson", ["no-reasoning"]),
+    (LONG_NO_WHY, "proj", "constraint", ["no-reasoning"]),
+    (LONG_WITH_WHY, "proj", "constraint", []),
     (LONG_NO_WHY, "proj", "preference", []),
     ("We picked the first option BECAUSE it was the simplest of the three.", "proj",
      "lesson", []),
