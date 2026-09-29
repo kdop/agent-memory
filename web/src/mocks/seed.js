@@ -95,12 +95,28 @@ export function buildSeed() {
 
   const pick = (arr) => arr[Math.floor(rng() * arr.length)]
 
-  // Tags keyed by name → { name, description }. Counts are derived from links.
+  // Tags keyed by name → { name, description, review_status }. Counts are
+  // derived from links. Most are verified; the last three are unverified, so
+  // the mock catch-up has tags to review; three are flagged, each with a
+  // proposal from the tag review (GET /tags/flagged).
   const tags = new Map()
   for (const [name, description] of TAG_DEFS) {
-    tags.set(name, { name, description })
+    tags.set(name, { name, description, review_status: 'verified' })
   }
   const tagNames = [...tags.keys()]
+  for (const name of tagNames.slice(-3)) tags.get(name).review_status = 'unverified'
+  const tagProposals = [
+    { tag: 'token', verdict: 'merge', into: 'security', new_name: null,
+      reason: 'A bearer token is part of the security subject; one tag is enough.' },
+    { tag: 'perf', verdict: 'rename', into: null, new_name: 'performance',
+      reason: 'A short form is harder to find; spell it out.' },
+    { tag: 'dogfood', verdict: 'drop', into: null, new_name: null,
+      reason: 'It names no subject a reader would look for.' },
+  ].map((p, i) => {
+    tags.get(p.tag).review_status = 'flagged'
+    return { id: i + 1, tag_id: i + 1, model: 'qwen3:14b',
+             created_at: '2026-09-29 09:00:00+00:00', resolved: null, ...p }
+  })
 
   const memories = []
   const COUNT = 250
@@ -133,6 +149,7 @@ export function buildSeed() {
       review: null,
       supersedes: null,
       superseded_by: null,
+      archived_at: null,
     })
   }
 
@@ -151,17 +168,32 @@ export function buildSeed() {
         tags: [m.tags[0], 'why'].filter(Boolean),
         supersedes: null,
       }
+    } else if (m.id % 14 === 0) {
+      m.review_status = 'flagged'
+      m.review = {
+        verdict: 'reject',
+        rule: 1,
+        reason: 'Will not matter in a later session: it repeats a newer memory.',
+        rewrite: null,
+        duplicate_of: m.id + 1,
+        tags: [],
+        supersedes: null,
+      }
     } else if (m.id % 7 === 0) {
+      // A reject under rule 2 archives the memory; spread the stamps over
+      // the last month (from today, not the seed clock) so the Archived page
+      // shows a range of days left.
       m.review_status = 'flagged'
       m.review = {
         verdict: 'reject',
         rule: 2,
         reason: 'A diary line: it records what was done, which git history already has.',
         rewrite: null,
-        duplicate_of: m.id % 14 === 0 ? m.id + 1 : null,
+        duplicate_of: null,
         tags: [],
         supersedes: null,
       }
+      m.archived_at = stamp(new Date(Date.now() - (m.id % 29) * DAY - 3600_000))
     } else {
       m.review_status = 'verified'
       m.review = {
@@ -179,13 +211,18 @@ export function buildSeed() {
     b.superseded_by = newer
   }
 
-  return { memories, tags }
+  return { memories, tags, tagProposals }
 }
 
 /** Live seed instance the handlers mutate (merge/detach/patch/delete). */
 export const db = buildSeed()
 
-/** Recompute a tag's link count on demand. */
+/** Recompute a tag's link count on demand. Archived memories do not count. */
 export function tagCount(db, name) {
-  return db.memories.reduce((n, m) => n + (m.tags.includes(name) ? 1 : 0), 0)
+  return db.memories.reduce((n, m) => n + (!m.archived_at && m.tags.includes(name) ? 1 : 0), 0)
+}
+
+/** A Date as the server writes a timestamp: "YYYY-MM-DD HH:MM:SS+00:00". */
+export function stamp(d) {
+  return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '+00:00')
 }

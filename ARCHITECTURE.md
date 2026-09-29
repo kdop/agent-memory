@@ -64,6 +64,7 @@ erDiagram
     memories ||--o{ memory_tags : has
     tags ||--o{ memory_tags : has
     memories ||--o{ memory_reviews : "reviewed by"
+    tags |o--o{ tag_reviews : "proposals for"
     memories o|--o| memories : supersedes
 
     memories {
@@ -78,6 +79,7 @@ erDiagram
         text embedding_model
         text review_status "unverified, verified, flagged"
         bigint supersedes FK "older memory this one replaces"
+        timestamptz archived_at "set by the review, null while live"
     }
     memory_reviews {
         bigint id PK
@@ -97,6 +99,19 @@ erDiagram
         text description
         real_array embedding "vector of name: description"
         text embedding_model
+        text review_status "unverified, verified, flagged"
+    }
+    tag_reviews {
+        bigint id PK
+        bigint tag_id FK "null once the tag is gone"
+        text tag_name
+        text verdict "merge, rename, drop"
+        text into
+        text new_name
+        text reason
+        text model
+        timestamptz created_at
+        text resolved "null, applied, rejected"
     }
     memory_tags {
         bigint memory_id PK, FK
@@ -216,19 +231,23 @@ A memory found both ways always outranks one found one way at the same rank.
 
 ```mermaid
 flowchart TD
-    T[tick, every AGENT_MEMORY_REVIEW_POLL s] --> R{model answers<br/>GET /api/tags?}
+    T[tick, every AGENT_MEMORY_REVIEW_POLL s] --> X[delete memories archived<br/>over AGENT_MEMORY_ARCHIVE_DAYS ago] --> R{model answers<br/>GET /api/tags?}
     R -- no --> U[health: unreachable] --> T
     R -- yes --> L{catch-up<br/>already running?}
     L -- yes --> T
-    L -- no --> P[pick unverified ids,<br/>oldest first]
-    P --> E[review one, store verdict]
-    E --> N{more?}
+    L -- no --> P[pick unverified memories<br/>and tags, oldest first]
+    P --> E[review one memory, store verdict]
+    E --> N{more memories?}
     N -- yes --> E
-    N -- no --> T
+    N -- no --> G[review one tag, act on verdict]
+    G --> M{more tags?}
+    M -- yes --> G
+    M -- no --> T
 ```
 
 Oldest first, one at a time, so each memory is verified before the next one is compared
-against it. `POST /admin/review` and `memory review --catch-up` enter the same path and
+against it; then the tags, the same way. `/health` `catch_up` carries `kind`
+(`memories`, then `tags`) so the dashboard bar says which half runs. `POST /admin/review` and `memory review --catch-up` enter the same path and
 share the same lock.
 
 ### Where things run
@@ -278,6 +297,7 @@ src/agent_memory/
     embedding.py       #   Embedder interface; local fastembed model — [embed] extra, optional
     checks.py          #   the warnings on add (short, no-project, no-reasoning); never block
     review.py          #   the review of each new memory by a model on an Ollama server; off by default
+    tag_review.py      #   the same model's keep / merge / rename / drop on each tag
     __main__.py        #   `python -m agent_memory.server` (uvicorn launcher)
 alembic/               # migrations; env.py autogenerates from models.Base.metadata
 memory-cli             # thin shim on PATH -> agent_memory.cli:main (rule #5)
@@ -349,7 +369,11 @@ CREATE TABLE memories (
     -- model's verdict and never from a request. Both rows stay; the old one
     -- reads as superseded by the newest row that points at it. Cleared when
     -- the old memory is deleted.
-    supersedes      BIGINT REFERENCES memories(id) ON DELETE SET NULL
+    supersedes      BIGINT REFERENCES memories(id) ON DELETE SET NULL,
+    -- When the review archived the row (a reject under rule 2 or 4, or the older
+    -- memory of a merge), NULL while it is live. Hidden from every listing and
+    -- from the reference set; the poll deletes it after AGENT_MEMORY_ARCHIVE_DAYS.
+    archived_at     TIMESTAMPTZ
 );
 CREATE INDEX idx_content_tsv ON memories USING gin (content_tsv);
 CREATE INDEX ix_memories_timestamp ON memories (timestamp);
@@ -358,6 +382,7 @@ CREATE INDEX ix_memories_project   ON memories (project);
 CREATE INDEX ix_memories_type      ON memories (type);
 CREATE INDEX ix_memories_review_status ON memories (review_status);
 CREATE INDEX ix_memories_supersedes ON memories (supersedes);
+CREATE INDEX ix_memories_archived_at ON memories (archived_at);
 
 -- Canonical tags: case-insensitive-unique name + a required descriptor.
 CREATE TABLE tags (
@@ -367,9 +392,30 @@ CREATE TABLE tags (
     -- The vector of `name: description`, for the tags a review is offered. Set
     -- when the tag is made or its description changes; reindex fills the rest.
     embedding       REAL[],
-    embedding_model TEXT
+    embedding_model TEXT,
+    -- Whether the review model has checked the tag (Tag review below).
+    review_status   TEXT NOT NULL DEFAULT 'unverified'
+                    CHECK (review_status IN ('unverified', 'verified', 'flagged'))
 );
 CREATE UNIQUE INDEX idx_tags_lower_name ON tags (lower(name));
+CREATE INDEX ix_tags_review_status ON tags (review_status);
+
+-- The tag review's merge, rename and drop verdicts. A merge the server applied on
+-- its own is stored as applied; the rest wait for a person (resolved NULL). A row
+-- outlives its tag: tag_id is cleared and tag_name keeps the name.
+CREATE TABLE tag_reviews (
+    id         BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    tag_id     BIGINT REFERENCES tags(id) ON DELETE SET NULL,
+    tag_name   TEXT NOT NULL,
+    verdict    TEXT NOT NULL,        -- merge, rename or drop
+    into       TEXT,                 -- the tag to merge into
+    new_name   TEXT,                 -- the better name
+    reason     TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved   TEXT CHECK (resolved IS NULL OR resolved IN ('applied', 'rejected'))
+);
+CREATE INDEX ix_tag_reviews_tag_id ON tag_reviews (tag_id);
 
 -- Many-to-many junction (cascades on delete).
 CREATE TABLE memory_tags (
@@ -612,14 +658,57 @@ have the same length.
   the poll and `POST /admin/review` share, without waiting for it, and picks the
   unverified ids; `_run_catch_up` reviews them in order and releases the lock. A
   tick or a route call that finds the lock taken does nothing (the route answers
-  `{"scheduled": 0, "running": true}`), so one catch-up runs at a time. A check that
+  `{"scheduled": 0, "tags": 0, "running": true}`), so one catch-up runs at a time. A check that
   raises counts as unreachable, any other error in a tick is one log line, and the
   loop goes on; the log also says when the loop starts, when a catch-up starts (with
   the count) and when it ends. `GET /health` returns `review_model`, and `catch_up`:
-  `{"total": n, "done": k}` (on `app.state.catch_up`) while a catch-up runs, else null. `update` with new
+  `{"kind": "memories" | "tags", "total": n, "done": k}` (on `app.state.catch_up`) while a catch-up runs, else null. `update` with new
   content sets the memory back to `unverified` and deletes its review rows and its
   `supersedes` link (every verdict was about the old text), so the next catch-up reads
   it again; a change of tags, project or type alone keeps all three.
+
+**The archive.** `set_review` archives a memory (`archived_at`, schema above) on two
+verdicts: a `reject` whose rule is in `ARCHIVE_RULES` (2, a diary line; 4, what git holds),
+which archives the memory itself, and a merge (a `rewrite` with `duplicate_of`), which
+archives that older memory and gives the newer one `supersedes` pointing at it when the
+verdict set no link. A reversal (an approve with `supersedes`) archives nothing. Every
+listing, search mode, count, `/projects`, `/agents`, `/tags`, `/stats` and the reference
+set (`_reference`, so `find_duplicate` and `_nearest`; `unverified_ids`; the tags offered)
+go through `_archived_cond`, which keeps to live rows, or with `archived=true` on the list
+routes to archived rows only. A read by id still returns one. `POST /memories/{id}/restore`
+clears the stamp; new content from `update` clears it too, since the catch-up never picks
+an archived memory and the new text needs its check. Each poll tick first deletes the
+memories archived more than `AGENT_MEMORY_ARCHIVE_DAYS` days ago (`delete_archived`,
+default 30, 0 or less keeps them), whether or not the model answers, with one log line
+when it deletes any. The poll runs only while the review is on, and only the review
+archives. There is no action log: the review history already holds each verdict and its
+reason.
+
+**Tag review.** `tag_review.py` asks the same model about each tag, with the memory
+review's request settings: `TagReviewer` builds its body with `OllamaReviewer.chat_body`
+and sends it with `OllamaReviewer._chat`, so there is one HTTP call and one set of
+options. `make_tag_reviewer` gives one only when the memory reviewer is a real Ollama
+one, so the tag review is on exactly when the memory review is, and the fallback rule is
+the same: no answer, no verdict, the tag stays unverified. It runs only in the
+catch-up, after the memories (`_review_tags_in_order`, under the same lock), oldest tag
+first (`unverified_tag_ids`, by id, since tags carry no date). The model sees the tag's
+name and description, the count of live memories that use it, three of them, and the
+five verified tags closest to it by the stored vectors (the most used ones when the tag
+has no vector) (`tag_review_input`). The prompt adds facts the server checks without a
+model (`name_facts`): the name is a memory type or a word for one, it is not in the
+clean form, a listed tag is its plural or singular; `qwen3:14b` missed these on its own.
+The answer leads with four check keys (`why`, `is_type`, `same_as`, `name_problem`)
+before `verdict`, `into`, `new_name` and `reason`; when the checks and the verdict
+disagree, `parse_tag_verdict` goes with the checks (a type or no subject is a drop; a
+keep with `same_as` is a merge), because the model often filled them right and then
+skipped the step order. `set_tag_review` acts: keep verifies; a merge is applied with
+`merge_tags` only when `same_tag` agrees (the names match after `clean_tag_name`, the
+same name or its plural, or the two vectors score `MERGE_THRESHOLD` 0.90 or more) and
+is stored as `applied`; anything else flags the tag and stores the proposal.
+`GET /tags/flagged` lists what waits; `POST /tags/proposals/{id}/apply` merges, renames
+(through `clean_tag_name`; a taken name merges) or deletes, and `/reject` verifies the
+tag. There is no undo, by choice. The prompt is measured against
+`tests/data/tag_verdict_set.json` like the memory prompt (`test_tag_verdict_quality`).
 
 Before a check goes live, `scripts/replay_write_checks.py` runs the duplicate check and
 the warnings over a copy of the database in write order and prints what each would

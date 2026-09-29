@@ -129,7 +129,7 @@ function statusColor(status) {
   return STATUS_COLOR[status] || 'grey-6'
 }
 
-const VERDICT_COLOR = { approve: 'positive', reject: 'negative', rewrite: 'warning' }
+const VERDICT_COLOR = { approve: 'positive', reject: 'negative', improve: 'info', rewrite: 'warning' }
 function verdictColor(verdict) {
   return VERDICT_COLOR[verdict] || 'grey-7'
 }

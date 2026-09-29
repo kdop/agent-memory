@@ -275,11 +275,17 @@ class OllamaReviewer(Reviewer):
                      tags: list[str] = ()) -> dict:
         """The JSON sent to `/api/chat`. Separate from the call so a test can
         check it without a server."""
+        return self.chat_body(SYSTEM_PROMPT, user_prompt(memory, neighbours, tags))
+
+    def chat_body(self, system: str, user: str) -> dict:
+        """A `/api/chat` body with these two messages and the settings every
+        review uses; the tag review (tag_review.py) sends its own prompt
+        through here and `_chat`."""
         return {
             "model": self.model_name,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt(memory, neighbours, tags)},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
             "stream": False,
             "format": "json",
@@ -291,17 +297,7 @@ class OllamaReviewer(Reviewer):
         """The JSON sent to `/api/chat` for the gap check: the entry's type
         and text only, with the same settings as `request_body`."""
         user = f"type: {memory.get('type') or 'none'}\ncontent: {memory.get('content', '')}"
-        return {
-            "model": self.model_name,
-            "messages": [
-                {"role": "system", "content": GAP_PROMPT},
-                {"role": "user", "content": user},
-            ],
-            "stream": False,
-            "format": "json",
-            "think": False,
-            "options": {"num_ctx": 8192, "temperature": 0},
-        }
+        return self.chat_body(GAP_PROMPT, user)
 
     def _chat(self, body: dict) -> str:
         """POST the body and return the text of the model's message."""

@@ -61,6 +61,7 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
 - **Tags** are a JSON array of `{"name", "description"}`; `description` is optional
   and a new tag without one defaults to its own name. Tag liberally — tags are what
   make future searches land.
+- **Tag notes:** `add` may print `note: tag "comms" stored as "communication"`: the server cleaned the name or reused an existing tag of the same name or meaning; use that name next time. More than 10 tags gives `warning: too-many-tags`.
 - **Log:** what will still matter in a later session — decisions with their reasoning
   and the alternatives rejected, lessons with their cause, hard rules the user sets,
   stated preferences, a deliberate non-action, an environment gotcha. Log as it

@@ -95,6 +95,7 @@ warnings can print after the id, one per line: `warning: short` (under 40 charac
 `warning: no-project` (no `--project`), and `warning: no-reasoning` (a `decision`,
 `lesson` or `constraint` with no word that says why, such as "because" or "rejected"). Warnings never
 block; the memory is stored either way.
+Tag names are cleaned on write (lowercase, hyphens for spaces and underscores), and a plural, or a tag whose vector is at cosine 0.90 or more to an existing one, reuses that tag; each reuse prints `note: tag "comms" stored as "communication"`, and more than 10 tags prints `warning: too-many-tags`.
 
 **Review by a model.** The server can also have a model read each new memory and judge
 it against the five rules in the skill. The model answers `approve`, `reject` with the
@@ -126,10 +127,10 @@ the old one's says `superseded by #<id>`, and `--current` on `query` and `search
 (`current=true` on the API and the MCP tools) hides the superseded ones; off by default,
 so nothing disappears on its own. An entry that repeats an older memory and adds to it
 gets a `rewrite` whose text is the old and the new merged, with `duplicate_of` the old
-id: in flag mode the new memory is stored and flagged with that suggestion; in refuse
-mode the write is refused and the CLI ends with `Apply it with 'memory update <old id>'
-instead of adding.` The model never changes or removes a memory; the writer applies a
-merge. In refuse mode a reject or rewrite refuses the write and nothing is stored: the API
+id: in flag mode the new memory is stored and flagged with that suggestion, it
+supersedes the old one, and the old one is archived (below); in refuse mode the write is
+refused and the CLI ends with `Apply it with 'memory update <old id>' instead of adding.`
+The model never changes a memory's text; the writer applies a merge. In refuse mode a reject or rewrite refuses the write and nothing is stored: the API
 answers `422` with the verdict and the suggestion, the CLI prints `✗ Review: rewrite,
 rule 3: <reason>`, the suggestion, and `Fix the entry, or pass --force to store it as
 written.` and exits with code 4, and the MCP tool returns `{"error": "review", ...}`.
@@ -143,11 +144,36 @@ memories written while the model was off get their verdict without anyone runnin
 command. One catch-up runs at a time: `memory review --catch-up` while one is running
 says so and schedules nothing. `GET /health` reports what the last check found as
 `review_model`: `reachable`, `unreachable`, or `off` when the review or the poll is off;
-while a catch-up runs it also reports `catch_up: {"total": n, "done": k}` (else null),
-which the dashboard shows as a progress bar.
+while a catch-up runs it also reports `catch_up: {"kind": "memories", "total": n,
+"done": k}` (else null; `kind` turns to `tags` for the second half), which the dashboard
+shows as a progress bar.
+A reject under rule 2 (a diary line) or rule 4 (what git holds), and the older memory
+of a merge, are **archived**: stamped with `archived_at` and left out of `query`,
+`search`, `review`, the counts and the reference set. `--archived` on `query`, `search`
+and `review` (`archived=true` on the API and the MCP tools) lists only them; `memory
+show <id>` still finds one, with `archived` in its header. `memory restore <id>` (MCP
+`memory_restore`, `POST /memories/{id}/restore`) brings one back; new text from `memory
+update` does too. Each poll tick deletes the memories archived more than
+`AGENT_MEMORY_ARCHIVE_DAYS` days ago (default 30; 0 keeps them for good), whether or not
+the model answers.
 Editing a memory's text with `memory update` sets it back to `unverified` and drops its
 verdict and its `supersedes` link, so the next catch-up reads the new text; a change of
 tags or project alone keeps both.
+
+**Tag review.** Tags get a review status too (`unverified`, `verified`, `flagged`), from
+the same model under the same setting. The catch-up reviews the unverified tags after
+the unverified memories, oldest first. The model sees the tag's name and description,
+how many memories use it and three of them, and the five verified tags closest to it,
+and answers `keep` (the tag is verified), `merge` into one of those tags, `rename`, or
+`drop` (the tag repeats a memory type, or names no subject). A merge is applied on its
+own only when the two tags' vectors score 0.90 or more, or their names match after the
+name cleanup (the same name, or its plural or singular). Anything else is a proposal
+that waits for a person, and the tag is flagged: `memory tags --pending` lists them
+(`GET /tags/flagged`, MCP `memory_tag_proposals`), `memory tags --apply <id>` does it
+(no undo) and `memory tags --reject <id>` keeps the tag and verifies it. `memory tags`
+marks a flagged tag. `tests/data/tag_verdict_set.json` holds 20 invented tags with the
+verdict the model should give; `tests/test_tag_review.py::test_tag_verdict_quality`
+measures the prompt against it, like the memory verdict set below.
 
 **Measuring the prompt.** The prompt's checklist was tuned by hand to `qwen3:14b`, so a
 change to its wording or to the model is measured, not felt. `tests/data/verdict_set.json`
@@ -256,8 +282,12 @@ suggested text and tags, and a "Review again" button asks the model once more.
 has the three modes (keyword, semantic, hybrid) and shows each hit's score; the right
 rail filters by status and can hide superseded memories. The **Flagged** view lists what
 the review rejected or wants rewritten, and its **Catch up** button reviews the
-memories written while the model was off. The top bar shows whether the review model is
-reachable.
+memories written while the model was off. The **Archived** view lists what the review
+put away, with the reason, the days left before it is deleted and a **Restore** button.
+The **Tags** view shows each tag's review status, and for a flagged tag the model's
+proposal with **Apply** and **Reject** buttons. The top bar shows whether the review
+model is reachable, and while a catch-up runs, a bar that says what it reviews
+("Reviewing tags: 5 of 40 done").
 
 ![dashboard](docs/dashboard.png)
 

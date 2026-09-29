@@ -1,7 +1,7 @@
 """MCP server exposing the memory API as tools.
 
-Mirrors the CLI surface — memory_add/query/search/flagged/show/update/delete/tags/
-projects/stats — each wrapping an `ApiClient` (talks HTTP to the FastAPI service, exactly like
+Mirrors the CLI surface — memory_add/query/search/flagged/show/restore/update/delete/
+tags/tag_proposals/projects/stats — each wrapping an `ApiClient` (talks HTTP to the FastAPI service, exactly like
 the CLI). stdio transport. Lives in the [mcp] extra.
 
 Every tool returns a single JSON object (lists wrapped under a key) because FastMCP
@@ -43,8 +43,11 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
         note (reference), or omitted; any other value is refused.
         `tags` is a list of {"name": str, "description": str (optional)}
         — a brand-new tag with no description auto-defaults to its own name. Returns
-        {"id": <new id>, "warnings": [...]}: warnings are rule names the entry breaks
-        (short, no-project, no-reasoning). The memory is stored either way, unless a
+        {"id": <new id>, "warnings": [...], "notes": [...]}: warnings are rule names
+        the entry breaks (short, no-project, no-reasoning, too-many-tags); notes say
+        which tags were stored under another name, e.g. 'tag "Skills" stored as
+        "skill"' (a tag name is cleaned, and a plural or a tag of the same meaning
+        reuses the existing tag). The memory is stored either way, unless a
         near-duplicate already exists in the same project: then nothing is stored and
         the result is {"error": "duplicate", "existing_id": <id>, "score": <cosine>}.
         Update that memory instead, or pass force=true to store this one anyway.
@@ -65,7 +68,7 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
         old id as `supersedes`, set by the review model, never by the
         caller; the old one then carries `superseded_by`."""
         try:
-            mid, warnings = api.add_with_warnings(
+            added = api.add_full(
                 content, agent or get_agent_name(), project, tags or [], type, force=force)
         except DuplicateMemory as e:
             return {"error": "duplicate", "existing_id": e.existing_id, "score": e.score}
@@ -73,7 +76,7 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
             return {"error": "review", "verdict": e.verdict, "rule": e.rule,
                     "explanation": e.explanation, "needs": e.needs, "message": e.message,
                     "rewrite": e.rewrite, "tags": e.tags, "duplicate_of": e.duplicate_of}
-        return {"id": mid, "warnings": warnings}
+        return added
 
     @mcp.tool()
     def memory_query(since_days: Optional[int] = None,
@@ -81,7 +84,7 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
                      project: Optional[str] = None, agent: Optional[str] = None,
                      tag: Optional[str] = None, type: Optional[str] = None,
                      status: Optional[str] = None, current: bool = False,
-                     limit: Optional[int] = None) -> dict:
+                     archived: bool = False, limit: Optional[int] = None) -> dict:
         """Query memories by time/project/agent/tag/type/status. since_days is a
         rolling window: everything since the start of the day N days ago (0=today,
         7=past week). `type` is one of constraint, decision, lesson, note or
@@ -90,7 +93,8 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
         "flagged" (rejected, told to improve, or a merge suggested); every memory carries its
         own as `review_status`. `current=true` hides the memories a newer one
         supersedes (those with a `superseded_by`); by default every memory is
-        returned. limit defaults to 100 on the server; pass 0 for
+        returned. Archived memories (see memory_restore) are left out;
+        `archived=true` lists only them. limit defaults to 100 on the server; pass 0 for
         every match. Returns {"memories": [...]}; a `status` that is not one of
         the three returns {"error": "<why>"}."""
         bad = _bad_status(status)
@@ -98,37 +102,42 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
             return bad
         return {"memories": api.query(
             since_days=since_days, since=since, until=until, project=project,
-            agent=agent, tag=tag, mtype=type, status=status, current=current, limit=limit)}
+            agent=agent, tag=tag, mtype=type, status=status, current=current,
+            archived=archived, limit=limit)}
 
     @mcp.tool()
     def memory_search(q: str, project: Optional[str] = None, agent: Optional[str] = None,
                       since: Optional[str] = None, tag: Optional[str] = None,
-                      limit: int = 20, mode: str = "keyword", current: bool = False) -> dict:
+                      limit: int = 20, mode: str = "keyword", current: bool = False,
+                      archived: bool = False) -> dict:
         """Search memories. `mode` picks how to match: "keyword" finds memories
         that contain the words in `q`; "semantic" finds memories that mean the
         same thing as `q`, even in other words, and needs the embedding model on
         the server; "hybrid" combines both. `current=true` hides the memories a
-        newer one supersedes; by default every match is returned. limit 0
-        returns every match. Returns
+        newer one supersedes; by default every match is returned.
+        `archived=true` searches only the archived memories, which are left
+        out otherwise. limit 0 returns every match. Returns
         {"memories": [...]}, best match first, each with a `score` and, for
         keyword mode, a `snippet` with the matches marked. When the server cannot
         serve the mode it returns {"error": "<why>"}."""
         try:
             rows = api.search(q, project=project, agent=agent, since=since, tag=tag,
-                              limit=limit, mode=mode, current=current)
+                              limit=limit, mode=mode, current=current, archived=archived)
         except ApiRefused as e:
             return {"error": str(e)}
         return {"memories": rows}
 
     @mcp.tool()
     def memory_flagged(project: Optional[str] = None, verdict: Optional[str] = None,
-                       status: Optional[str] = None, limit: int = 20) -> dict:
+                       status: Optional[str] = None, limit: int = 20,
+                       archived: bool = False) -> dict:
         """List the memories the review model flagged: those whose review says
         "reject", "improve" or "rewrite", newest review first. `verdict`
         narrows to one of the three; None lists all. `status` lists the memories with that review
         status instead ("unverified", "verified" or "flagged"), so
         status="unverified" gives the memories the model has not checked yet.
-        `project` narrows to one project. limit 0 returns every match. Returns
+        `project` narrows to one project. Archived memories are left out;
+        `archived=true` lists only them. limit 0 returns every match. Returns
         {"memories": [...]}, the same shape as memory_query, each memory with
         its `review` (verdict, rule, reason, needs, rewrite, duplicate_of) and
         its `review_status`. A `verdict` that is not one of the three, or a
@@ -140,7 +149,7 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
         if bad is not None:
             return bad
         return {"memories": api.flagged(project=project, verdict=verdict, status=status,
-                                        limit=limit)}
+                                        limit=limit, archived=archived)}
 
     @mcp.tool()
     def memory_show(id: int, reviews: bool = False) -> dict:
@@ -153,6 +162,20 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
         if reviews:
             out["reviews"] = api.reviews(id)
         return out
+
+    @mcp.tool()
+    def memory_restore(id: int) -> dict:
+        """Bring an archived memory back into view. The review archives a
+        memory it rejects as a diary line (rule 2) or as something git holds
+        (rule 4), and the older memory when a newer one repeats it and adds
+        more; an archived memory carries `archived_at`, is hidden from every
+        listing and search, and is deleted after a set number of days unless
+        restored. Returns {"found": bool, "restored": bool}: `restored` is
+        false when the memory was not archived (nothing changed)."""
+        restored = api.restore(id)
+        if restored is None:
+            return {"found": False, "restored": False}
+        return {"found": True, "restored": restored}
 
     @mcp.tool()
     def memory_update(id: int, content: Optional[str] = None, project: Optional[str] = None,
@@ -176,8 +199,22 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
 
     @mcp.tool()
     def memory_tags() -> dict:
-        """List tags with counts + descriptions. Returns {"tags": [{name, count, description}, ...]}."""
+        """List tags with counts + descriptions. Each has a `review_status`:
+        unverified, verified, or flagged (a proposal waits, see
+        memory_tag_proposals). Returns {"tags": [{name, count, description,
+        review_status}, ...]}."""
         return {"tags": api.list_tags()}
+
+    @mcp.tool()
+    def memory_tag_proposals() -> dict:
+        """List what the review model proposes for tags, waiting for a person:
+        merge a tag into another ("into"), rename it ("new_name") or drop it
+        (it repeats a memory type, or names no subject), each with the model's
+        reason. Oldest first. A person applies or rejects them with
+        `memory tags --apply <id>` / `--reject <id>`; there is no tool for
+        that. Returns {"proposals": [{id, tag, verdict, into, new_name,
+        reason, model, created_at}, ...]}."""
+        return {"proposals": api.tag_proposals()}
 
     @mcp.tool()
     def memory_projects() -> dict:

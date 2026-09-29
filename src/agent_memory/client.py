@@ -177,12 +177,18 @@ class ApiClient:
     # ---- operations ------------------------------------------------------
     def add(self, content, agent, project, tags, mtype, force=False):
         """The new id only."""
-        mid, _ = self.add_with_warnings(content, agent, project, tags, mtype, force=force)
-        return mid
+        return self.add_full(content, agent, project, tags, mtype, force=force)["id"]
 
     def add_with_warnings(self, content, agent, project, tags, mtype, force=False):
         """(id, warnings): warnings is the list of rule names the entry breaks
-        (see server/checks.py). The memory is stored either way, unless the
+        (see server/checks.py). See `add_full`."""
+        data = self.add_full(content, agent, project, tags, mtype, force=force)
+        return data["id"], data["warnings"]
+
+    def add_full(self, content, agent, project, tags, mtype, force=False):
+        """{"id", "warnings", "notes"}: warnings are the rule names the entry
+        breaks (see server/checks.py), notes say which tags were stored under
+        another name than written. The memory is stored either way, unless the
         server finds a near-duplicate in the same project (then it raises
         `DuplicateMemory`) or its review model, in refuse mode, rejects the
         entry or wants it rewritten (then `ReviewRefused`); in both cases
@@ -193,42 +199,49 @@ class ApiClient:
         }
         params = {"force": "true"} if force else None
         _, data = self._call("POST", "/memories", params=params, body=body)
-        return data["id"], data.get("warnings") or []
+        return {"id": data["id"], "warnings": data.get("warnings") or [],
+                "notes": data.get("notes") or []}
 
     def query(self, *, since_days=None, since=None, until=None, project=None,
-              agent=None, tag=None, mtype=None, status=None, current=False, limit=None):
+              agent=None, tag=None, mtype=None, status=None, current=False,
+              archived=False, limit=None):
         """Rows only. `status` keeps to one review status ("unverified",
         "verified" or "flagged"; None for all). `current=True` hides the
-        memories a newer one supersedes. `limit=0` returns everything;
+        memories a newer one supersedes. Archived memories are left out;
+        `archived=True` lists only them. `limit=0` returns everything;
         None uses the server default."""
         rows, _ = self.query_with_total(
             since_days=since_days, since=since, until=until, project=project,
-            agent=agent, tag=tag, mtype=mtype, status=status, current=current, limit=limit)
+            agent=agent, tag=tag, mtype=mtype, status=status, current=current,
+            archived=archived, limit=limit)
         return rows
 
     def query_with_total(self, *, since_days=None, since=None, until=None, project=None,
                          agent=None, tag=None, mtype=None, status=None, current=False,
-                         limit=None):
+                         archived=False, limit=None):
         """(rows, total): total is the match count ignoring the limit."""
         _, headers, data = self._request("GET", "/memories", params={
             "since_days": since_days, "since": since, "until": until,
             "project": project, "agent": agent, "tag": tag, "type": mtype,
-            "status": status, "current": "true" if current else None, "limit": limit,
+            "status": status, "current": "true" if current else None,
+            "archived": "true" if archived else None, "limit": limit,
         })
         rows = data or []
         total = int((headers or {}).get("X-Total-Count") or len(rows))
         return rows, total
 
     def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None,
-               mode=None, current=False):
+               mode=None, current=False, archived=False):
         """Rows with a `snippet` and a `score`. `mode` is "keyword", "semantic"
         or "hybrid"; None leaves it out, so the server picks its default
         (keyword). `current=True` hides the memories a newer one supersedes.
-        A mode the server cannot serve raises `ApiRefused`."""
+        `archived=True` searches only the archived memories, which are left
+        out otherwise. A mode the server cannot serve raises `ApiRefused`."""
         _, data = self._call("GET", "/memories/search", params={
             "q": text, "project": project, "agent": agent,
             "since": since, "tag": tag, "limit": limit, "mode": mode,
             "current": "true" if current else None,
+            "archived": "true" if archived else None,
         })
         return data or []
 
@@ -242,6 +255,13 @@ class ApiClient:
         that has not been reviewed; None when there is no such memory."""
         status, data = self._call("GET", f"/memories/{mid}/reviews")
         return None if status == 404 else (data or [])
+
+    def restore(self, mid):
+        """Bring an archived memory back into view. True when it was
+        archived, False when it was not (nothing changed), None when there
+        is no such memory."""
+        status, data = self._call("POST", f"/memories/{mid}/restore")
+        return None if status == 404 else bool(data["restored"])
 
     def update(self, mid, *, content=None, project=None, mtype=None,
                set_tags=None, add_tags=None, remove_tags=None):
@@ -270,8 +290,31 @@ class ApiClient:
         return data or {"deleted": 0, "missing": list(ids)}
 
     def list_tags(self):
+        """The tags in use, each with its count, description and
+        `review_status`."""
         _, data = self._call("GET", "/tags")
         return data or []
+
+    def tag_proposals(self):
+        """The tag proposals that wait for a person, oldest first: each with
+        its id, the tag, the verdict (merge, rename or drop), `into`,
+        `new_name` and the model's reason."""
+        _, data = self._call("GET", "/tags/flagged")
+        return data or []
+
+    def apply_tag_proposal(self, pid):
+        """Do what proposal `pid` says (merge, rename or delete the tag).
+        Returns `{"proposal", "result"}`; None when there is no such
+        proposal. One that is resolved already, or whose tag is gone, raises
+        `ApiRefused`."""
+        status, data = self._call("POST", f"/tags/proposals/{int(pid)}/apply")
+        return None if status == 404 else data
+
+    def reject_tag_proposal(self, pid):
+        """Turn proposal `pid` down; the tag stays and is verified. Returns
+        `{"proposal"}`; None when there is no such proposal."""
+        status, data = self._call("POST", f"/tags/proposals/{int(pid)}/reject")
+        return None if status == 404 else data
 
     def list_projects(self):
         _, data = self._call("GET", "/projects")
@@ -288,20 +331,23 @@ class ApiClient:
         _, data = self._call("POST", "/admin/reindex")
         return data
 
-    def flagged(self, project=None, verdict=None, status=None, limit=None):
+    def flagged(self, project=None, verdict=None, status=None, limit=None, archived=False):
         """The memories the review flagged, newest review first, each with its
         `review`. `verdict` is "reject", "improve" or "rewrite"; None lists all three. With
         `status` ("unverified", "verified" or "flagged") the memories with
-        that review status instead. `limit=0` returns everything; None uses
-        the server default."""
+        that review status instead. Archived memories are left out;
+        `archived=True` lists only them. `limit=0` returns everything; None
+        uses the server default."""
         rows, _ = self.flagged_with_total(project=project, verdict=verdict, status=status,
-                                          limit=limit)
+                                          limit=limit, archived=archived)
         return rows
 
-    def flagged_with_total(self, project=None, verdict=None, status=None, limit=None):
+    def flagged_with_total(self, project=None, verdict=None, status=None, limit=None,
+                           archived=False):
         """(rows, total): total is the match count ignoring the limit."""
         _, headers, data = self._request("GET", "/memories/flagged", params={
             "project": project, "verdict": verdict, "status": status, "limit": limit,
+            "archived": "true" if archived else None,
         })
         rows = data or []
         total = int((headers or {}).get("X-Total-Count") or len(rows))
@@ -311,12 +357,14 @@ class ApiClient:
         """The catch-up: ask the server to review the unverified memories,
         oldest first, one after another, up to `limit` (None uses the server
         default, 0 means all). The reviews run in the background; returns
-        `{"scheduled": <how many>, "running": <bool>}`, where `running` is
-        True when a catch-up was already running (the server runs one at a
-        time, so nothing new was scheduled). A server without a review model
+        `{"scheduled": <how many>, "tags": <how many>, "running": <bool>}`:
+        `tags` is how many tags were scheduled after the memories, and
+        `running` is True when a catch-up was already running (the server
+        runs one at a time, so nothing new was scheduled). A server without a review model
         raises `ApiRefused`."""
         _, data = self._call("POST", "/admin/review", params={"limit": limit})
-        return {"scheduled": data["scheduled"], "running": bool(data.get("running", False))}
+        return {"scheduled": data["scheduled"], "tags": int(data.get("tags", 0)),
+                "running": bool(data.get("running", False))}
 
     # The old name, kept for callers that still use it.
     review_missing = review_catch_up

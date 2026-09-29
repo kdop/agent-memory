@@ -4,7 +4,9 @@
 // inline rename / re-describe (PATCH /tags/{name} — a rename onto an existing
 // name merges, which we surface), and delete (DELETE /tags/{name}). Every
 // mutation re-runs tags.fetch(). Clicking a row emits `open` so TagsPage can
-// pop the detail modal.
+// pop the detail modal. The status column shows the tag review's status; a
+// flagged tag shows the model's proposal (merge, rename or drop) with Apply
+// (POST /tags/proposals/{id}/apply, no undo) and Reject (the tag stays).
 import { ref, computed } from 'vue'
 import { useQuasar } from 'quasar'
 import { storeToRefs } from 'pinia'
@@ -15,7 +17,7 @@ const emit = defineEmits(['open'])
 
 const $q = useQuasar()
 const tags = useTagsStore()
-const { list, loading } = storeToRefs(tags)
+const { list, loading, proposals } = storeToRefs(tags)
 
 // Columns. Name is sortable (asc/desc); count is sortable too for convenience.
 // Default sort is alphabetical by name — set via the pagination model below.
@@ -30,6 +32,7 @@ const columns = [
   },
   { name: 'count', label: 'Count', field: 'count', align: 'right', sortable: true },
   { name: 'description', label: 'Description', field: 'description', align: 'left', sortable: false },
+  { name: 'status', label: 'Status', field: 'review_status', align: 'left', sortable: true },
   { name: 'actions', label: '', field: 'actions', align: 'right', sortable: false },
 ]
 
@@ -97,6 +100,45 @@ async function saveEdit() {
   }
 }
 
+// ---- Tag review: status and proposals ----------------------------------------
+const STATUS_COLOR = { verified: 'positive', flagged: 'warning', unverified: 'grey-6' }
+
+function proposalText(p) {
+  if (p.verdict === 'merge') return `Merge into “${p.into}”`
+  if (p.verdict === 'rename') return `Rename to “${p.new_name}”`
+  return 'Drop this tag'
+}
+
+const resolving = ref(null) // id of the proposal being applied or rejected
+
+async function resolveProposal(p, apply) {
+  resolving.value = p.id
+  try {
+    if (apply) {
+      await api.applyTagProposal(p.id)
+      $q.notify({ type: 'positive', message: `Applied: ${proposalText(p).toLowerCase()} (“${p.tag}”).` })
+    } else {
+      await api.rejectTagProposal(p.id)
+      $q.notify({ type: 'positive', message: `Kept “${p.tag}” as it is.` })
+    }
+    await tags.fetch()
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err?.data?.detail || err?.message || 'Failed.' })
+  } finally {
+    resolving.value = null
+  }
+}
+
+function confirmApply(p) {
+  $q.dialog({
+    title: 'Apply the proposal',
+    message: `${proposalText(p)}: “${p.tag}”. This can’t be undone.`,
+    cancel: true,
+    persistent: true,
+    ok: { label: 'Apply', color: p.verdict === 'drop' ? 'negative' : 'primary' },
+  }).onOk(() => resolveProposal(p, true))
+}
+
 // ---- Delete ----------------------------------------------------------------
 function confirmDelete(row) {
   $q.dialog({
@@ -142,6 +184,27 @@ function confirmDelete(row) {
     <template #body-cell-description="props">
       <q-td :props="props" class="text-grey-8">
         {{ props.value || '—' }}
+      </q-td>
+    </template>
+
+    <template #body-cell-status="props">
+      <q-td :props="props" @click.stop>
+        <q-badge :color="STATUS_COLOR[props.value] || 'grey-6'" :label="props.value || 'unverified'"
+                 data-test="tag-status" />
+        <div v-if="proposals[props.row.name]" class="q-mt-xs" data-test="tag-proposal">
+          <div class="text-weight-medium">{{ proposalText(proposals[props.row.name]) }}</div>
+          <div class="text-caption text-grey-8">{{ proposals[props.row.name].reason }}</div>
+          <div class="q-gutter-xs q-mt-xs">
+            <q-btn dense unelevated size="sm" color="primary" label="Apply"
+                   :loading="resolving === proposals[props.row.name].id"
+                   @click.stop="confirmApply(proposals[props.row.name])" />
+            <q-btn dense flat size="sm" label="Reject"
+                   :disable="resolving === proposals[props.row.name].id"
+                   @click.stop="resolveProposal(proposals[props.row.name], false)">
+              <q-tooltip>Keep the tag as it is</q-tooltip>
+            </q-btn>
+          </div>
+        </div>
       </q-td>
     </template>
 

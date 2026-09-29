@@ -37,6 +37,8 @@ REVIEW_STATUS = "b8e2f4a6c9d1"
 SUPERSEDES = "d3f9a7c2e6b4"
 TAG_EMBEDDING = "e5a1c7d9f2b3"
 REVIEW_HISTORY = "f4c2a8e6d1b9"
+ARCHIVED_AT = "a7d3e9b1c5f2"
+TAG_REVIEW = "c6b1d8f3a2e7"
 
 
 async def _alembic(action: str, revision: str) -> None:
@@ -405,10 +407,12 @@ async def test_tag_embedding_revision_upgrades_and_downgrades(clean_slate):
     assert list(await _scalar("SELECT embedding FROM tags WHERE id = :t", t=old)) == [0.5, -1.25, 2.0]
     assert await _scalar("SELECT embedding_model FROM tags WHERE id = :t", t=old) == "test-model"
 
-    # The repository sees the columns at this revision (it is head): a tag
-    # made through it stores a vector, and reindex replaces the one from
+    # The repository sees the columns (it needs head, so go there first): a
+    # tag made through it stores a vector, and reindex replaces the one from
     # the other model.
     from conftest import FakeEmbedder
+
+    await _alembic("upgrade", "head")
 
     eng = make_test_engine()
     sm = make_sessionmaker(eng)
@@ -468,6 +472,7 @@ async def test_review_history_revision_upgrades_and_downgrades(clean_slate):
 
     # The repository at head sees the three rows and shows the newest; deleting
     # a memory takes every row with it.
+    await _alembic("upgrade", "head")
     eng = make_test_engine()
     try:
         async with make_sessionmaker(eng)() as s, s.begin():
@@ -496,3 +501,78 @@ async def test_review_history_revision_upgrades_and_downgrades(clean_slate):
                 f"VALUES ({mid}, 'reject', 'again', 'm')")
     assert await _column_values("SELECT verdict FROM memory_reviews ORDER BY id") == [
         "approve", "reject"]
+
+
+async def test_archived_at_revision_upgrades_and_downgrades(clean_slate):
+    # One step short: the column is not there yet.
+    await _alembic("upgrade", REVIEW_HISTORY)
+    assert await _columns("memories", "archived_at") == {}
+    old = await _insert_memory("Spent the afternoon tidying.")
+    live = await _insert_memory("Chose Postgres because several agents write at once.")
+
+    # Upgrade one step: the column appears, nullable, as timestamptz, with
+    # its index; existing rows are live.
+    await _alembic("upgrade", ARCHIVED_AT)
+    assert await _columns("memories", "archived_at") == {"archived_at": ("timestamptz", True)}
+    assert await _index_exists("ix_memories_archived_at")
+    assert await _scalar("SELECT count(*) FROM memories WHERE archived_at IS NULL") == 2
+
+    # The repository archives, hides and restores. It reads the tag columns
+    # of later revisions too, so go to head first.
+    await _alembic("upgrade", "head")
+    eng = make_test_engine()
+    try:
+        async with make_sessionmaker(eng)() as s, s.begin():
+            assert await repo.archive(s, old) is True
+            assert [m["id"] for m in await repo.query(s)] == [live]
+            assert [m["id"] for m in await repo.query(s, archived=True)] == [old]
+            assert (await repo.get(s, old))["archived_at"] is not None
+    finally:
+        await eng.dispose()
+
+    # Downgrade one step: the index and the column are gone, and every
+    # memory is still there, the archived one included.
+    await _alembic("downgrade", REVIEW_HISTORY)
+    assert await _columns("memories", "archived_at") == {}
+    assert not await _index_exists("ix_memories_archived_at")
+    assert await _scalar("SELECT count(*) FROM memories") == 2
+
+    # Up again: every memory comes back live.
+    await _alembic("upgrade", ARCHIVED_AT)
+    assert await _scalar("SELECT count(*) FROM memories WHERE archived_at IS NULL") == 2
+
+
+async def test_tag_review_revision_upgrades_and_downgrades(clean_slate):
+    # One step short: no status on tags, no tag_reviews table.
+    await _alembic("upgrade", ARCHIVED_AT)
+    await _exec("INSERT INTO tags (name, description) VALUES ('auth', 'auth'); "
+                "INSERT INTO tags (name, description) VALUES ('misc', 'misc')")
+    assert await _columns("tags", "review_status") == {}
+    assert not await _table_exists("tag_reviews")
+
+    # Up one step: every existing tag is unverified, the CHECK holds, and the
+    # table takes a proposal that outlives its tag.
+    await _alembic("upgrade", TAG_REVIEW)
+    assert await _columns("tags", "review_status") == {"review_status": ("text", False)}
+    assert await _index_exists("ix_tags_review_status")
+    assert await _scalar("SELECT count(*) FROM tags WHERE review_status = 'unverified'") == 2
+    with pytest.raises(IntegrityError):
+        await _exec("UPDATE tags SET review_status = 'maybe' WHERE name = 'auth'")
+    await _exec("INSERT INTO tag_reviews (tag_id, tag_name, verdict, reason, model) "
+                "SELECT id, name, 'drop', 'Says nothing.', 'm' FROM tags WHERE name = 'misc'")
+    with pytest.raises(IntegrityError):
+        await _exec("UPDATE tag_reviews SET resolved = 'maybe'")
+    await _exec("DELETE FROM tags WHERE name = 'misc'")
+    assert await _scalar("SELECT count(*) FROM tag_reviews WHERE tag_id IS NULL "
+                         "AND tag_name = 'misc'") == 1
+
+    # Down one step: the table and the column go, the tags stay.
+    await _alembic("downgrade", ARCHIVED_AT)
+    assert await _columns("tags", "review_status") == {}
+    assert not await _table_exists("tag_reviews")
+    assert not await _index_exists("ix_tags_review_status")
+    assert await _scalar("SELECT count(*) FROM tags") == 1
+
+    # And up again.
+    await _alembic("upgrade", TAG_REVIEW)
+    assert await _scalar("SELECT review_status FROM tags") == "unverified"

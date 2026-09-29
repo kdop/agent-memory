@@ -11,6 +11,7 @@ One component per file, Vue 3 `<script setup>`, Quasar components.
 | `MemoryEditDialog.vue` | `MemoriesPage` | `api.getMemory/patchMemory/deleteMemories` |
 | `TagsTable.vue` | `TagsPage` | `tags.list`, `api.patchTag/deleteTag/mergeTags` |
 | `TagDetailModal.vue` | `TagsPage` | `api.patchTag/mergeTags/detachTag`, `tags.fetch()` |
+| `ArchivedPage.vue` (page) | router `/app/archived` | its own rows from `api.listMemories({archived: true})`, `api.restoreMemory`, `health.archiveDays` |
 | `AgentProjectFilter.vue` | `MemoriesPage` right rail | `memories.agent`, `memories.project`, `memories.status`, `memories.current` |
 
 ## Conventions

@@ -1,7 +1,7 @@
 {
   "name": "memory",
   "description": "Persistent cross-session memory for agents via memory-cli (the agent-memory service): load context at session start and log durable decisions, lessons and preferences with their reasoning.",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "author": {
     "name": "kdop"
   },

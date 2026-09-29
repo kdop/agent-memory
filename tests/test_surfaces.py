@@ -35,6 +35,7 @@ from agent_memory.server.models import MemoryReview
 from agent_memory.server.review import Verdict
 from conftest import (
     APPROVE,
+    ARCHIVING,
     IMPROVE,
     AUTH,
     REJECT,
@@ -340,7 +341,7 @@ def test_cli_prints_the_review_line_in_each_form(cli, url):
     asyncio.run(plant_review(5, Verdict("rewrite", 3, "Say why.", "entry 4, because of X.",
                                         None, [])))
     shown = cli.raw("show", "1").stdout
-    assert "review: reject, rule 2: A diary line: it says what was done, not why." in shown
+    assert "review: reject, rule 1: It will not matter in a later session." in shown
     # The line sits with the meta lines, before the content.
     assert shown.index("review:") < shown.index("entry 0")
     assert "review: reject, duplicate of #1: Says the same as #1." in cli.raw("show", "2").stdout
@@ -421,7 +422,7 @@ def test_cli_show_reviews_prints_the_history_oldest_first(cli, url):
     # then the history under the content, oldest first.
     assert "review: approve: A decision with its reason." in out
     assert re.findall(r"^review (\S+ \S+): (.+)$", out, re.M) == [
-        (dates["reject"], "reject, rule 2: A diary line: it says what was done, not why."),
+        (dates["reject"], "reject, rule 1: It will not matter in a later session."),
         (dates["rewrite"], "rewrite, rule 3: Say why."),
         (dates["approve"], "approve: A decision with its reason.")]
     assert out.index("Chose Postgres") < out.index(f"review {dates['reject']}")
@@ -460,7 +461,7 @@ def test_cli_catch_up(cli, reviewing):
     reviewing.fake.reset(APPROVE, block=True)
     try:
         assert httpx.post(f"{reviewing.url}/admin/review", headers=AUTH).json() == {
-            "scheduled": 1}
+            "scheduled": 1, "tags": 0}
         assert reviewing.fake.started.wait(10)
         assert rcli.raw("review", "--catch-up").stdout.strip() == \
             "✓ A catch-up is already running; nothing new scheduled"
@@ -478,7 +479,7 @@ def test_cli_in_refuse_mode(reviewing):
     assert "review: approve: A decision with its reason." in rcli.raw("show", "1").stdout
 
     cases = [
-        (REJECT, ["✗ Review: reject, rule 2: A diary line: it says what was done, not why.",
+        (REJECT, ["✗ Review: reject, rule 1: It will not matter in a later session.",
                   "Fix the entry, or pass --force to store it as written."]),
         (REPEAT, ["✗ Review: reject, duplicate of #1: Says the same as #1.",
                   "Fix the entry, or pass --force to store it as written."]),
@@ -537,7 +538,7 @@ async def test_mcp_tools_and_their_result_shapes(url):
     async with mcp_session(url) as call:
         first = await call("memory_add", content="the cat sat on the mat", project="p",
                            tags=[{"name": "pets", "description": "animals"}])
-        assert first == {"id": 1, "warnings": ["short"]}
+        assert first == {"id": 1, "warnings": ["short"], "notes": []}
         for content in ("a dog in the yard", "rain on the window"):
             await call("memory_add", content=content, project="p", agent="clu", type="note")
 
@@ -577,7 +578,8 @@ async def test_mcp_tools_and_their_result_shapes(url):
                                                                    "changes": []}
         assert await call("memory_delete", ids=[4, 999]) == {"deleted": 1, "missing": [999]}
         assert await call("memory_tags") == {"tags": [{"name": "pets", "count": 1,
-                                                       "description": "animals"}]}
+                                                       "description": "animals",
+                                                       "review_status": "unverified"}]}
         assert await call("memory_projects") == {"projects": [{"project": "p", "count": 3}]}
         assert (await call("memory_stats"))["total"] == 3
 
@@ -586,7 +588,7 @@ async def test_mcp_passes_the_constraint_type_through(url):
     async with mcp_session(url) as call:
         added = await call("memory_add", content="Apply for remote jobs only, because the "
                            "user will not move.", project="jobs", type="constraint")
-        assert added == {"id": 1, "warnings": []}
+        assert added == {"id": 1, "warnings": [], "notes": []}
         await call("memory_add", content="Prefer short cover letters over long ones.",
                    project="jobs", type="note")
         rows = (await call("memory_query", type="constraint"))["memories"]
@@ -669,8 +671,8 @@ async def test_mcp_add_in_refuse_mode_returns_the_review_error(reviewing):
                            project="p"))["id"] == 1
         reviewing.fake.verdict = REJECT
         assert await call("memory_add", content="Spent the afternoon tidying.", project="p") == {
-            "error": "review", "verdict": "reject", "rule": 2,
-            "explanation": "A diary line: it says what was done, not why.",
+            "error": "review", "verdict": "reject", "rule": 1,
+            "explanation": "It will not matter in a later session.",
             "needs": None, "message": None, "rewrite": None, "tags": [], "duplicate_of": None}
         reviewing.fake.verdict = IMPROVE
         assert await call("memory_add", content="Moved the store.", project="p") == {
@@ -689,7 +691,7 @@ async def test_mcp_add_in_refuse_mode_returns_the_review_error(reviewing):
         assert await call("memory_update", id=1, content=MERGED) == {"found": True,
                                                                     "changes": ["content"]}
         forced = await call("memory_add", content="Chose Postgres.", project="p", force=True)
-        assert set(forced) == {"id", "warnings"}
+        assert set(forced) == {"id", "warnings", "notes"}
     # The forced write is reviewed after the response; let it land.
     await until_status(forced["id"], "flagged")
 
@@ -727,6 +729,74 @@ def test_the_client_methods(url, live_server):
     assert api.stats()["total"] == 3
     assert api.reindex() == {"updated": 0, "tags": 0}
     assert api.delete([3, 999]) == {"deleted": 1, "missing": [999]}
+
+
+def _seed_archived(url):
+    """#1 live, #2 archived by a reject under rule 2; both match `store`."""
+    post(url, "Chose the store because it is fast.", project="p")
+    post(url, "Tidied the store module today.", project="p")
+    asyncio.run(plant_review(2, ARCHIVING))
+
+
+def test_cli_archived_listings_and_restore(cli, url):
+    _seed_archived(url)
+    assert [mid for mid, _ in headers(cli.raw("query").stdout)] == [1]
+    out = cli.raw("query", "--archived").stdout
+    assert headers(out) == [(2, "status: flagged archived")]
+    assert [mid for mid, _ in headers(cli.raw("search", "store").stdout)] == [1]
+    assert [mid for mid, _ in headers(cli.raw("search", "store", "--archived").stdout)] == [2]
+    assert cli.raw("review").stdout.strip() == "No flagged memories."
+    out = cli.raw("review", "--archived").stdout
+    assert [mid for mid, _ in headers(out)] == [2] and "Found 1 archived flagged memories" in out
+    assert "Archived:          1 (not counted above)" in cli.raw("stats").stdout
+    # `show` still finds it, and says it is archived.
+    assert headers(cli.raw("show", "2").stdout) == [(2, "status: flagged archived")]
+
+    assert cli.raw("restore", "2").stdout.strip() == "✓ Memory #2 restored"
+    assert cli.raw("restore", "2").stdout.strip() == "Memory #2 is not archived; nothing to do."
+    proc = cli.raw("restore", "999")
+    assert proc.returncode == 1 and proc.stdout.strip() == "✗ Memory #999 not found."
+    assert [mid for mid, _ in headers(cli.raw("query").stdout)] == [2, 1]
+    assert "Archived:" not in cli.raw("stats").stdout
+    proc = cli.raw("review", "--catch-up", "--archived")
+    assert proc.returncode == 2 and "--archived" in proc.stdout
+
+
+async def test_mcp_archived_and_restore(url):
+    await asyncio.to_thread(_seed_archived, url)
+    async with mcp_session(url) as call:
+        assert [m["id"] for m in (await call("memory_query"))["memories"]] == [1]
+        rows = (await call("memory_query", archived=True))["memories"]
+        assert [m["id"] for m in rows] == [2] and rows[0]["archived_at"] is not None
+        assert [m["id"] for m in (await call("memory_search", q="store"))["memories"]] == [1]
+        hits = (await call("memory_search", q="store", archived=True))["memories"]
+        assert [m["id"] for m in hits] == [2]
+        assert (await call("memory_flagged"))["memories"] == []
+        assert [m["id"] for m in (await call("memory_flagged", archived=True))["memories"]] == [2]
+        assert await call("memory_restore", id=2) == {"found": True, "restored": True}
+        assert await call("memory_restore", id=2) == {"found": True, "restored": False}
+        assert await call("memory_restore", id=999) == {"found": False, "restored": False}
+        assert [m["id"] for m in (await call("memory_query"))["memories"]] == [2, 1]
+        tools = {t.name: t for t in (await call.session.list_tools()).tools}
+    assert "archived" in tools["memory_restore"].description
+    for name in ("memory_query", "memory_search", "memory_flagged"):
+        assert "archived" in tools[name].inputSchema["properties"], name
+
+
+def test_the_client_archived_and_restore(url, live_server):
+    _seed_archived(url)
+    api = ApiClient(*live_server)
+    assert [m["id"] for m in api.query()] == [1]
+    rows, total = api.query_with_total(archived=True)
+    assert [m["id"] for m in rows] == [2] and total == 1
+    assert [m["id"] for m in api.search("store", archived=True)] == [2]
+    rows, total = api.flagged_with_total(archived=True)
+    assert [m["id"] for m in rows] == [2] and total == 1
+    assert api.flagged() == []
+    assert api.get(2)["archived_at"] is not None
+    assert api.stats()["archived"] == 1
+    assert api.restore(2) is True and api.restore(2) is False and api.restore(999) is None
+    assert api.get(2)["archived_at"] is None
 
 
 def test_the_client_errors(live_server, reviewing):
@@ -773,7 +843,7 @@ def test_the_client_errors(live_server, reviewing):
     # The catch-up, and its old name.
     reviewing.fake.reset(APPROVE)
     assert ApiClient.review_missing is ApiClient.review_catch_up
-    assert rapi.review_catch_up(limit=1) == {"scheduled": 1, "running": False}
+    assert rapi.review_catch_up(limit=1) == {"scheduled": 1, "tags": 0, "running": False}
     wait_until(lambda: asyncio.run(statuses())[1] == (2, "verified"))
 
 

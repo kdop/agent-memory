@@ -43,6 +43,7 @@ from agent_memory.server import repository as repo
 from agent_memory.server import review as review_mod
 from agent_memory.server.app import (
     REVIEW_MODEL_STATES,
+    archive_days_from_env,
     ReviewStatus,
     _catch_up_lock,
     _review_poll,
@@ -64,9 +65,10 @@ from agent_memory.server.review import (
     review_poll,
     status_for,
 )
-from agent_memory.server.schemas import MemoryOut, ReviewOut
+from agent_memory.server.schemas import MemoryOut, ReviewOut, TagIn
 from conftest import (
     APPROVE,
+    ARCHIVING,
     IMPROVE,
     REJECT,
     REWRITE,
@@ -595,7 +597,7 @@ async def test_flag_mode_stores_the_verdict_and_every_read_shows_it():
         resp = await a.post("Spent the afternoon tidying the config module.", type="note",
                             tags=["work-log"])
         # The add response is as before: the id and the warnings.
-        assert set(resp.json()) == {"id", "warnings"}
+        assert set(resp.json()) == {"id", "warnings", "notes"}
         mid = resp.json()["id"]
         # The model read the memory as stored, unverified at that point.
         memory, neighbours, _ = fake.calls[-1]
@@ -870,7 +872,7 @@ async def test_new_content_starts_over_and_other_changes_keep_the_review():
         assert len(fake.calls) == calls
 
         fake.verdict = APPROVE
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 1}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 1, "tags": 0}
         assert fake.calls[-1][0]["content"] == "other words"
         assert (await a.get(mid))["review_status"] == "verified"
 
@@ -923,7 +925,7 @@ async def test_refuse_mode_approve_stores_the_memory_verified_with_one_call():
     async with App(reviewer=fake, review_mode="refuse") as a:
         resp = await a.post("Chose Postgres, because several agents write at once.",
                             type="decision")
-        assert resp.status_code == 201 and set(resp.json()) == {"id", "warnings"}
+        assert resp.status_code == 201 and set(resp.json()) == {"id", "warnings", "notes"}
         row = await a.get(resp.json()["id"])
         assert row["review"] == APPROVE.as_dict() and row["review_status"] == "verified"
     assert await review_rows() == [(1, "approve", "fake-reviewer")]
@@ -1198,7 +1200,7 @@ async def test_current_hides_the_superseded_memories_on_every_listing():
         assert (await a.client.get("/memories", params={"current": "maybe"})).status_code == 422
 
 
-async def test_a_merge_is_stored_flagged_with_the_suggestion_and_changes_nothing():
+async def test_a_merge_flags_the_new_memory_and_archives_the_old_one():
     fake = FakeReviewer(APPROVE)
     async with App(reviewer=fake) as a:
         old = await a.add("Chose Postgres, because several agents write at once.",
@@ -1206,15 +1208,21 @@ async def test_a_merge_is_stored_flagged_with_the_suggestion_and_changes_nothing
         fake.verdict = MERGE
         new = await a.add(MERGED)
         row = await a.get(new)
-        assert row["review_status"] == "flagged" and row["review"] == MERGE.as_dict()
-        # Nothing was applied, and nothing links the two.
-        assert row["content"] == MERGED and row["supersedes"] is None
+        # The new memory is flagged with the suggestion, and supersedes the
+        # old one: the verdict named none, so the merge sets the link.
+        assert row["review_status"] == "flagged"
+        assert row["review"] == dict(MERGE.as_dict(), supersedes=old)
+        assert row["content"] == MERGED and row["supersedes"] == old
+        assert row["archived_at"] is None
+        # The old one keeps its text and status, and is archived.
         old_row = await a.get(old)
         assert old_row["content"] == "Chose Postgres, because several agents write at once."
-        assert (old_row["superseded_by"], old_row["review_status"]) == (None, "verified")
+        assert (old_row["superseded_by"], old_row["review_status"]) == (new, "verified")
+        assert old_row["archived_at"] is not None
         flagged = (await a.client.get("/memories/flagged")).json()
         assert [m["id"] for m in flagged] == [new]
         assert flagged[0]["review"]["duplicate_of"] == old
+        assert await a.ids() == [new]
 
 
 # ── the flagged listing ──────────────────────────────────────────────────────
@@ -1364,13 +1372,13 @@ async def test_the_catch_up_reviews_the_unverified_oldest_first_in_one_task(monk
     fake = FakeReviewer(APPROVE)
     async with App(reviewer=fake) as app:
         resp = await app.client.post("/admin/review", params={"limit": 2})
-        assert resp.status_code == 200 and resp.json() == {"scheduled": 2}
+        assert resp.status_code == 200 and resp.json() == {"scheduled": 2, "tags": 0}
         assert fake.ids == [c, a]
         assert (await app.client.post("/admin/review", params={"limit": 0})).json() == {
-            "scheduled": 3}
+            "scheduled": 3, "tags": 0}
         assert fake.ids == [c, a, e, b, d]
         # Nothing left: no task at all.
-        assert (await app.client.post("/admin/review")).json() == {"scheduled": 0}
+        assert (await app.client.post("/admin/review")).json() == {"scheduled": 0, "tags": 0}
     assert seen == [[c, a], [e, b, d]]
     assert await statuses() == [(mid, "verified") for mid in ids] + [(reviewed, "flagged")]
 
@@ -1384,7 +1392,7 @@ async def test_the_catch_up_limit_defaults_to_50(monkeypatch):
 
     monkeypatch.setattr(repo, "unverified_ids", unverified_ids)
     async with App(reviewer=FakeReviewer()) as a:
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 0}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 0, "tags": 0}
         assert (await a.client.post("/admin/review", params={"limit": -1})).status_code == 422
     assert asked == [50]
 
@@ -1397,7 +1405,7 @@ async def test_the_catch_up_verifies_each_memory_before_the_next_is_compared():
         await set_age(mid, minutes)
     fake = FakeReviewer(APPROVE)
     async with App(reviewer=fake) as a:
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 3}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 3, "tags": 0}
     assert fake.ids == [other, first, second]
     neighbours = [[(n["id"], n["review_status"]) for n in call[1]] for call in fake.calls]
     assert neighbours == [[], [(other, "verified")],
@@ -1411,14 +1419,14 @@ async def test_a_failing_review_in_the_catch_up_does_not_stop_the_rest(caplog):
                                            "three": REJECT, "four": None})
     with caplog.at_level(logging.WARNING, logger="agent_memory.server.app"):
         async with App(reviewer=fake) as a:
-            assert (await a.client.post("/admin/review")).json() == {"scheduled": 4}
+            assert (await a.client.post("/admin/review")).json() == {"scheduled": 4, "tags": 0}
     assert await statuses() == [(one, "verified"), (two, "unverified"), (three, "flagged"),
                                 (four, "unverified")]
     assert _messages(caplog) == [f"review of memory #{two} failed: RuntimeError: model blew up"]
     # The two without a verdict are still unverified: the next catch-up takes them.
     fake.verdicts.clear()
     async with App(reviewer=fake) as a:
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 2}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 2, "tags": 0}
     assert fake.ids[-2:] == [two, four]
 
 
@@ -1428,7 +1436,7 @@ async def test_the_catch_up_stores_the_link():
     await set_age(new, 10)
     fake = FakeReviewer(APPROVE, verdicts={NEW: supersede(old)})
     async with App(reviewer=fake) as a:
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 2}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 2, "tags": 0}
         assert (await a.get(new))["supersedes"] == old
     # The old one was verified first, so it was the neighbour the new one saw.
     assert [n["id"] for n in fake.calls[1][1]] == [old]
@@ -1473,7 +1481,7 @@ async def test_health_shows_the_catch_up_progress_while_it_runs():
         tick = asyncio.create_task(_review_tick(a.app))
         for i in range(3):
             await asyncio.to_thread(fake.entered[i].wait, 10)
-            assert await _progress(a) == {"total": 3, "done": i}
+            assert await _progress(a) == {"kind": "memories", "total": 3, "done": i}
             fake.gates[i].set()
         await tick
         assert await _progress(a) is None
@@ -1488,15 +1496,15 @@ async def test_a_failing_review_counts_as_done_in_the_progress(caplog):
             # Started by the route this time; its task runs inside the call.
             post = asyncio.create_task(a.client.post("/admin/review"))
             await asyncio.to_thread(fake.entered[0].wait, 10)
-            assert await _progress(a) == {"total": 3, "done": 0}
+            assert await _progress(a) == {"kind": "memories", "total": 3, "done": 0}
             fake.gates[0].set()                 # raises
             await asyncio.to_thread(fake.entered[1].wait, 10)
-            assert await _progress(a) == {"total": 3, "done": 1}
+            assert await _progress(a) == {"kind": "memories", "total": 3, "done": 1}
             fake.gates[1].set()                 # no verdict
             await asyncio.to_thread(fake.entered[2].wait, 10)
-            assert await _progress(a) == {"total": 3, "done": 2}
+            assert await _progress(a) == {"kind": "memories", "total": 3, "done": 2}
             fake.gates[2].set()
-            assert (await post).json() == {"scheduled": 3}
+            assert (await post).json() == {"scheduled": 3, "tags": 0}
             assert await _progress(a) is None
     assert [s for _, s in await statuses()] == ["unverified", "unverified", "verified"]
 
@@ -1521,7 +1529,8 @@ async def test_a_tick_checks_the_model_and_catches_up_when_it_answers(caplog):
             await _review_tick(a.app)
             assert (fake.checks, fake.calls) == (1, [])
             assert (await a.client.get("/health")).json() == {
-                "status": "ok", "review_model": "unreachable", "catch_up": None}
+                "status": "ok", "review_model": "unreachable", "catch_up": None,
+                "archive_days": 30}
             assert await statuses() == [(one, "unverified"), (two, "unverified")]
 
             fake.up = True
@@ -1586,7 +1595,7 @@ async def test_one_catch_up_at_a_time_whoever_started_it(caplog):
             await asyncio.to_thread(fake.started.wait, 10)
             assert _catch_up_lock(a.app).locked()
             resp = await a.client.post("/admin/review")
-            assert resp.json() == {"scheduled": 0, "running": True}
+            assert resp.json() == {"scheduled": 0, "tags": 0, "running": True}
             assert len(fake.calls) == 1
             fake.release.set()
             await tick
@@ -1600,10 +1609,10 @@ async def test_one_catch_up_at_a_time_whoever_started_it(caplog):
             await asyncio.to_thread(fake.started.wait, 10)
             await _review_tick(a.app)
             assert fake.checks == 1 and len(fake.calls) == 1
-            assert (await a.client.post("/admin/review")).json() == {"scheduled": 0,
+            assert (await a.client.post("/admin/review")).json() == {"scheduled": 0, "tags": 0,
                                                                      "running": True}
             fake.release.set()
-            assert (await post).json() == {"scheduled": 1}
+            assert (await post).json() == {"scheduled": 1, "tags": 0}
             assert fake.ids == [three] and not _catch_up_lock(a.app).locked()
     assert _messages(caplog).count("catch-up started: 2 unverified memories to review") == 1
 
@@ -1635,7 +1644,8 @@ async def test_the_lifespan_runs_the_poll_and_health_follows_it(caplog):
                                              base_url="http://testserver") as c:
                     await until(lambda: fake.checks >= 1)
                     assert (await c.get("/health")).json() == {
-                        "status": "ok", "review_model": "unreachable", "catch_up": None}
+                        "status": "ok", "review_model": "unreachable", "catch_up": None,
+                "archive_days": 30}
                     fake.up = True
                     await until(lambda: len(fake.calls) == 2)
                     await until(lambda: not _catch_up_lock(a.app).locked())
@@ -1691,7 +1701,253 @@ async def test_no_loop_when_the_review_or_the_poll_is_off(monkeypatch, reviewer,
     # Without a lifespan at all, health says off too.
     async with App(reviewer=FakeReviewer()) as a:
         assert (await a.client.get("/health")).json() == {"status": "ok", "review_model": "off",
-                                                          "catch_up": None}
+                                                          "catch_up": None, "archive_days": 30}
+
+
+# ── the archive ──────────────────────────────────────────────────────────────
+def reject(rule):
+    return Verdict("reject", rule, f"Breaks rule {rule}.", None, None)
+
+
+async def _archived(mid):
+    """The memory's `archived_at` straight from the table."""
+    async with db_session() as s:
+        return (await s.get(Memory, mid)).archived_at
+
+
+async def _backdate(mid, days):
+    """Archive memory `mid` `days` days ago."""
+    when = datetime.now(timezone.utc) - timedelta(days=days)
+    async with db_session() as s:
+        await s.execute(update(Memory).where(Memory.id == mid).values(archived_at=when))
+
+
+@pytest.mark.parametrize("rule, archived", [(1, False), (2, True), (3, False), (4, True),
+                                            (5, False)])
+async def test_a_reject_archives_the_memory_under_rule_2_or_4_only(session, rule, archived):
+    (mid,) = await add_rows("Spent the afternoon tidying.")
+    await repo.set_review(session, mid, reject(rule), "m")
+    row = await repo.get(session, mid)
+    assert row["review_status"] == "flagged"
+    assert (row["archived_at"] is not None) == archived
+
+
+async def test_other_verdicts_archive_nothing(session):
+    old, new, other = await add_rows(OLD, NEW, "Chose Postgres.")
+    # A reversal keeps both in view, and so do an approve and a rewrite
+    # that is not a merge.
+    await repo.set_review(session, old, APPROVE, "m")
+    await repo.set_review(session, new, supersede(old), "m")
+    await repo.set_review(session, other, REWRITE, "m")
+    # A reject for a repeat names the memory it repeats but is no merge.
+    await repo.set_review(session, other, REPEAT, "m")
+    for mid in (old, new, other):
+        assert (await repo.get(session, mid))["archived_at"] is None
+    assert (await repo.get(session, old))["superseded_by"] == new
+
+
+async def test_a_merge_archives_the_older_memory_and_links_the_newer(session):
+    old, new, third = await add_rows(OLD, MERGED, "A third choice.")
+    view = await repo.set_review(session, new, MERGE, "m")
+    assert view["supersedes"] == old
+    assert (await repo.get(session, old))["archived_at"] is not None
+    assert (await repo.get(session, new))["archived_at"] is None
+    # A merge whose verdict names its own link keeps that link.
+    merge_and_link = Verdict("rewrite", None, "Repeats #3.", MERGED, third, [],
+                             supersedes=old)
+    await repo.set_review(session, new, merge_and_link, "m")
+    assert (await repo.get(session, new))["supersedes"] == old
+    assert (await repo.get(session, third))["archived_at"] is not None
+
+
+async def test_a_merge_naming_itself_or_a_missing_memory_is_refused(session):
+    (mid,) = await add_rows(MERGED)
+    with pytest.raises(ValueError, match="itself"):
+        await repo.set_review(session, mid, Verdict("rewrite", None, "r", MERGED, mid), "m")
+    with pytest.raises(LookupError, match="#999"):
+        await repo.set_review(session, mid, Verdict("rewrite", None, "r", MERGED, 999), "m")
+    assert (await repo.get(session, mid))["review_status"] == "unverified"
+
+
+async def test_archive_and_restore_in_the_repository(session):
+    (mid,) = await add_rows("one")
+    assert await repo.archive(session, mid) is True
+    first = (await repo.get(session, mid))["archived_at"]
+    # A second archive keeps the first stamp, so the days left do not start over.
+    assert await repo.archive(session, mid) is False
+    assert (await repo.get(session, mid))["archived_at"] == first
+    assert await repo.restore(session, mid) is True
+    assert (await repo.get(session, mid))["archived_at"] is None
+    assert await repo.restore(session, mid) is False
+    assert await repo.archive(session, 999) is None and await repo.restore(session, 999) is None
+
+
+async def test_archived_memories_are_hidden_everywhere_unless_asked_for():
+    """#1 live and verified, #2 archived after an approve, #3 archived by a
+    reject; all three share the word `store`, a tag and the project."""
+    live, gone, rejected = await add_rows(
+        "The store keeps one row per memory, because of X.",
+        "The store keeps one row per memory, because of Y.",
+        "Tidied the store module.", project="p")
+    async with db_session() as s:
+        for mid in (live, gone, rejected):
+            await repo.update(s, mid, add_tags=[TagIn(name=f"t{mid}")])
+    await plant_review(live, APPROVE)
+    await plant_review(gone, APPROVE)
+    await plant_review(rejected, ARCHIVING)
+    async with db_session() as s:
+        assert await repo.archive(s, gone) is True
+    async with App() as a:
+        # The timeline and its count.
+        resp = await a.client.get("/memories", params={"limit": 0})
+        assert [m["id"] for m in resp.json()] == [live]
+        assert resp.headers["X-Total-Count"] == "1"
+        assert await a.ids(q="store") == [live]
+        resp = await a.client.get("/memories", params={"archived": "true"})
+        assert {m["id"] for m in resp.json()} == {gone, rejected}
+        assert resp.headers["X-Total-Count"] == "2"
+        assert all(m["archived_at"] for m in resp.json())
+        assert await a.ids(archived="true", status="flagged") == [rejected]
+        # Every search mode.
+        for mode in ("keyword", "semantic", "hybrid"):
+            assert await a.ids("/memories/search", q="store", mode=mode) == [live], mode
+            ids = await a.ids("/memories/search", q="store", mode=mode, archived="true")
+            assert set(ids) == {gone, rejected}, mode
+        # The flagged listing, its count, and the status listings.
+        resp = await a.client.get("/memories/flagged")
+        assert resp.json() == [] and resp.headers["X-Total-Count"] == "0"
+        assert await a.ids("/memories/flagged", status="verified") == [live]
+        resp = await a.client.get("/memories/flagged", params={"archived": "true"})
+        assert [m["id"] for m in resp.json()] == [rejected]
+        assert resp.headers["X-Total-Count"] == "1"
+        assert await a.ids("/memories/flagged", status="verified", archived="true") == [gone]
+        # The counts.
+        stats = (await a.client.get("/stats")).json()
+        assert (stats["total"], stats["archived"], stats["today"]) == (1, 2, 1)
+        assert (await a.client.get("/projects")).json() == [{"project": "p", "count": 1}]
+        assert (await a.client.get("/agents")).json() == [{"agent": "tester", "count": 1}]
+        assert [t["name"] for t in (await a.client.get("/tags")).json()] == [f"t{live}"]
+        # A read by id still returns an archived memory.
+        row = await a.get(gone)
+        assert row["archived_at"] is not None and row["review_status"] == "verified"
+    async with db_session() as s:
+        # The reference set: the duplicate check, the neighbours, the tags
+        # offered, the catch-up.
+        emb = FakeEmbedder()
+        assert await repo.find_duplicate(s, emb, "The store keeps one row per memory, "
+                                                 "because of Y.", "p") is None
+        assert await repo.find_duplicate(s, emb, "The store keeps one row per memory, "
+                                                 "because of X.", "p") == (live, pytest.approx(1.0))
+        near = await repo.neighbours_for(s, emb, "anything", "p")
+        assert [n["id"] for n in near] == [live]
+        assert await repo.tags_for_review(s, None, "x") == [f"t{live}"]
+        await s.execute(update(Memory).values(review_status="unverified"))
+        assert await repo.unverified_ids(s) == [live]
+
+
+async def test_restore_route():
+    (mid,) = await add_rows("Spent the afternoon tidying.")
+    await plant_review(mid, ARCHIVING)
+    async with App() as a:
+        assert await a.ids() == []
+        resp = await a.client.post(f"/memories/{mid}/restore")
+        assert resp.status_code == 200 and resp.json() == {"id": mid, "restored": True}
+        assert await a.ids() == [mid]
+        row = await a.get(mid)
+        # Its status and review stay as they were.
+        assert row["archived_at"] is None and row["review_status"] == "flagged"
+        assert row["review"]["rule"] == 2
+        resp = await a.client.post(f"/memories/{mid}/restore")
+        assert resp.json() == {"id": mid, "restored": False}
+        assert (await a.client.post("/memories/999/restore")).status_code == 404
+
+
+async def test_new_content_brings_an_archived_memory_back_unverified():
+    (mid,) = await add_rows("Spent the afternoon tidying.")
+    await plant_review(mid, ARCHIVING)
+    async with App() as a:
+        await a.client.patch(f"/memories/{mid}", json={"project": "q"})
+        assert (await a.get(mid))["archived_at"] is not None
+        await a.client.patch(f"/memories/{mid}", json={"content": "Chose X because of Y."})
+        row = await a.get(mid)
+        assert (row["archived_at"], row["review_status"]) == (None, "unverified")
+    async with db_session() as s:
+        assert await repo.unverified_ids(s) == [mid]
+
+
+async def test_delete_archived_goes_by_the_age_of_the_stamp(session):
+    fresh, old, older, live = await add_rows("fresh", "old", "older", "live")
+    await _backdate(fresh, 29)
+    await _backdate(old, 31)
+    await _backdate(older, 400)
+    assert await repo.delete_archived(session, 0) == 0
+    assert await repo.delete_archived(session, -1) == 0
+    # A fake clock: 2 days from now, `fresh` is 31 days old too.
+    later = datetime.now(timezone.utc) + timedelta(days=2)
+    assert await repo.delete_archived(session, 500, now=later) == 0
+    assert await repo.delete_archived(session, 30) == 2
+    assert [m["id"] for m in await repo.query(session)] == [live]
+    assert await repo.get(session, fresh) is not None and await repo.get(session, old) is None
+    assert await repo.delete_archived(session, 30, now=later) == 1
+    assert await repo.get(session, fresh) is None
+
+
+@pytest.mark.parametrize("up", [False, True])
+async def test_a_tick_deletes_old_archived_memories_whether_or_not_the_model_answers(
+        caplog, up):
+    old, fresh, live = await add_rows("old", "fresh", "live")
+    await plant_review(live, APPROVE)
+    await plant_review(old, ARCHIVING)
+    await _backdate(old, 31)
+    await plant_review(fresh, ARCHIVING)
+    fake = FakeReviewer(APPROVE, up=up)
+    with caplog.at_level(logging.INFO, logger="agent_memory.server.app"):
+        async with App(reviewer=fake) as a:
+            await _review_tick(a.app)
+            assert await statuses() == [(fresh, "flagged"), (live, "verified")]
+            assert fake.calls == []
+            # Nothing left to delete: no line the second time.
+            await _review_tick(a.app)
+    lines = [m for m in _messages(caplog) if m.startswith("deleted")]
+    assert lines == ["deleted 1 memories archived more than 30 days ago"]
+
+
+async def test_the_archive_days_come_from_create_app_or_the_environment(monkeypatch, caplog):
+    (mid,) = await add_rows("old")
+    await plant_review(mid, ARCHIVING)
+    await _backdate(mid, 3)
+    async with App(reviewer=FakeReviewer(up=False), archive_days=5) as a:
+        assert (await a.client.get("/health")).json()["archive_days"] == 5
+        await _review_tick(a.app)
+        assert await _archived(mid) is not None
+        a.app.state.archive_days = 2
+        await _review_tick(a.app)
+        assert await statuses() == []
+    for raw, days in (("", 30), ("7", 7), ("0", 0), ("1.5", 1.5)):
+        monkeypatch.setenv("AGENT_MEMORY_ARCHIVE_DAYS", raw)
+        assert archive_days_from_env() == days
+    monkeypatch.setenv("AGENT_MEMORY_ARCHIVE_DAYS", "soon")
+    with caplog.at_level(logging.WARNING, logger="agent_memory.server.app"):
+        assert archive_days_from_env() == 30
+    assert _messages(caplog) == ["AGENT_MEMORY_ARCHIVE_DAYS='soon' is not a number; using 30"]
+    async with App() as a:
+        assert (await a.client.get("/health")).json()["archive_days"] == 30
+
+
+async def test_a_failing_delete_is_one_line_and_the_tick_goes_on(monkeypatch, caplog):
+    (mid,) = await add_rows("one")
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(repo, "delete_archived", boom)
+    fake = FakeReviewer(APPROVE)
+    with caplog.at_level(logging.WARNING, logger="agent_memory.server.app"):
+        async with App(reviewer=fake) as a:
+            await _review_tick(a.app)
+    assert fake.ids == [mid]
+    assert _messages(caplog) == [
+        "review poll: deleting old archived memories failed: RuntimeError: boom"]
 
 
 # ── the real model, when there is one ────────────────────────────────────────
@@ -1760,8 +2016,11 @@ async def test_real_model_links_a_reversal_and_merges_a_partial_repeat():
     assert rb["review"]["duplicate_of"] == old_b
     merged = rb["review"]["rewrite"] or ""
     assert "postgres" in merged.lower() and "pool" in merged.lower()
-    assert rb["content"] == partial and rb["supersedes"] is None
-    assert old_b_row["content"] == postgres and old_b_row["superseded_by"] is None
+    # The merge archives the older memory and links the newer one to it (#101);
+    # neither text is changed.
+    assert rb["content"] == partial and rb["supersedes"] == old_b
+    assert old_b_row["content"] == postgres and old_b_row["superseded_by"] == new_b
+    assert old_b_row["archived_at"] is not None and ra["archived_at"] is None
 
 
 async def test_an_improve_is_flagged_listed_and_carries_its_need():

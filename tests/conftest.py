@@ -53,7 +53,10 @@ TOKEN = "test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 APPROVE = Verdict("approve", None, "A decision with its reason.", None, None)
-REJECT = Verdict("reject", 2, "A diary line: it says what was done, not why.", None, None)
+# Rule 1, not 2 or 4: a reject under those archives the memory, and most tests
+# want a flagged memory that stays in view. ARCHIVING is the one that archives.
+REJECT = Verdict("reject", 1, "It will not matter in a later session.", None, None)
+ARCHIVING = Verdict("reject", 2, "A diary line: it says what was done, not why.", None, None)
 REWRITE = Verdict("rewrite", 3, "Say why.", "Chose Postgres,\nbecause of X.", None,
                   ["database", "search"])
 IMPROVE = Verdict("improve", 3, "needs reason: Say why the store moved.", None, None,
@@ -199,9 +202,10 @@ def _schema():
 
 # Emptying the tables with DELETE and restarting the id sequences is several
 # times faster than TRUNCATE on tables this small, and this runs before every test.
-_EMPTY = ("DELETE FROM memory_reviews; DELETE FROM memory_tags; DELETE FROM tags; "
-          "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; "
-          "ALTER SEQUENCE tags_id_seq RESTART; ALTER SEQUENCE memory_reviews_id_seq RESTART")
+_EMPTY = ("DELETE FROM memory_reviews; DELETE FROM tag_reviews; DELETE FROM memory_tags; "
+          "DELETE FROM tags; DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; "
+          "ALTER SEQUENCE tags_id_seq RESTART; ALTER SEQUENCE memory_reviews_id_seq RESTART; "
+          "ALTER SEQUENCE tag_reviews_id_seq RESTART")
 
 
 @pytest.fixture(autouse=True)

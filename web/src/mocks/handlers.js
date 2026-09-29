@@ -5,7 +5,7 @@
 // Auth: any NON-EMPTY bearer token is accepted (mock); a missing/blank token →
 // 401. GET /health needs no auth.
 import { http, HttpResponse } from 'msw'
-import { db, tagCount } from './seed.js'
+import { db, stamp, tagCount } from './seed.js'
 
 // ---------------------------------------------------------------- helpers ---
 
@@ -50,6 +50,29 @@ function toMemoryOut(m, q, score = null) {
     review_status: m.review_status ?? 'unverified',
     supersedes: m.supersedes ?? null,
     superseded_by: m.superseded_by ?? null,
+    archived_at: m.archived_at ?? null,
+  }
+}
+
+// How many days the mock server keeps an archived memory, as GET /health says.
+const ARCHIVE_DAYS = 30
+
+/** The live memories, or with ?archived=true only the archived ones. */
+function archivedFilter(rows, sp) {
+  const archived = sp.get('archived')
+  const want = archived === 'true' || archived === '1'
+  return rows.filter((m) => Boolean(m.archived_at) === want)
+}
+
+const live = () => db.memories.filter((m) => !m.archived_at)
+
+/** Store a mock verdict the way the server does: the status follows it, and
+ *  a reject under rule 2 or 4 archives the memory. */
+function applyVerdict(m) {
+  m.review = mockVerdict(m)
+  m.review_status = m.review.verdict === 'approve' ? 'verified' : 'flagged'
+  if (m.review.verdict === 'reject' && [2, 4].includes(m.review.rule) && !m.archived_at) {
+    m.archived_at = stamp(new Date())
   }
 }
 
@@ -78,17 +101,33 @@ function mockVerdict(m) {
            duplicate_of: null, tags: m.tags.slice(0, 2), supersedes: null }
 }
 
-// The running catch-up's progress, as GET /health reports it: { total, done },
-// or null when none runs. Only one runs at a time.
+// The running catch-up's progress, as GET /health reports it: { kind, total,
+// done }, or null when none runs. Memories first, then tags. Only one runs
+// at a time.
 let catchUp = null
 // How long the mock takes per memory, so the progress bar can be seen.
 const MOCK_REVIEW_MS = 2000
 
-/** Sorted TagCount[] with live counts. */
+/** Sorted TagCount[] with live counts and review status. */
 function tagCounts() {
   return [...db.tags.values()]
-    .map((t) => ({ name: t.name, count: tagCount(db, t.name), description: t.description }))
+    .map((t) => ({ name: t.name, count: tagCount(db, t.name), description: t.description,
+                   review_status: t.review_status ?? 'unverified' }))
     .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** Move every link from tag `source` to `target` and delete `source`. */
+function mergeInto(source, target) {
+  let affected = 0
+  for (const m of db.memories) {
+    if (!m.tags.includes(source)) continue
+    m.tags = m.tags.filter((t) => t !== source)
+    if (!m.tags.includes(target)) m.tags.push(target)
+    m.tags.sort()
+    affected++
+  }
+  db.tags.delete(source)
+  return affected
 }
 
 // --------------------------------------------------------------- handlers ---
@@ -96,7 +135,8 @@ function tagCounts() {
 export const handlers = [
   // ---- GET /health (no auth) ----
   http.get('/health', () =>
-    HttpResponse.json({ status: 'ok', review_model: 'reachable', catch_up: catchUp })),
+    HttpResponse.json({ status: 'ok', review_model: 'reachable', catch_up: catchUp,
+                        archive_days: ARCHIVE_DAYS })),
 
   // ---- GET /memories/bulk (before /memories/:id) ----
   http.get('/memories/bulk', ({ request }) => {
@@ -125,7 +165,7 @@ export const handlers = [
     if (project != null) rows = rows.filter((m) => (m.project ?? '') === project)
     if (agent != null) rows = rows.filter((m) => m.agent === agent)
     if (tag) rows = rows.filter((m) => m.tags.includes(tag))
-    rows = statusFilters(rows, sp)
+    rows = archivedFilter(statusFilters(rows, sp), sp)
     const words = q.toLowerCase().split(/\s+/).filter(Boolean)
     // Score: keyword = share of words present; semantic/hybrid = the same plus
     // a little for shared letters, so the ranked list differs a bit.
@@ -159,7 +199,7 @@ export const handlers = [
     const status = sp.get('status')
     const project = sp.get('project')
     const limit = Math.max(0, parseInt(sp.get('limit') ?? '100', 10) || 0)
-    let rows = db.memories.slice()
+    let rows = archivedFilter(db.memories, sp)
     if (project != null) rows = rows.filter((m) => (m.project ?? '') === project)
     if (status) rows = rows.filter((m) => (m.review_status ?? 'unverified') === status)
     else rows = rows.filter((m) => m.review && ['reject', 'rewrite'].includes(m.review.verdict))
@@ -174,27 +214,36 @@ export const handlers = [
   http.post('/admin/review', ({ request }) => {
     const denied = unauthorized(request)
     if (denied) return denied
-    if (catchUp) return HttpResponse.json({ scheduled: 0, running: true })
+    if (catchUp) return HttpResponse.json({ scheduled: 0, tags: 0, running: true })
     const sp = new URL(request.url).searchParams
     const limit = Math.max(0, parseInt(sp.get('limit') ?? '50', 10) || 0)
-    const pending = db.memories.filter((m) => (m.review_status ?? 'unverified') === 'unverified')
+    const pending = live().filter((m) => (m.review_status ?? 'unverified') === 'unverified')
     const ids = (limit ? pending.slice(0, limit) : pending).map((m) => m.id)
-    if (ids.length) {
-      catchUp = { total: ids.length, done: 0 }
-      // Verdicts land one by one, a little later, as on the real server.
+    const unverifiedTags = [...db.tags.values()].filter((t) => (t.review_status ?? 'unverified') === 'unverified')
+    const tagNames = (limit ? unverifiedTags.slice(0, limit) : unverifiedTags).map((t) => t.name)
+    // Verdicts land one by one, a little later, as on the real server:
+    // the memories, then the tags (each tag is kept).
+    const halves = [['memories', ids, (id) => {
+      const m = db.memories.find((x) => x.id === id)
+      if (m) applyVerdict(m)
+    }], ['tags', tagNames, (name) => {
+      const t = db.tags.get(name)
+      if (t) t.review_status = 'verified'
+    }]].filter(([, items]) => items.length)
+    const run = (h) => {
+      if (h >= halves.length) { catchUp = null; return }
+      const [kind, items, act] = halves[h]
+      catchUp = { kind, total: items.length, done: 0 }
       const step = () => {
-        const m = db.memories.find((x) => x.id === ids[catchUp.done])
-        if (m) {
-          m.review = mockVerdict(m)
-          m.review_status = m.review.verdict === 'approve' ? 'verified' : 'flagged'
-        }
-        catchUp = { total: ids.length, done: catchUp.done + 1 }
+        act(items[catchUp.done])
+        catchUp = { kind, total: items.length, done: catchUp.done + 1 }
         if (catchUp.done < catchUp.total) setTimeout(step, MOCK_REVIEW_MS)
-        else catchUp = null
+        else run(h + 1)
       }
       setTimeout(step, MOCK_REVIEW_MS)
     }
-    return HttpResponse.json({ scheduled: ids.length })
+    run(0)
+    return HttpResponse.json({ scheduled: ids.length, tags: tagNames.length })
   }),
 
   // ---- POST /admin/review/:id (review one memory now) ----
@@ -203,8 +252,7 @@ export const handlers = [
     if (denied) return denied
     const m = db.memories.find((x) => x.id === Number(params.id))
     if (!m) return HttpResponse.json({ detail: 'Not found' }, { status: 404 })
-    m.review = mockVerdict(m)
-    m.review_status = m.review.verdict === 'approve' ? 'verified' : 'flagged'
+    applyVerdict(m)
     return HttpResponse.json(m.review)
   }),
 
@@ -234,7 +282,7 @@ export const handlers = [
     if (project != null) rows = rows.filter((m) => (m.project ?? '') === project)
     if (agent != null) rows = rows.filter((m) => m.agent === agent)
     if (type != null) rows = rows.filter((m) => (m.type ?? '') === type)
-    rows = statusFilters(rows, sp)
+    rows = archivedFilter(statusFilters(rows, sp), sp)
 
     if (sinceDays != null && sinceDays !== '') {
       // Single calendar day N days ago (UTC). Overrides since/until.
@@ -254,6 +302,8 @@ export const handlers = [
         if (ai !== bi) return ai - bi
         return parseTs(b.timestamp) - parseTs(a.timestamp)
       })
+    } else if (order === 'archived_desc') {
+      rows.sort((a, b) => parseTs(b.archived_at) - parseTs(a.archived_at) || b.id - a.id)
     } else {
       rows.sort((a, b) =>
         order === 'date_asc'
@@ -293,8 +343,20 @@ export const handlers = [
       review: null,
       supersedes: null,
       superseded_by: null,
+      archived_at: null,
     })
     return HttpResponse.json({ id, warnings: [] }, { status: 201 })
+  }),
+
+  // ---- POST /memories/:id/restore ----
+  http.post('/memories/:id/restore', ({ request, params }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    const m = db.memories.find((x) => x.id === Number(params.id))
+    if (!m) return HttpResponse.json({ detail: 'Not found' }, { status: 404 })
+    const restored = Boolean(m.archived_at)
+    m.archived_at = null
+    return HttpResponse.json({ id: m.id, restored })
   }),
 
   // ---- GET /memories/:id ----
@@ -322,6 +384,7 @@ export const handlers = [
       m.review = null
       m.review_status = 'unverified'
       m.supersedes = null
+      m.archived_at = null // new text is live again, and waits for its check
     }
     if (typeof body.project === 'string') { m.project = body.project === '' ? null : body.project; changes.push('project') }
     if (typeof body.type === 'string') { m.type = body.type === '' ? null : body.type; changes.push('type') }
@@ -371,6 +434,61 @@ export const handlers = [
     const denied = unauthorized(request)
     if (denied) return denied
     return HttpResponse.json(tagCounts())
+  }),
+
+  // ---- GET /tags/flagged: the tag proposals that wait ----
+  http.get('/tags/flagged', ({ request }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    return HttpResponse.json(db.tagProposals.filter((p) => !p.resolved && db.tags.has(p.tag)))
+  }),
+
+  // ---- POST /tags/proposals/:id/apply and /reject ----
+  http.post('/tags/proposals/:id/:action', ({ request, params }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    const p = db.tagProposals.find((x) => x.id === Number(params.id))
+    if (!p || !['apply', 'reject'].includes(params.action)) {
+      return HttpResponse.json({ detail: `Proposal #${params.id} not found` }, { status: 404 })
+    }
+    if (p.resolved) {
+      return HttpResponse.json({ detail: `Proposal #${p.id} is already ${p.resolved}` },
+                               { status: 409 })
+    }
+    const tag = db.tags.get(p.tag)
+    if (!tag) {
+      return HttpResponse.json({ detail: `Proposal #${p.id}: the tag '${p.tag}' no longer exists` },
+                               { status: 409 })
+    }
+    if (params.action === 'reject') {
+      p.resolved = 'rejected'
+      tag.review_status = 'verified'
+      return HttpResponse.json({ proposal: p })
+    }
+    let result
+    if (p.verdict === 'merge') {
+      if (!db.tags.has(p.into)) {
+        return HttpResponse.json({ detail: `Proposal #${p.id}: the tag '${p.into}' to merge into no longer exists` },
+                                 { status: 409 })
+      }
+      result = { target: p.into, memories_affected: mergeInto(p.tag, p.into), removed: [p.tag] }
+    } else if (p.verdict === 'rename') {
+      if (db.tags.has(p.new_name)) mergeInto(p.tag, p.new_name)
+      else {
+        db.tags.set(p.new_name, { ...tag, name: p.new_name })
+        mergeInto(p.tag, p.new_name)
+      }
+      db.tags.get(p.new_name).review_status = 'verified'
+      result = { name: p.new_name, description: db.tags.get(p.new_name).description,
+                 count: tagCount(db, p.new_name) }
+    } else {
+      const affected = tagCount(db, p.tag)
+      for (const m of db.memories) m.tags = m.tags.filter((t) => t !== p.tag)
+      db.tags.delete(p.tag)
+      result = { removed: p.tag, memories_affected: affected }
+    }
+    p.resolved = 'applied'
+    return HttpResponse.json({ proposal: p, result })
   }),
 
   // ---- POST /tags/merge (before /tags/:name/detach & /tags/:name) ----
@@ -478,7 +596,7 @@ export const handlers = [
     const denied = unauthorized(request)
     if (denied) return denied
     const counts = new Map()
-    for (const m of db.memories) {
+    for (const m of live()) {
       const p = m.project ?? null
       counts.set(p, (counts.get(p) || 0) + 1)
     }
@@ -490,7 +608,7 @@ export const handlers = [
     const denied = unauthorized(request)
     if (denied) return denied
     const counts = new Map()
-    for (const m of db.memories) {
+    for (const m of live()) {
       counts.set(m.agent, (counts.get(m.agent) || 0) + 1)
     }
     return HttpResponse.json([...counts.entries()].map(([agent, count]) => ({ agent, count })))
@@ -500,20 +618,22 @@ export const handlers = [
   http.get('/stats', ({ request }) => {
     const denied = unauthorized(request)
     if (denied) return denied
-    const agents = new Set(db.memories.map((m) => m.agent).filter(Boolean))
-    const projects = new Set(db.memories.map((m) => m.project).filter(Boolean))
+    const rows = live()
+    const agents = new Set(rows.map((m) => m.agent).filter(Boolean))
+    const projects = new Set(rows.map((m) => m.project).filter(Boolean))
     const today = new Date().toISOString().slice(0, 10)
     const weekAgo = new Date(Date.now() - 7 * 86_400_000)
-    const times = db.memories.map((m) => parseTs(m.timestamp)).filter((d) => !isNaN(d))
+    const times = rows.map((m) => parseTs(m.timestamp)).filter((d) => !isNaN(d))
     return HttpResponse.json({
-      total: db.memories.length,
+      total: rows.length,
       agents: agents.size,
       projects: projects.size,
       tags: db.tags.size,
-      today: db.memories.filter((m) => m.timestamp && m.timestamp.slice(0, 10) === today).length,
-      week: db.memories.filter((m) => parseTs(m.timestamp) >= weekAgo).length,
+      today: rows.filter((m) => m.timestamp && m.timestamp.slice(0, 10) === today).length,
+      week: rows.filter((m) => parseTs(m.timestamp) >= weekAgo).length,
       oldest: times.length ? new Date(Math.min(...times)).toISOString() : null,
       newest: times.length ? new Date(Math.max(...times)).toISOString() : null,
+      archived: db.memories.length - rows.length,
     })
   }),
 ]

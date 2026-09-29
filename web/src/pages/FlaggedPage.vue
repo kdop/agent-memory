@@ -20,6 +20,7 @@ const health = useHealthStore()
 const VERDICT_OPTIONS = [
   { label: 'all verdicts', value: '' },
   { label: 'reject', value: 'reject' },
+  { label: 'improve', value: 'improve' },
   { label: 'rewrite', value: 'rewrite' },
 ]
 

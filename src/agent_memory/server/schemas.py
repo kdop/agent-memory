@@ -135,6 +135,17 @@ class MemoryOut(BaseModel):
     # this one, if any. Both None for a memory that stands on its own.
     supersedes: int | None = None
     superseded_by: int | None = None
+    # When the review archived this memory, or None while it is live. Only a
+    # read by id, or a listing with `archived=true`, returns an archived one.
+    archived_at: str | None = None
+
+
+class RestoreResult(BaseModel):
+    """What `POST /memories/{id}/restore` answers: `restored` is False when
+    the memory was not archived, so nothing changed."""
+
+    id: int
+    restored: bool
 
 
 class UpdateIn(BaseModel):
@@ -154,6 +165,9 @@ class AddResult(BaseModel):
     id: int
     # Rule names the entry breaks (see server/checks.py). Empty when it is clean.
     warnings: list[str] = []
+    # One line per tag stored under another name than written, e.g.
+    # `tag "comms" stored as "communication"`. Free text, unlike `warnings`.
+    notes: list[str] = []
 
 
 class UpdateResult(BaseModel):
@@ -169,6 +183,27 @@ class TagCount(BaseModel):
     name: str
     count: int
     description: str = ""
+    # Whether the review model has checked the tag: `unverified`, `verified`
+    # (kept) or `flagged` (a proposal waits on `GET /tags/flagged`).
+    review_status: str = "unverified"
+
+
+class TagProposal(BaseModel):
+    """A tag verdict other than keep (see server/tag_review.py): merge into
+    `into`, rename to `new_name`, or drop. `resolved` is None while it waits
+    for a person, then `applied` or `rejected`. `tag` is the tag's name when
+    the model saw it; `tag_id` is None once the tag is gone."""
+
+    id: int
+    tag: str
+    tag_id: int | None = None
+    verdict: str
+    into: str | None = None
+    new_name: str | None = None
+    reason: str = ""
+    model: str = ""
+    created_at: str
+    resolved: str | None = None
 
 
 class ProjectCount(BaseModel):
