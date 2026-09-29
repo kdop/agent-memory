@@ -4,7 +4,10 @@ The warnings (`server/checks.py`): rules a program can partly see, returned
 with the id, never blocking. The duplicate check: a new entry whose vector is
 as close as `DUPLICATE_THRESHOLD` to a verified memory in the same project is
 refused with 409, unless `force=true`. And `scripts/replay_write_checks.py`,
-which runs both checks over past memories of a database copy.
+which runs both checks over past memories of a database copy. And the tags:
+a name is cleaned before lookup, a plural or a tag of the same meaning reuses
+the existing tag, each reuse is a note in the add response, and more than
+`TAG_LIMIT` tags is a warning.
 """
 
 import os
@@ -15,10 +18,12 @@ from pathlib import Path
 import pytest
 
 from agent_memory.server import repository as repo
-from agent_memory.server.checks import REASONING_WORDS, warnings_for
+from agent_memory.server.checks import REASONING_WORDS, TAG_LIMIT, warnings_for
 from agent_memory.server.embedding import NullEmbedder
-from agent_memory.server.schemas import MemoryIn
+from agent_memory.server.schemas import MemoryIn, TagIn
 from conftest import APPROVE, PG_DSN, REJECT, App, FakeEmbedder, add_rows, plant_review
+from drivers import CliDriver
+from test_surfaces import mcp_session
 
 # Long enough to clear the `short` rule, says nothing about why.
 LONG_NO_WHY = "Switched the build to run on every push to any branch of the repo."
@@ -152,8 +157,8 @@ async def test_replay_reports_the_second_of_an_identical_pair_as_a_refusal():
     assert "  proj  ok  -" in by_id[first]
     assert f"  proj  refuse #{first} 1.00  -" in by_id[second]
     assert "  proj  ok  -" in by_id[third]
-    assert lines[3:] == ["", "totals: 3 memories, 1 refused, "
-                             "warned (short 0, no-project 0, no-reasoning 0), 2 clean"]
+    assert lines[3:] == ["", "totals: 3 memories, 1 refused, warned (short 0, "
+                             "no-project 0, no-reasoning 0, too-many-tags 0), 2 clean"]
 
     # Both rows were written today: a window ending yesterday shows nothing,
     # one starting today shows both, the second still refused.
@@ -168,3 +173,170 @@ def test_replay_refuses_a_dsn_that_is_not_local():
                   "--embedder", "fake")
     assert out.returncode == 2
     assert "only against a copy" in out.stderr and out.stdout == ""
+
+
+# ── tags: the soft limit ─────────────────────────────────────────────────────
+def _with_tags(n):
+    return MemoryIn(content=LONG_NO_WHY, project="p", tags=[TagIn(name=f"t{i}") for i in range(n)])
+
+
+def test_more_than_ten_tags_is_a_warning():
+    assert TAG_LIMIT == 10
+    assert warnings_for(_with_tags(TAG_LIMIT)) == []
+    assert warnings_for(_with_tags(TAG_LIMIT + 1)) == ["too-many-tags"]
+
+
+async def test_add_with_too_many_tags_is_stored_anyway():
+    async with App() as a:
+        resp = await a.post(LONG_NO_WHY, tags=[f"t{i}" for i in range(12)])
+        assert resp.status_code == 201
+        assert resp.json()["warnings"] == ["too-many-tags"]
+        assert len((await a.get(resp.json()["id"]))["tags"]) == 12
+
+
+# ── tags: the name rule ──────────────────────────────────────────────────────
+@pytest.mark.parametrize("raw, clean", [
+    ("skill", "skill"),
+    ("  Skill ", "skill"),
+    ("Code Review", "code-review"),
+    ("code_review", "code-review"),
+    ("code -- _ review", "code-review"),
+    ("-edge-", "edge"),
+])
+def test_clean_tag_name(raw, clean):
+    assert repo.clean_tag_name(raw) == clean
+
+
+def _names(tags):
+    return [TagIn(name=n) for n in tags]
+
+
+async def _tag_rows(session):
+    return {t["name"]: t["description"] for t in await repo.list_tags(session)}
+
+
+async def test_a_plural_reuses_the_singular_and_the_reverse(session):
+    await repo.add(session, "a", "t", "p", [TagIn(name="skill", description="what I can do")],
+                   None)
+    await repo.add(session, "b", "t", "p", _names(["bugs"]), None)
+    notes = []
+    mid = await repo.add(session, "c", "t", "p",
+                         [TagIn(name="Skills", description="other words"), TagIn(name="bug"),
+                          TagIn(name="Code Review")], None, notes=notes)
+    assert notes == ['tag "Skills" stored as "skill"', 'tag "bug" stored as "bugs"',
+                     'tag "Code Review" stored as "code-review"']
+    assert (await repo.get(session, mid))["tags"] == ["bugs", "code-review", "skill"]
+    # Existing tags keep their name and, on a plural match, their description.
+    assert await _tag_rows(session) == {"skill": "what I can do", "bugs": "bugs",
+                                        "code-review": "code-review"}
+    # "-es" works too, and a name written the stored way gives no note.
+    await repo.add(session, "d", "t", "p", _names(["box"]), None)
+    notes = []
+    await repo.add(session, "e", "t", "p", _names(["boxes", "skill"]), None, notes=notes)
+    assert notes == ['tag "boxes" stored as "box"']
+
+
+async def test_the_same_tag_twice_in_one_add_is_one_link(session):
+    await repo.add(session, "a", "t", "p", _names(["skill"]), None)
+    mid = await repo.add(session, "b", "t", "p", _names(["skill", "Skills"]), None)
+    assert (await repo.get(session, mid))["tags"] == ["skill"]
+
+
+async def test_update_tags_reuse_and_say_so(session):
+    await repo.add(session, "a", "t", "p", _names(["skill"]), None)
+    mid = await repo.add(session, "b", "t", "p", [], None)
+    assert await repo.update(session, mid, add_tags=_names(["Skills"])) == [
+        "+tags: skill", 'tag "Skills" stored as "skill"']
+    assert await repo.update(session, mid, set_tags=_names(["skills", "Code_Review"])) == [
+        "tags set to: skill, code-review", 'tag "skills" stored as "skill"',
+        'tag "Code_Review" stored as "code-review"']
+
+
+# ── tags: the meaning rule ───────────────────────────────────────────────────
+class MeaningEmbedder(FakeEmbedder):
+    """FakeEmbedder, except that the texts in `near` all get one vector, and the
+    texts in `far` get a vector at cosine 0.8 from it."""
+
+    def __init__(self, near=(), far=(), model_name="fake"):
+        self.near, self.far, self.model_name = set(near), set(far), model_name
+
+    def _one(self, text):
+        if text in self.near:
+            return [1.0] + [0.0] * 7
+        if text in self.far:
+            return [0.8, 0.6] + [0.0] * 6
+        return super()._one(text)
+
+
+COMMS = "communication: talking with the team"
+
+
+async def test_a_tag_of_the_same_meaning_reuses_the_existing_one(session):
+    emb = MeaningEmbedder(near={COMMS, "comms: talking with the team"},
+                          far={"chat: talking with the team"})
+    await repo.add(session, "a", "t", "p",
+                   [TagIn(name="communication", description="talking with the team")], None,
+                   embedder=emb)
+    notes = []
+    mid = await repo.add(session, "b", "t", "p",
+                         [TagIn(name="comms", description="talking with the team"),
+                          TagIn(name="chat", description="talking with the team")], None,
+                         embedder=emb, notes=notes)
+    assert notes == ['tag "comms" stored as "communication"']
+    # Under 0.90 is another tag.
+    assert (await repo.get(session, mid))["tags"] == ["chat", "communication"]
+    assert set(await _tag_rows(session)) == {"communication", "chat"}
+
+
+async def test_the_meaning_rule_needs_a_vector_from_the_same_model(session):
+    comms = "comms: talking with the team"
+    await repo.add(session, "a", "t", "p",
+                   [TagIn(name="communication", description="talking with the team")], None,
+                   embedder=MeaningEmbedder(near={COMMS, comms}, model_name="old"))
+    notes = []
+    await repo.add(session, "b", "t", "p",
+                   [TagIn(name="comms", description="talking with the team")], None,
+                   embedder=MeaningEmbedder(near={COMMS, comms}), notes=notes)
+    assert notes == []
+    assert set(await _tag_rows(session)) == {"communication", "comms"}
+
+
+@pytest.mark.parametrize("embedder", [None, NullEmbedder()])
+async def test_without_a_model_only_the_name_rule_applies(session, embedder):
+    await repo.add(session, "a", "t", "p",
+                   [TagIn(name="communication", description="talking with the team")], None,
+                   embedder=FakeEmbedder())
+    notes = []
+    await repo.add(session, "b", "t", "p",
+                   [TagIn(name="comms", description="talking with the team"),
+                    TagIn(name="Communications")], None, embedder=embedder, notes=notes)
+    assert notes == ['tag "Communications" stored as "communication"']
+    assert set(await _tag_rows(session)) == {"communication", "comms"}
+
+
+# ── tags: the note on each surface ───────────────────────────────────────────
+async def test_the_add_route_returns_the_notes():
+    async with App() as a:
+        await a.add(LONG_WITH_WHY, tags=["skill"])
+        resp = await a.post(LONG_NO_WHY, tags=["Skills", "skill"])
+        assert resp.json()["notes"] == ['tag "Skills" stored as "skill"']
+        assert (await a.post(LONG_NO_WHY + " Again.", tags=["skill"])).json()["notes"] == []
+
+
+def test_the_cli_prints_one_line_per_note(live_server):
+    cli = CliDriver(*live_server)
+    cli.raw("add", LONG_WITH_WHY, "--project", "p", "--tags", '[{"name":"skill"}]')
+    out = cli.raw("add", "tiny", "--project", "p", "--tags",
+                  '[{"name":"Skills"},{"name":"Deploy Steps"}]')
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.splitlines()[1:] == [
+        "warning: short", 'note: tag "Skills" stored as "skill"',
+        'note: tag "Deploy Steps" stored as "deploy-steps"']
+
+
+async def test_mcp_add_returns_the_notes(live_server):
+    async with mcp_session(live_server[0]) as call:
+        await call("memory_add", content=LONG_WITH_WHY, project="p", tags=[{"name": "skill"}])
+        assert await call("memory_add", content=LONG_NO_WHY, project="p",
+                          tags=[{"name": "skills"}]) == {
+            "id": 2, "warnings": [], "notes": ['tag "skills" stored as "skill"']}

@@ -145,6 +145,9 @@ class AddResult(BaseModel):
     id: int
     # Rule names the entry breaks (see server/checks.py). Empty when it is clean.
     warnings: list[str] = []
+    # One line per tag stored under another name than written, e.g.
+    # `tag "comms" stored as "communication"`. Free text, unlike `warnings`.
+    notes: list[str] = []
 
 
 class UpdateResult(BaseModel):

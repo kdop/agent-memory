@@ -9,6 +9,7 @@ Full-text search is the one place raw Postgres shows through (`plainto_tsquery`,
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import delete as sql_delete
@@ -32,6 +33,11 @@ _LOAD = (selectinload(Memory.tags), selectinload(Memory.reviews),
 # A new memory whose vector scores this close to one already in its project is
 # a duplicate. Cosine on unit vectors: 1.0 is the same text, 0.92 is a rewording.
 DUPLICATE_THRESHOLD = 0.92
+
+# A new tag whose vector (`name: description`) scores this close to an
+# existing tag's is the same tag under another name, and the existing one is
+# used instead.
+TAG_REUSE_THRESHOLD = 0.90
 
 # Reciprocal rank fusion constant. A hit at rank r adds 1 / (RRF_K + r) to a
 # memory's fused score. 60 is the value from the original paper; it keeps the
@@ -174,14 +180,86 @@ async def _get_or_create_tag(session: AsyncSession, name: str, description: str 
     return tag
 
 
+def clean_tag_name(name: str) -> str:
+    """The spelling a tag is looked up and stored under: lowercase, spaces and
+    underscores become hyphens, runs of hyphens become one, no hyphen at
+    either end. "Code Review" and "code_review" both become "code-review"."""
+    name = re.sub(r"[\s_]+", "-", name.strip().lower())
+    return re.sub(r"-{2,}", "-", name).strip("-")
+
+
+def _plural_forms(name: str) -> set[str]:
+    """The other number of `name`: "skill" gives "skills" and "skilles",
+    "skills" gives "skill" and "skill" (from "-es"). A simple rule on
+    purpose; it only matters when a tag of that name already exists."""
+    forms = {name + "s", name + "es"}
+    if name.endswith("es"):
+        forms.add(name[:-2])
+    if name.endswith("s"):
+        forms.add(name[:-1])
+    forms.discard("")
+    forms.discard(name)
+    return forms
+
+
+async def _resolve_tag(session: AsyncSession, spec, embedder: Embedder | None,
+                       notes: list[str] | None) -> Tag:
+    """The tag a memory gets for `spec` (a `TagIn`) on add or update.
+
+    The name is cleaned first (`clean_tag_name`). Then, in order: a tag with
+    that name (its description is updated as before); a tag with the plural
+    or singular of it; a tag whose vector scores `TAG_REUSE_THRESHOLD` or
+    more against the new tag's, from the same model; else a new tag under the
+    clean name. Without a model only the name rules apply. Existing tags are
+    never renamed. When the stored name is not the one written, a line saying
+    so goes into `notes`, so the writer sees it."""
+    name = clean_tag_name(spec.name) or spec.name.strip()
+    tags = {clean_tag_name(t.name): t for t in (await session.execute(select(Tag))).scalars()}
+    tag = tags.get(name)
+    if tag is not None:
+        if spec.description and spec.description != tag.description:
+            tag.description = spec.description
+            await _embed_tag(tag, embedder)
+    else:
+        tag = next((tags[f] for f in sorted(_plural_forms(name)) if f in tags), None)
+    new = None
+    if tag is None:
+        new = Tag(name=name, description=spec.description or name)
+        await _embed_tag(new, embedder)
+        if new.embedding is not None:
+            best, best_score = None, TAG_REUSE_THRESHOLD
+            for t in tags.values():
+                if t.embedding is None or t.embedding_model != new.embedding_model:
+                    continue
+                score = cosine(new.embedding, list(t.embedding))
+                if score >= best_score:
+                    best, best_score = t, score
+            tag = best
+    if tag is None:
+        tag = new
+        session.add(tag)
+        await session.flush()
+    if notes is not None and tag.name != spec.name:
+        notes.append(f'tag "{spec.name}" stored as "{tag.name}"')
+    return tag
+
+
 # ---- operations -----------------------------------------------------------
-async def add(session, content, agent, project, tags, mtype, embedder=None) -> int:
+async def add(session, content, agent, project, tags, mtype, embedder=None,
+              notes: list[str] | None = None) -> int:
+    """Store a memory and return its id. Tags go through `_resolve_tag`; a
+    tag stored under another name than written adds a line to `notes`."""
     embedding, model = await _embed(embedder, content)
-    m = Memory(content=content, agent=agent, project=project, type=mtype,
-               embedding=embedding, embedding_model=model)
-    session.add(m)  # add before wiring tags so the back-reference resolves cleanly
+    # The tags first: resolving one reads the tags table, and the new memory
+    # must not be flushed half-wired by that read.
+    wired: list[Tag] = []
     for spec in tags:
-        m.tags.append(await _get_or_create_tag(session, spec.name, spec.description, embedder))
+        tag = await _resolve_tag(session, spec, embedder, notes)
+        if tag not in wired:  # "skill" and "skills" in one add: one link
+            wired.append(tag)
+    m = Memory(content=content, agent=agent, project=project, type=mtype,
+               embedding=embedding, embedding_model=model, tags=wired)
+    session.add(m)
     await session.flush()
     return m.id
 
@@ -449,26 +527,31 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
     if mtype is not None:
         m.type = mtype or None
         changes.append(f"type → {m.type}")
+    notes: list[str] = []
     if set_tags is not None:
-        m.tags = [await _get_or_create_tag(session, s.name, s.description, embedder)
-                  for s in set_tags]
+        new_tags = []
+        for s in set_tags:
+            tag = await _resolve_tag(session, s, embedder, notes)
+            if tag not in new_tags:
+                new_tags.append(tag)
+        m.tags = new_tags
         names = [t.name for t in m.tags]
         changes.append(f"tags set to: {', '.join(names) if names else '(none)'}")
     if add_tags:
         have = {t.id for t in m.tags}
         added = []
         for s in add_tags:
-            tag = await _get_or_create_tag(session, s.name, s.description, embedder)
+            tag = await _resolve_tag(session, s, embedder, notes)
             if tag.id not in have:
                 m.tags.append(tag)
                 have.add(tag.id)
-            added.append(s.name)
+            added.append(tag.name)
         changes.append(f"+tags: {', '.join(added)}")
     if remove_tags:
         lowered = {n.lower() for n in remove_tags}
         m.tags = [t for t in m.tags if t.name.lower() not in lowered]
         changes.append(f"-tags: {', '.join(remove_tags)}")
-    return changes
+    return changes + notes
 
 
 async def get_many(session, ids) -> list[dict]:

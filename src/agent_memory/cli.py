@@ -121,8 +121,8 @@ def add_memory(args, client):
     agent = args.agent or get_agent_name()
     tags = _parse_tags_json(args.tags, "--tags") or []
     try:
-        mid, warnings = client.add_with_warnings(args.content, agent, args.project, tags,
-                                                 args.type, force=args.force)
+        added = client.add_full(args.content, agent, args.project, tags,
+                                args.type, force=args.force)
     except DuplicateMemory as e:
         # Nothing was stored. Exit 3 so a script can tell this apart from an error.
         print(f"✗ Duplicate of memory #{e.existing_id} (score {e.score:.2f}). "
@@ -142,10 +142,13 @@ def add_memory(args, client):
         else:
             print("Fix the entry, or pass --force to store it as written.")
         sys.exit(4)
-    print(f"✓ Memory #{mid} added ({agent})")
+    print(f"✓ Memory #{added['id']} added ({agent})")
     # One line per rule the entry breaks. The memory is stored either way.
-    for w in warnings:
+    for w in added["warnings"]:
         print(f"warning: {w}")
+    # One line per tag stored under another name than written.
+    for n in added["notes"]:
+        print(f"note: {n}")
 
 
 # The --archived flag of query, search and review.

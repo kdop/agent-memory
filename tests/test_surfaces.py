@@ -533,7 +533,7 @@ async def test_mcp_tools_and_their_result_shapes(url):
     async with mcp_session(url) as call:
         first = await call("memory_add", content="the cat sat on the mat", project="p",
                            tags=[{"name": "pets", "description": "animals"}])
-        assert first == {"id": 1, "warnings": ["short"]}
+        assert first == {"id": 1, "warnings": ["short"], "notes": []}
         for content in ("a dog in the yard", "rain on the window"):
             await call("memory_add", content=content, project="p", agent="clu", type="note")
 
@@ -582,7 +582,7 @@ async def test_mcp_passes_the_constraint_type_through(url):
     async with mcp_session(url) as call:
         added = await call("memory_add", content="Apply for remote jobs only, because the "
                            "user will not move.", project="jobs", type="constraint")
-        assert added == {"id": 1, "warnings": []}
+        assert added == {"id": 1, "warnings": [], "notes": []}
         await call("memory_add", content="Prefer short cover letters over long ones.",
                    project="jobs", type="note")
         rows = (await call("memory_query", type="constraint"))["memories"]
@@ -677,7 +677,7 @@ async def test_mcp_add_in_refuse_mode_returns_the_review_error(reviewing):
         assert await call("memory_update", id=1, content=MERGED) == {"found": True,
                                                                     "changes": ["content"]}
         forced = await call("memory_add", content="Chose Postgres.", project="p", force=True)
-        assert set(forced) == {"id", "warnings"}
+        assert set(forced) == {"id", "warnings", "notes"}
     # The forced write is reviewed after the response; let it land.
     await until_status(forced["id"], "flagged")
 

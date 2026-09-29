@@ -481,8 +481,10 @@ def create_app(
         elif not force:
             await _refuse_duplicate(session, embedder, body)
         # Stored as `unverified`; the verdict, when one lands, sets the status.
+        notes: list[str] = []
         mid = await repo.add(session, body.content, body.agent or "unknown",
-                             body.project, body.tags, body.type, embedder=embedder)
+                             body.project, body.tags, body.type, embedder=embedder,
+                             notes=notes)
         if verdict is not None:
             # The approve from just now is the review: no second model call,
             # and the memory is `verified` from the start. When the model
@@ -496,8 +498,9 @@ def create_app(
             # row in its own session. The memory stays `unverified` until
             # the verdict is stored.
             background.add_task(_review_in_background, request.app, mid)
-        # Stored either way; the warnings only tell the writer what the entry lacks.
-        return {"id": mid, "warnings": warnings_for(body)}
+        # Stored either way; the warnings only tell the writer what the entry lacks,
+        # and the notes which tags were stored under another name.
+        return {"id": mid, "warnings": warnings_for(body), "notes": notes}
 
     @app.get("/memories", response_model=list[MemoryOut], dependencies=guard)
     async def query_memories(
