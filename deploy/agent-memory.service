@@ -1,12 +1,12 @@
 # The systemd user unit for the live agent-memory service.
 #
 # Install it once:
-#   cp docs/agent-memory.service ~/.config/systemd/user/agent-memory.service
+#   cp deploy/agent-memory.service ~/.config/systemd/user/agent-memory.service
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now agent-memory
 #
 # The service runs from the release checkout, %h/workspace/agent-memory-live,
-# which scripts/deploy.sh keeps on a tag. If your release checkout lives
+# which deploy/deploy.sh keeps on a tag. If your release checkout lives
 # elsewhere, change the two paths below. The server reads AGENT_MEMORY_DB and
 # AGENT_MEMORY_API_TOKEN from that checkout's .env, so no secrets live here.
 

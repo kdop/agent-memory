@@ -2,9 +2,9 @@
 # Put a tagged release live: back up the database, check the tag out in the
 # release checkout, install, migrate, restart the service, check that it answers.
 #
-#   scripts/deploy.sh deploy <tag>     back up, check out the tag, install, migrate up, restart
-#   scripts/deploy.sh rollback <tag>   back up, migrate down to the tag's schema, check out, install, restart
-#   scripts/deploy.sh status           tag or commit of the release checkout, unit state, health
+#   deploy/deploy.sh deploy <tag>     back up, check out the tag, install, migrate up, restart
+#   deploy/deploy.sh rollback <tag>   back up, migrate down to the tag's schema, check out, install, restart
+#   deploy/deploy.sh status           tag or commit of the release checkout, unit state, health
 #
 # Options, before or after the command:
 #   --release <path>   the release checkout (default $HOME/workspace/agent-memory-live)

@@ -1,4 +1,4 @@
-"""Tests for scripts/deploy.sh: how it reads its arguments and the checks that
+"""Tests for deploy/deploy.sh: how it reads its arguments and the checks that
 stop it before it touches anything, run as a subprocess against a temporary
 git repo. Nothing here dumps a database or restarts a unit.
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "deploy.sh"
+SCRIPT = ROOT / "deploy" / "deploy.sh"
 
 
 def _free_port():

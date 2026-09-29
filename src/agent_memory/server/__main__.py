@@ -29,7 +29,7 @@ def main():
 
     # uvicorn sets up only its own loggers; the server's lines (the reindex at
     # startup, the review poll, the model) go through the root logger, which
-    # drops INFO unless it is turned on here. scripts/deploy.sh reads them
+    # drops INFO unless it is turned on here. deploy/deploy.sh reads them
     # from the journal after a restart.
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
 
