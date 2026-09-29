@@ -255,7 +255,7 @@ flowchart LR
 ```
 
 The live service runs from a release checkout (`~/workspace/agent-memory-live`) that
-is always on a tag; `scripts/deploy.sh` is the only thing that moves it (README,
+is always on a tag; `deploy/deploy.sh` is the only thing that moves it (README,
 "Releasing"). The main checkout and the worktrees are for work and never run the live
 service, so a reboot cannot start it on unreleased code. The test instance is how new
 code meets real data before anything goes live.
