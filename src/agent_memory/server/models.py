@@ -77,6 +77,15 @@ class Memory(Base):
         BigInteger, ForeignKey("memories.id", ondelete="SET NULL"), index=True
     )
 
+    # When the memory was archived, or None while it is live. The review
+    # archives a memory it rejects under rule 2 or 4, and the older memory
+    # of a merge (see `repository.set_review`). An archived memory is left
+    # out of every listing, search and count, and of the reference set,
+    # unless a listing asks for `archived=true`; a read by id still returns
+    # it. The review poll deletes it once it has been archived for
+    # AGENT_MEMORY_ARCHIVE_DAYS days; `POST /memories/{id}/restore` clears it.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
     tags: Mapped[list[Tag]] = relationship(
         secondary="memory_tags", back_populates="memories", order_by="Tag.name",
     )

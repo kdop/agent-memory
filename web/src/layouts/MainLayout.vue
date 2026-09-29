@@ -74,6 +74,8 @@ function onLogout() {
                  :class="{ 'text-weight-bold': route.name === 'tags' }" />
           <q-btn flat no-caps label="Flagged" :to="{ name: 'flagged' }"
                  :class="{ 'text-weight-bold': route.name === 'flagged' }" />
+          <q-btn flat no-caps label="Archived" :to="{ name: 'archived' }"
+                 :class="{ 'text-weight-bold': route.name === 'archived' }" />
         </template>
 
         <q-space />

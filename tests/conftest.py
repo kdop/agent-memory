@@ -53,7 +53,10 @@ TOKEN = "test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 APPROVE = Verdict("approve", None, "A decision with its reason.", None, None)
-REJECT = Verdict("reject", 2, "A diary line: it says what was done, not why.", None, None)
+# Rule 1, not 2 or 4: a reject under those archives the memory, and most tests
+# want a flagged memory that stays in view. ARCHIVING is the one that archives.
+REJECT = Verdict("reject", 1, "It will not matter in a later session.", None, None)
+ARCHIVING = Verdict("reject", 2, "A diary line: it says what was done, not why.", None, None)
 REWRITE = Verdict("rewrite", 3, "Say why.", "Chose Postgres,\nbecause of X.", None,
                   ["database", "search"])
 

@@ -37,6 +37,7 @@ from .schemas import (
     MemoryOut,
     ProjectCount,
     ReviewEntry,
+    RestoreResult,
     ReviewOut,
     TagCount,
     TagDetachIn,
@@ -55,6 +56,28 @@ ReviewStatus = Literal["unverified", "verified", "flagged"]
 # What `GET /health` says about the review model, as `review_model`: `off`
 # when the review or the poll is off, else what the poll's last check found.
 REVIEW_MODEL_STATES = ("off", "reachable", "unreachable")
+
+# How many days an archived memory is kept before the poll deletes it.
+DEFAULT_ARCHIVE_DAYS = 30.0
+
+
+def archive_days_from_env() -> float:
+    """AGENT_MEMORY_ARCHIVE_DAYS: the days an archived memory is kept before
+    the review poll deletes it. Default 30; 0 or less keeps it for good. A
+    value that is not a number is one log line, and the default holds."""
+    raw = os.environ.get("AGENT_MEMORY_ARCHIVE_DAYS", "").strip()
+    if not raw:
+        return DEFAULT_ARCHIVE_DAYS
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("AGENT_MEMORY_ARCHIVE_DAYS=%r is not a number; using %g",
+                    raw, DEFAULT_ARCHIVE_DAYS)
+        return DEFAULT_ARCHIVE_DAYS
+
+
+def _archive_days(app: FastAPI) -> float:
+    return getattr(app.state, "archive_days", DEFAULT_ARCHIVE_DAYS)
 
 
 async def get_session(request: Request) -> AsyncSession:
@@ -269,11 +292,30 @@ async def _run_catch_up(app: FastAPI, ids: list[int]) -> None:
         log.info("catch-up %s", "finished" if done else "stopped")
 
 
+async def _delete_expired(app: FastAPI) -> int:
+    """Delete the memories archived longer ago than `app.state.archive_days`,
+    and say how many in one log line when there are any. A failure is one
+    log line too, and counts as none: the next tick tries again."""
+    try:
+        async with app.state.sessionmaker() as session, session.begin():
+            gone = await repo.delete_archived(session, _archive_days(app))
+    except Exception as e:
+        log.warning("review poll: deleting old archived memories failed: %s: %s",
+                    type(e).__name__, e)
+        return 0
+    if gone:
+        log.info("deleted %d memories archived more than %g days ago", gone, _archive_days(app))
+    return gone
+
+
 async def _review_tick(app: FastAPI) -> None:
-    """One check of the poll: ask the reviewer whether the model answers,
-    note the answer on `app.state.review_model`, and when it does, run the
-    catch-up for the unverified memories, unless one is already running. A
-    reviewer whose check raises counts as unreachable, with one log line."""
+    """One check of the poll. First delete the memories archived for longer
+    than the archive days, whether or not the model answers. Then ask the
+    reviewer whether the model answers, note the answer on
+    `app.state.review_model`, and when it does, run the catch-up for the
+    unverified memories, unless one is already running. A reviewer whose
+    check raises counts as unreachable, with one log line."""
+    await _delete_expired(app)
     reviewer: Reviewer = app.state.reviewer
     try:
         up = await asyncio.to_thread(reviewer.reachable)
@@ -327,6 +369,7 @@ def create_app(
     reviewer: Reviewer | None = None,
     review_mode: str | None = None,
     review_poll: float | None = None,
+    archive_days: float | None = None,
 ) -> FastAPI:
     """Build the app. In production (`sessionmaker` omitted) the lifespan builds a
     pooled engine from AGENT_MEMORY_DB and disposes it on shutdown; tests inject a
@@ -344,7 +387,10 @@ def create_app(
     default 300; 0 or less means no poll) it checks whether the model
     answers and, when it does, reviews the unverified memories.
     `app.state.review_model` holds what the last check found (`off`,
-    `reachable` or `unreachable`; `GET /health` reports it)."""
+    `reachable` or `unreachable`; `GET /health` reports it). Each tick of
+    the poll also deletes the memories archived more than `archive_days`
+    days ago (or, when it is omitted, AGENT_MEMORY_ARCHIVE_DAYS, default 30;
+    0 or less keeps them for good)."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -380,6 +426,8 @@ def create_app(
                 await engine.dispose()
 
     app = FastAPI(title="agent-memory", version=__version__, lifespan=lifespan)
+    app.state.archive_days = (archive_days if archive_days is not None
+                              else archive_days_from_env())
     app.state.token = token if token is not None else os.environ.get("AGENT_MEMORY_API_TOKEN")
     if sessionmaker is not None:
         # Available even when the ASGI lifespan isn't run (e.g. httpx ASGITransport tests).
@@ -397,10 +445,13 @@ def create_app(
         `reachable`, `unreachable`, or `off` when the review or the poll
         is off (and for an app whose lifespan never ran). `catch_up` is
         `{"total": n, "done": k}` while a catch-up runs, else null; the
-        dashboard draws its progress bar from it."""
+        dashboard draws its progress bar from it. `archive_days` is how long
+        an archived memory is kept before it is deleted (0: for good); the
+        dashboard counts the days left from it."""
         return {"status": "ok",
                 "review_model": getattr(request.app.state, "review_model", "off"),
-                "catch_up": getattr(request.app.state, "catch_up", None)}
+                "catch_up": getattr(request.app.state, "catch_up", None),
+                "archive_days": _archive_days(request.app)}
 
     @app.post("/memories", response_model=AddResult, status_code=201, dependencies=guard)
     async def add_memory(body: MemoryIn, request: Request, background: BackgroundTasks,
@@ -464,14 +515,17 @@ def create_app(
         current: bool = Query(
             default=False,
             description="Hide the memories a newer one supersedes"),
+        archived: bool = Query(
+            default=False,
+            description="List only the archived memories, which are hidden otherwise"),
         order: str = "date_desc",
         limit: int = Query(default=100, ge=0, description="0 = no limit"),
         offset: int = Query(default=0, ge=0),
     ):
         items, total = await repo.list_memories(
             session, q=q, tags=tag, project=project, agent=agent, mtype=type,
-            status=status, current=current, since_days=since_days, since=since, until=until,
-            order=order, limit=limit, offset=offset)
+            status=status, current=current, archived=archived, since_days=since_days,
+            since=since, until=until, order=order, limit=limit, offset=offset)
         response.headers["X-Total-Count"] = str(total)
         return items
 
@@ -497,10 +551,13 @@ def create_app(
         current: bool = Query(
             default=False,
             description="Hide the memories a newer one supersedes"),
+        archived: bool = Query(
+            default=False,
+            description="List only the archived memories, which are hidden otherwise"),
         limit: int = Query(default=20, ge=0, description="0 = no limit"),
     ):
         filters = dict(project=project, agent=agent, since=since, tag=tag, current=current,
-                       limit=limit)
+                       archived=archived, limit=limit)
         if mode == "keyword":
             return await repo.search(session, q, **filters)
         # The other two modes need a real model. A NullEmbedder knows why it has none.
@@ -528,14 +585,18 @@ def create_app(
         project: str | None = None,
         verdict: Literal["reject", "rewrite"] | None = None,
         status: ReviewStatus | None = None,
+        archived: bool = Query(
+            default=False,
+            description="List only the archived memories, which are hidden otherwise"),
         limit: int = Query(default=100, ge=0, description="0 = no limit"),
     ):
         """The memories the review flagged (verdict reject or rewrite, or only
         `verdict`), newest review first, each with its review. With `status`,
         the memories with that review status instead, so `status=unverified`
-        lists what the model has not checked yet. `X-Total-Count` carries the
+        lists what the model has not checked yet. Archived memories are left
+        out; `archived=true` lists only them. `X-Total-Count` carries the
         match count ignoring the limit, as on `GET /memories`."""
-        filters = dict(project=project, verdict=verdict, status=status)
+        filters = dict(project=project, verdict=verdict, status=status, archived=archived)
         items = await repo.flagged(session, limit=limit, **filters)
         response.headers["X-Total-Count"] = str(await repo.count_flagged(session, **filters))
         return items
@@ -557,6 +618,16 @@ def create_app(
         if rows is None:
             raise HTTPException(status_code=404, detail=f"Memory #{mid} not found")
         return rows
+
+    @app.post("/memories/{mid}/restore", response_model=RestoreResult, dependencies=guard)
+    async def restore_memory(mid: int, session: AsyncSession = SessionDep):
+        """Bring an archived memory back into view: clear its `archived_at`.
+        Its status and reviews stay. `restored` is False when it was not
+        archived (nothing changes); 404 when there is no such memory."""
+        restored = await repo.restore(session, mid)
+        if restored is None:
+            raise HTTPException(status_code=404, detail=f"Memory #{mid} not found")
+        return {"id": mid, "restored": restored}
 
     @app.patch("/memories/{mid}", response_model=UpdateResult, dependencies=guard)
     async def update_memory(mid: int, body: UpdateIn, session: AsyncSession = SessionDep,

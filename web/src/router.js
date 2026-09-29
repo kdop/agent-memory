@@ -3,6 +3,7 @@ import MainLayout from '@/layouts/MainLayout.vue'
 import MemoriesPage from '@/pages/MemoriesPage.vue'
 import TagsPage from '@/pages/TagsPage.vue'
 import FlaggedPage from '@/pages/FlaggedPage.vue'
+import ArchivedPage from '@/pages/ArchivedPage.vue'
 
 // All app routes live under /app, deliberately namespaced away from the backend
 // API's flat paths (/memories, /tags, /projects, ...). Same-origin serving means a
@@ -19,6 +20,7 @@ const routes = [
       { path: '', name: 'memories', component: MemoriesPage },
       { path: 'tags', name: 'tags', component: TagsPage },
       { path: 'flagged', name: 'flagged', component: FlaggedPage },
+      { path: 'archived', name: 'archived', component: ArchivedPage },
     ],
   },
   { path: '/', redirect: { name: 'memories' } },

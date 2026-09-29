@@ -115,6 +115,17 @@ class MemoryOut(BaseModel):
     # this one, if any. Both None for a memory that stands on its own.
     supersedes: int | None = None
     superseded_by: int | None = None
+    # When the review archived this memory, or None while it is live. Only a
+    # read by id, or a listing with `archived=true`, returns an archived one.
+    archived_at: str | None = None
+
+
+class RestoreResult(BaseModel):
+    """What `POST /memories/{id}/restore` answers: `restored` is False when
+    the memory was not archived, so nothing changed."""
+
+    id: int
+    restored: bool
 
 
 class UpdateIn(BaseModel):

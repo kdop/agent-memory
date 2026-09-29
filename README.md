@@ -123,10 +123,10 @@ the old one's says `superseded by #<id>`, and `--current` on `query` and `search
 (`current=true` on the API and the MCP tools) hides the superseded ones; off by default,
 so nothing disappears on its own. An entry that repeats an older memory and adds to it
 gets a `rewrite` whose text is the old and the new merged, with `duplicate_of` the old
-id: in flag mode the new memory is stored and flagged with that suggestion; in refuse
-mode the write is refused and the CLI ends with `Apply it with 'memory update <old id>'
-instead of adding.` The model never changes or removes a memory; the writer applies a
-merge. In refuse mode a reject or rewrite refuses the write and nothing is stored: the API
+id: in flag mode the new memory is stored and flagged with that suggestion, it
+supersedes the old one, and the old one is archived (below); in refuse mode the write is
+refused and the CLI ends with `Apply it with 'memory update <old id>' instead of adding.`
+The model never changes a memory's text; the writer applies a merge. In refuse mode a reject or rewrite refuses the write and nothing is stored: the API
 answers `422` with the verdict and the suggestion, the CLI prints `✗ Review: rewrite,
 rule 3: <reason>`, the suggestion, and `Fix the entry, or pass --force to store it as
 written.` and exits with code 4, and the MCP tool returns `{"error": "review", ...}`.
@@ -142,6 +142,15 @@ says so and schedules nothing. `GET /health` reports what the last check found a
 `review_model`: `reachable`, `unreachable`, or `off` when the review or the poll is off;
 while a catch-up runs it also reports `catch_up: {"total": n, "done": k}` (else null),
 which the dashboard shows as a progress bar.
+A reject under rule 2 (a diary line) or rule 4 (what git holds), and the older memory
+of a merge, are **archived**: stamped with `archived_at` and left out of `query`,
+`search`, `review`, the counts and the reference set. `--archived` on `query`, `search`
+and `review` (`archived=true` on the API and the MCP tools) lists only them; `memory
+show <id>` still finds one, with `archived` in its header. `memory restore <id>` (MCP
+`memory_restore`, `POST /memories/{id}/restore`) brings one back; new text from `memory
+update` does too. Each poll tick deletes the memories archived more than
+`AGENT_MEMORY_ARCHIVE_DAYS` days ago (default 30; 0 keeps them for good), whether or not
+the model answers.
 Editing a memory's text with `memory update` sets it back to `unverified` and drops its
 verdict and its `supersedes` link, so the next catch-up reads the new text; a change of
 tags or project alone keeps both.
@@ -253,8 +262,9 @@ suggested text and tags, and a "Review again" button asks the model once more.
 has the three modes (keyword, semantic, hybrid) and shows each hit's score; the right
 rail filters by status and can hide superseded memories. The **Flagged** view lists what
 the review rejected or wants rewritten, and its **Catch up** button reviews the
-memories written while the model was off. The top bar shows whether the review model is
-reachable.
+memories written while the model was off. The **Archived** view lists what the review
+put away, with the reason, the days left before it is deleted and a **Restore** button.
+The top bar shows whether the review model is reachable.
 
 ![dashboard](docs/dashboard.png)
 
