@@ -200,9 +200,10 @@ def _schema():
 
 # Emptying the tables with DELETE and restarting the id sequences is several
 # times faster than TRUNCATE on tables this small, and this runs before every test.
-_EMPTY = ("DELETE FROM memory_reviews; DELETE FROM memory_tags; DELETE FROM tags; "
-          "DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; "
-          "ALTER SEQUENCE tags_id_seq RESTART; ALTER SEQUENCE memory_reviews_id_seq RESTART")
+_EMPTY = ("DELETE FROM memory_reviews; DELETE FROM tag_reviews; DELETE FROM memory_tags; "
+          "DELETE FROM tags; DELETE FROM memories; ALTER SEQUENCE memories_id_seq RESTART; "
+          "ALTER SEQUENCE tags_id_seq RESTART; ALTER SEQUENCE memory_reviews_id_seq RESTART; "
+          "ALTER SEQUENCE tag_reviews_id_seq RESTART")
 
 
 @pytest.fixture(autouse=True)

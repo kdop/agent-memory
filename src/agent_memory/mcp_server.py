@@ -1,7 +1,7 @@
 """MCP server exposing the memory API as tools.
 
 Mirrors the CLI surface — memory_add/query/search/flagged/show/restore/update/delete/
-tags/projects/stats — each wrapping an `ApiClient` (talks HTTP to the FastAPI service, exactly like
+tags/tag_proposals/projects/stats — each wrapping an `ApiClient` (talks HTTP to the FastAPI service, exactly like
 the CLI). stdio transport. Lives in the [mcp] extra.
 
 Every tool returns a single JSON object (lists wrapped under a key) because FastMCP
@@ -194,8 +194,22 @@ def create_mcp(client: Optional[ApiClient] = None) -> FastMCP:
 
     @mcp.tool()
     def memory_tags() -> dict:
-        """List tags with counts + descriptions. Returns {"tags": [{name, count, description}, ...]}."""
+        """List tags with counts + descriptions. Each has a `review_status`:
+        unverified, verified, or flagged (a proposal waits, see
+        memory_tag_proposals). Returns {"tags": [{name, count, description,
+        review_status}, ...]}."""
         return {"tags": api.list_tags()}
+
+    @mcp.tool()
+    def memory_tag_proposals() -> dict:
+        """List what the review model proposes for tags, waiting for a person:
+        merge a tag into another ("into"), rename it ("new_name") or drop it
+        (it repeats a memory type, or names no subject), each with the model's
+        reason. Oldest first. A person applies or rejects them with
+        `memory tags --apply <id>` / `--reject <id>`; there is no tool for
+        that. Returns {"proposals": [{id, tag, verdict, into, new_name,
+        reason, model, created_at}, ...]}."""
+        return {"proposals": api.tag_proposals()}
 
     @mcp.tool()
     def memory_projects() -> dict:

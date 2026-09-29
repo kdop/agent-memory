@@ -460,7 +460,7 @@ def test_cli_catch_up(cli, reviewing):
     reviewing.fake.reset(APPROVE, block=True)
     try:
         assert httpx.post(f"{reviewing.url}/admin/review", headers=AUTH).json() == {
-            "scheduled": 1}
+            "scheduled": 1, "tags": 0}
         assert reviewing.fake.started.wait(10)
         assert rcli.raw("review", "--catch-up").stdout.strip() == \
             "✓ A catch-up is already running; nothing new scheduled"
@@ -573,7 +573,8 @@ async def test_mcp_tools_and_their_result_shapes(url):
                                                                    "changes": []}
         assert await call("memory_delete", ids=[4, 999]) == {"deleted": 1, "missing": [999]}
         assert await call("memory_tags") == {"tags": [{"name": "pets", "count": 1,
-                                                       "description": "animals"}]}
+                                                       "description": "animals",
+                                                       "review_status": "unverified"}]}
         assert await call("memory_projects") == {"projects": [{"project": "p", "count": 3}]}
         assert (await call("memory_stats"))["total"] == 3
 
@@ -820,7 +821,7 @@ def test_the_client_errors(live_server, reviewing):
     # The catch-up, and its old name.
     reviewing.fake.reset(APPROVE)
     assert ApiClient.review_missing is ApiClient.review_catch_up
-    assert rapi.review_catch_up(limit=1) == {"scheduled": 1, "running": False}
+    assert rapi.review_catch_up(limit=1) == {"scheduled": 1, "tags": 0, "running": False}
     wait_until(lambda: asyncio.run(statuses())[1] == (2, "verified"))
 
 

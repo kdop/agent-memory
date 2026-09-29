@@ -135,7 +135,20 @@ Body (any subset): `{ "content"?, "project"?, "type"?, "set_tags"?: TagIn[],
 ## Tags
 
 ### `GET /tags`
-**`200`** → `TagCount[]`. (Client sorts: alphabetical by name default.)
+**`200`** → `TagCount[]`: `{ "name", "count", "description", "review_status" }`.
+(Client sorts: alphabetical by name default.) `review_status` is `unverified`,
+`verified` or `flagged` (the tag review has a proposal for it).
+
+### `GET /tags/flagged` — the tag review's proposals that wait
+**`200`** → `[{ "id", "tag", "tag_id", "verdict": "merge" | "rename" | "drop", "into",
+"new_name", "reason", "model", "created_at", "resolved": null }]`, oldest first.
+The Tags page shows each next to its tag, with Apply and Reject.
+
+### `POST /tags/proposals/{id}/apply` and `/reject`
+Apply does what the proposal says (merge into `into`, rename to `new_name`, or delete
+the tag); there is no undo. Reject keeps the tag as it is and verifies it.
+**`200`** → `{ "proposal", "result"? }`; **`404`** if absent; **`409`** when it is
+resolved already, or its tag (or the tag to merge into) is gone.
 
 ### `PATCH /tags/{name}` — rename and/or re-describe
 Body: `{ "name"?: str, "description"?: str }`. If `name` collides with an existing tag
@@ -189,10 +202,11 @@ the model gave no verdict; **`503`** without a model. The dashboard then re-read
 - `GET /health` → `{ "status": "ok", "review_model": "reachable", "catch_up": null, "archive_days": 30 }` (no
   auth). `archive_days` is how long an archived memory is kept (0: for good). `review_model` is `reachable`, `unreachable`, or `off` when the review or its poll
   is off; the dashboard shows it in the top bar when present. `catch_up` is
-  `{ "total": 100, "done": 10 }` while a catch-up runs (`done` counts the memories whose
-  review ended, with a verdict or without), else `null`. The dashboard polls `/health`
+  `{ "kind": "memories", "total": 100, "done": 10 }` while a catch-up runs (`done` counts
+  the reviews that ended, with a verdict or without; `kind` is `memories`, then `tags`),
+  else `null`. The dashboard polls `/health`
   every 3 s while a catch-up runs and every 30 s otherwise, shows a progress bar under
-  the top bar ("Reviewing memories: 10 of 100 done, 90 remaining") while `catch_up` is
+  the top bar ("Reviewing tags: 10 of 100 done, 90 remaining") while `catch_up` is
   not null, and reloads the current list once when it ends.
 
 ## Mock seed (for `web/src/mocks/`)
@@ -205,6 +219,7 @@ exercise pagination (3 pages), search, AND-filtering, and tag merge. Most memori
 `unverified`; a few carry `supersedes` / `superseded_by` links. The rule 2 rejects are
 archived, stamped over the last month, so the Archived page shows a range of days left. The mock also serves the
 search modes (with a `score`), `/memories/flagged` and the two review routes, and
-`GET /health` reports `review_model: reachable`. The mock catch-up takes 2 s per memory
+`GET /health` reports `review_model: reachable`. Three tags are flagged, each with a
+proposal (a merge, a rename, a drop), and three are unverified. The mock catch-up takes 2 s per memory
 and reports its progress as `catch_up`, so the progress bar can be seen: press
 **Catch up** on the Flagged page.

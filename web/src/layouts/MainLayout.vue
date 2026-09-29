@@ -28,12 +28,13 @@ const REVIEW_MODEL_TEXT = {
   off: 'Review model: off. Memories are not reviewed.',
 }
 
-// The catch-up's progress, for the bar: "10 of 100 done, 90 remaining".
+// The catch-up's progress, for the bar: "Reviewing tags: 10 of 100 done, 90
+// remaining". The server reviews the memories first, then the tags.
 const catchUp = computed(() => health.catchUp)
 const catchUpText = computed(() => {
   const c = catchUp.value
   if (!c) return ''
-  return `Reviewing memories: ${c.done} of ${c.total} done, ${c.total - c.done} remaining`
+  return `Reviewing ${c.kind}: ${c.done} of ${c.total} done, ${c.total - c.done} remaining`
 })
 
 onMounted(() => health.check())

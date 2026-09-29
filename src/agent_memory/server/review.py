@@ -209,11 +209,17 @@ class OllamaReviewer(Reviewer):
                      tags: list[str] = ()) -> dict:
         """The JSON sent to `/api/chat`. Separate from the call so a test can
         check it without a server."""
+        return self.chat_body(SYSTEM_PROMPT, user_prompt(memory, neighbours, tags))
+
+    def chat_body(self, system: str, user: str) -> dict:
+        """A `/api/chat` body with these two messages and the settings every
+        review uses; the tag review (tag_review.py) sends its own prompt
+        through here and `_chat`."""
         return {
             "model": self.model_name,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt(memory, neighbours, tags)},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
             "stream": False,
             "format": "json",

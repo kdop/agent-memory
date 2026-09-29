@@ -197,6 +197,26 @@ export const api = {
     return res.data
   },
 
+  /** GET /tags/flagged → the tag review's proposals that wait: [{ id, tag,
+   *  verdict: merge | rename | drop, into, new_name, reason, model, created_at }]. */
+  async tagProposals() {
+    const res = await request('GET', '/tags/flagged')
+    return res.data
+  },
+
+  /** POST /tags/proposals/{id}/apply → { proposal, result }. No undo. 409 when it
+   *  is resolved already or its tag is gone. */
+  async applyTagProposal(id) {
+    const res = await request('POST', `/tags/proposals/${id}/apply`)
+    return res.data
+  },
+
+  /** POST /tags/proposals/{id}/reject → { proposal }. The tag stays and is verified. */
+  async rejectTagProposal(id) {
+    const res = await request('POST', `/tags/proposals/${id}/reject`)
+    return res.data
+  },
+
   /** POST /tags/{name}/detach → { detached }. Omit ids / [] = all memories. */
   async detachTag(name, memoryIds) {
     const res = await request('POST', `/tags/${encodeURIComponent(name)}/detach`, {
@@ -209,7 +229,7 @@ export const api = {
 
   /**
    * POST /admin/review — review the unverified memories, oldest first.
-   * → { scheduled: n } or { scheduled: 0, running: true } when one is already
+   * → { scheduled: n, tags: m } or { scheduled: 0, tags: 0, running: true } when one is already
    * running. 503 when the server has no review model.
    */
   async reviewCatchUp(limit) {
@@ -251,7 +271,8 @@ export const api = {
 
   /** GET /health → { status, review_model?, catch_up?, archive_days? } (no auth).
    *  `review_model` is `reachable`, `unreachable` or `off` when the server reports
-   *  it; `catch_up` is { total, done } while a catch-up runs, else null;
+   *  it; `catch_up` is { kind: 'memories' | 'tags', total, done } while a catch-up
+   *  runs, else null;
    *  `archive_days` is how long an archived memory is kept (0: for good). */
   async health() {
     const res = await request('GET', '/health', { auth: false })

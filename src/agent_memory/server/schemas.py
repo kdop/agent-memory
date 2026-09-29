@@ -163,6 +163,27 @@ class TagCount(BaseModel):
     name: str
     count: int
     description: str = ""
+    # Whether the review model has checked the tag: `unverified`, `verified`
+    # (kept) or `flagged` (a proposal waits on `GET /tags/flagged`).
+    review_status: str = "unverified"
+
+
+class TagProposal(BaseModel):
+    """A tag verdict other than keep (see server/tag_review.py): merge into
+    `into`, rename to `new_name`, or drop. `resolved` is None while it waits
+    for a person, then `applied` or `rejected`. `tag` is the tag's name when
+    the model saw it; `tag_id` is None once the tag is gone."""
+
+    id: int
+    tag: str
+    tag_id: int | None = None
+    verdict: str
+    into: str | None = None
+    new_name: str | None = None
+    reason: str = ""
+    model: str = ""
+    created_at: str
+    resolved: str | None = None
 
 
 class ProjectCount(BaseModel):

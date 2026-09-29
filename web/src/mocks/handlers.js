@@ -101,17 +101,33 @@ function mockVerdict(m) {
            duplicate_of: null, tags: m.tags.slice(0, 2), supersedes: null }
 }
 
-// The running catch-up's progress, as GET /health reports it: { total, done },
-// or null when none runs. Only one runs at a time.
+// The running catch-up's progress, as GET /health reports it: { kind, total,
+// done }, or null when none runs. Memories first, then tags. Only one runs
+// at a time.
 let catchUp = null
 // How long the mock takes per memory, so the progress bar can be seen.
 const MOCK_REVIEW_MS = 2000
 
-/** Sorted TagCount[] with live counts. */
+/** Sorted TagCount[] with live counts and review status. */
 function tagCounts() {
   return [...db.tags.values()]
-    .map((t) => ({ name: t.name, count: tagCount(db, t.name), description: t.description }))
+    .map((t) => ({ name: t.name, count: tagCount(db, t.name), description: t.description,
+                   review_status: t.review_status ?? 'unverified' }))
     .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** Move every link from tag `source` to `target` and delete `source`. */
+function mergeInto(source, target) {
+  let affected = 0
+  for (const m of db.memories) {
+    if (!m.tags.includes(source)) continue
+    m.tags = m.tags.filter((t) => t !== source)
+    if (!m.tags.includes(target)) m.tags.push(target)
+    m.tags.sort()
+    affected++
+  }
+  db.tags.delete(source)
+  return affected
 }
 
 // --------------------------------------------------------------- handlers ---
@@ -198,24 +214,36 @@ export const handlers = [
   http.post('/admin/review', ({ request }) => {
     const denied = unauthorized(request)
     if (denied) return denied
-    if (catchUp) return HttpResponse.json({ scheduled: 0, running: true })
+    if (catchUp) return HttpResponse.json({ scheduled: 0, tags: 0, running: true })
     const sp = new URL(request.url).searchParams
     const limit = Math.max(0, parseInt(sp.get('limit') ?? '50', 10) || 0)
     const pending = live().filter((m) => (m.review_status ?? 'unverified') === 'unverified')
     const ids = (limit ? pending.slice(0, limit) : pending).map((m) => m.id)
-    if (ids.length) {
-      catchUp = { total: ids.length, done: 0 }
-      // Verdicts land one by one, a little later, as on the real server.
+    const unverifiedTags = [...db.tags.values()].filter((t) => (t.review_status ?? 'unverified') === 'unverified')
+    const tagNames = (limit ? unverifiedTags.slice(0, limit) : unverifiedTags).map((t) => t.name)
+    // Verdicts land one by one, a little later, as on the real server:
+    // the memories, then the tags (each tag is kept).
+    const halves = [['memories', ids, (id) => {
+      const m = db.memories.find((x) => x.id === id)
+      if (m) applyVerdict(m)
+    }], ['tags', tagNames, (name) => {
+      const t = db.tags.get(name)
+      if (t) t.review_status = 'verified'
+    }]].filter(([, items]) => items.length)
+    const run = (h) => {
+      if (h >= halves.length) { catchUp = null; return }
+      const [kind, items, act] = halves[h]
+      catchUp = { kind, total: items.length, done: 0 }
       const step = () => {
-        const m = db.memories.find((x) => x.id === ids[catchUp.done])
-        if (m) applyVerdict(m)
-        catchUp = { total: ids.length, done: catchUp.done + 1 }
+        act(items[catchUp.done])
+        catchUp = { kind, total: items.length, done: catchUp.done + 1 }
         if (catchUp.done < catchUp.total) setTimeout(step, MOCK_REVIEW_MS)
-        else catchUp = null
+        else run(h + 1)
       }
       setTimeout(step, MOCK_REVIEW_MS)
     }
-    return HttpResponse.json({ scheduled: ids.length })
+    run(0)
+    return HttpResponse.json({ scheduled: ids.length, tags: tagNames.length })
   }),
 
   // ---- POST /admin/review/:id (review one memory now) ----
@@ -406,6 +434,61 @@ export const handlers = [
     const denied = unauthorized(request)
     if (denied) return denied
     return HttpResponse.json(tagCounts())
+  }),
+
+  // ---- GET /tags/flagged: the tag proposals that wait ----
+  http.get('/tags/flagged', ({ request }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    return HttpResponse.json(db.tagProposals.filter((p) => !p.resolved && db.tags.has(p.tag)))
+  }),
+
+  // ---- POST /tags/proposals/:id/apply and /reject ----
+  http.post('/tags/proposals/:id/:action', ({ request, params }) => {
+    const denied = unauthorized(request)
+    if (denied) return denied
+    const p = db.tagProposals.find((x) => x.id === Number(params.id))
+    if (!p || !['apply', 'reject'].includes(params.action)) {
+      return HttpResponse.json({ detail: `Proposal #${params.id} not found` }, { status: 404 })
+    }
+    if (p.resolved) {
+      return HttpResponse.json({ detail: `Proposal #${p.id} is already ${p.resolved}` },
+                               { status: 409 })
+    }
+    const tag = db.tags.get(p.tag)
+    if (!tag) {
+      return HttpResponse.json({ detail: `Proposal #${p.id}: the tag '${p.tag}' no longer exists` },
+                               { status: 409 })
+    }
+    if (params.action === 'reject') {
+      p.resolved = 'rejected'
+      tag.review_status = 'verified'
+      return HttpResponse.json({ proposal: p })
+    }
+    let result
+    if (p.verdict === 'merge') {
+      if (!db.tags.has(p.into)) {
+        return HttpResponse.json({ detail: `Proposal #${p.id}: the tag '${p.into}' to merge into no longer exists` },
+                                 { status: 409 })
+      }
+      result = { target: p.into, memories_affected: mergeInto(p.tag, p.into), removed: [p.tag] }
+    } else if (p.verdict === 'rename') {
+      if (db.tags.has(p.new_name)) mergeInto(p.tag, p.new_name)
+      else {
+        db.tags.set(p.new_name, { ...tag, name: p.new_name })
+        mergeInto(p.tag, p.new_name)
+      }
+      db.tags.get(p.new_name).review_status = 'verified'
+      result = { name: p.new_name, description: db.tags.get(p.new_name).description,
+                 count: tagCount(db, p.new_name) }
+    } else {
+      const affected = tagCount(db, p.tag)
+      for (const m of db.memories) m.tags = m.tags.filter((t) => t !== p.tag)
+      db.tags.delete(p.tag)
+      result = { removed: p.tag, memories_affected: affected }
+    }
+    p.resolved = 'applied'
+    return HttpResponse.json({ proposal: p, result })
   }),
 
   // ---- POST /tags/merge (before /tags/:name/detach & /tags/:name) ----

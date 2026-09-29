@@ -38,6 +38,7 @@ SUPERSEDES = "d3f9a7c2e6b4"
 TAG_EMBEDDING = "e5a1c7d9f2b3"
 REVIEW_HISTORY = "f4c2a8e6d1b9"
 ARCHIVED_AT = "a7d3e9b1c5f2"
+TAG_REVIEW = "c6b1d8f3a2e7"
 
 
 async def _alembic(action: str, revision: str) -> None:
@@ -516,7 +517,9 @@ async def test_archived_at_revision_upgrades_and_downgrades(clean_slate):
     assert await _index_exists("ix_memories_archived_at")
     assert await _scalar("SELECT count(*) FROM memories WHERE archived_at IS NULL") == 2
 
-    # The repository at this revision (head) archives, hides and restores.
+    # The repository archives, hides and restores. It reads the tag columns
+    # of later revisions too, so go to head first.
+    await _alembic("upgrade", "head")
     eng = make_test_engine()
     try:
         async with make_sessionmaker(eng)() as s, s.begin():
@@ -537,3 +540,39 @@ async def test_archived_at_revision_upgrades_and_downgrades(clean_slate):
     # Up again: every memory comes back live.
     await _alembic("upgrade", ARCHIVED_AT)
     assert await _scalar("SELECT count(*) FROM memories WHERE archived_at IS NULL") == 2
+
+
+async def test_tag_review_revision_upgrades_and_downgrades(clean_slate):
+    # One step short: no status on tags, no tag_reviews table.
+    await _alembic("upgrade", ARCHIVED_AT)
+    await _exec("INSERT INTO tags (name, description) VALUES ('auth', 'auth'); "
+                "INSERT INTO tags (name, description) VALUES ('misc', 'misc')")
+    assert await _columns("tags", "review_status") == {}
+    assert not await _table_exists("tag_reviews")
+
+    # Up one step: every existing tag is unverified, the CHECK holds, and the
+    # table takes a proposal that outlives its tag.
+    await _alembic("upgrade", TAG_REVIEW)
+    assert await _columns("tags", "review_status") == {"review_status": ("text", False)}
+    assert await _index_exists("ix_tags_review_status")
+    assert await _scalar("SELECT count(*) FROM tags WHERE review_status = 'unverified'") == 2
+    with pytest.raises(IntegrityError):
+        await _exec("UPDATE tags SET review_status = 'maybe' WHERE name = 'auth'")
+    await _exec("INSERT INTO tag_reviews (tag_id, tag_name, verdict, reason, model) "
+                "SELECT id, name, 'drop', 'Says nothing.', 'm' FROM tags WHERE name = 'misc'")
+    with pytest.raises(IntegrityError):
+        await _exec("UPDATE tag_reviews SET resolved = 'maybe'")
+    await _exec("DELETE FROM tags WHERE name = 'misc'")
+    assert await _scalar("SELECT count(*) FROM tag_reviews WHERE tag_id IS NULL "
+                         "AND tag_name = 'misc'") == 1
+
+    # Down one step: the table and the column go, the tags stay.
+    await _alembic("downgrade", ARCHIVED_AT)
+    assert await _columns("tags", "review_status") == {}
+    assert not await _table_exists("tag_reviews")
+    assert not await _index_exists("ix_tags_review_status")
+    assert await _scalar("SELECT count(*) FROM tags") == 1
+
+    # And up again.
+    await _alembic("upgrade", TAG_REVIEW)
+    assert await _scalar("SELECT review_status FROM tags") == "unverified"

@@ -95,12 +95,28 @@ export function buildSeed() {
 
   const pick = (arr) => arr[Math.floor(rng() * arr.length)]
 
-  // Tags keyed by name → { name, description }. Counts are derived from links.
+  // Tags keyed by name → { name, description, review_status }. Counts are
+  // derived from links. Most are verified; the last three are unverified, so
+  // the mock catch-up has tags to review; three are flagged, each with a
+  // proposal from the tag review (GET /tags/flagged).
   const tags = new Map()
   for (const [name, description] of TAG_DEFS) {
-    tags.set(name, { name, description })
+    tags.set(name, { name, description, review_status: 'verified' })
   }
   const tagNames = [...tags.keys()]
+  for (const name of tagNames.slice(-3)) tags.get(name).review_status = 'unverified'
+  const tagProposals = [
+    { tag: 'token', verdict: 'merge', into: 'security', new_name: null,
+      reason: 'A bearer token is part of the security subject; one tag is enough.' },
+    { tag: 'perf', verdict: 'rename', into: null, new_name: 'performance',
+      reason: 'A short form is harder to find; spell it out.' },
+    { tag: 'dogfood', verdict: 'drop', into: null, new_name: null,
+      reason: 'It names no subject a reader would look for.' },
+  ].map((p, i) => {
+    tags.get(p.tag).review_status = 'flagged'
+    return { id: i + 1, tag_id: i + 1, model: 'qwen3:14b',
+             created_at: '2026-09-29 09:00:00+00:00', resolved: null, ...p }
+  })
 
   const memories = []
   const COUNT = 250
@@ -195,7 +211,7 @@ export function buildSeed() {
     b.superseded_by = newer
   }
 
-  return { memories, tags }
+  return { memories, tags, tagProposals }
 }
 
 /** Live seed instance the handlers mutate (merge/detach/patch/delete). */
