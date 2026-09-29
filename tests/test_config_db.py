@@ -1,5 +1,7 @@
 """Unit tests for the pure config/endpoint/DSN resolution helpers (no server/DB)."""
 
+import os
+
 import pytest
 
 from agent_memory import config
@@ -64,3 +66,22 @@ def test_get_agent_name(monkeypatch):
     assert config.get_agent_name() == "my-agent"
     monkeypatch.delenv("AGENT_NAME", raising=False)
     assert config.get_agent_name() == "unknown"
+
+
+def test_load_dotenv_fills_only_unset_variables(monkeypatch, tmp_path):
+    keys = ("AGENT_MEMORY_T_PLAIN", "AGENT_MEMORY_T_QUOTED", "AGENT_MEMORY_T_SET")
+    for key in keys:
+        monkeypatch.setenv(key, "x")      # so the test puts things back as they were
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("AGENT_MEMORY_T_SET", "from the environment")
+    (tmp_path / ".env").write_text(
+        "# a comment\n\nnot a setting\n"
+        "AGENT_MEMORY_T_PLAIN = plain value\n"
+        "AGENT_MEMORY_T_QUOTED=\"quoted value\"\n"
+        "AGENT_MEMORY_T_SET=from the file\n")
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path / "sub")     # found from a folder below it too
+    config.load_dotenv()
+    assert os.environ["AGENT_MEMORY_T_PLAIN"] == "plain value"
+    assert os.environ["AGENT_MEMORY_T_QUOTED"] == "quoted value"
+    assert os.environ["AGENT_MEMORY_T_SET"] == "from the environment"

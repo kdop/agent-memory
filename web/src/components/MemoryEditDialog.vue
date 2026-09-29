@@ -4,19 +4,29 @@
 // "what to do after a mutation" policy lives in one place (optimistic edit vs
 // refetch on create). `memory` prop present → edit mode; null → create mode.
 // Tag editing uses the structured { name, description? } shape on save.
+// In edit mode the header also shows the read-only review facts: the status,
+// the verdict and the supersedes links, which emit `open` with the other id.
 import { reactive, computed, watch } from 'vue'
 import { useTagsStore } from '@/stores/tags'
+import { MEMORY_TYPES } from '@/stores/memories'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   memory: { type: Object, default: null },
 })
-const emit = defineEmits(['update:modelValue', 'submit'])
+const emit = defineEmits(['update:modelValue', 'submit', 'open'])
 
 const tags = useTagsStore()
-const TYPES = ['decision', 'code', 'lesson', 'note']
 
 const isEdit = computed(() => !!props.memory)
+
+const STATUS_COLOR = { unverified: 'grey-6', verified: 'positive', flagged: 'warning' }
+const statusColor = computed(() => STATUS_COLOR[props.memory?.review_status] || 'grey-6')
+
+/** Open another memory in this dialog (a supersedes link). */
+function openOther(id) {
+  emit('open', id)
+}
 
 const form = reactive({
   content: '',
@@ -35,10 +45,11 @@ function reset() {
   form.tagNames = m ? [...m.tags] : []
 }
 
-// Repopulate the form each time the dialog opens.
+// Repopulate the form each time the dialog opens, and when a supersedes link
+// swaps the memory while it is already open.
 watch(
-  () => props.modelValue,
-  (open) => { if (open) reset() },
+  () => [props.modelValue, props.memory],
+  ([open]) => { if (open) reset() },
 )
 
 // Existing tag names for the picker; users may also type new ones (add-unique).
@@ -72,7 +83,25 @@ function close() {
   >
     <q-card style="min-width: 480px; max-width: 90vw">
       <q-card-section>
-        <div class="text-h6">{{ isEdit ? `Edit memory #${memory.id}` : 'New memory' }}</div>
+        <div class="row items-center q-gutter-sm">
+          <div class="text-h6">{{ isEdit ? `Edit memory #${memory.id}` : 'New memory' }}</div>
+          <q-badge v-if="isEdit" :color="statusColor" :label="memory.review_status || 'unverified'" />
+        </div>
+        <!-- Read-only review facts: what the model said and what this replaces. -->
+        <div v-if="isEdit && (memory.review || memory.supersedes || memory.superseded_by)"
+             class="text-caption text-grey q-mt-xs">
+          <span v-if="memory.review">
+            {{ memory.review.verdict }}<template v-if="memory.review.rule != null">, rule {{ memory.review.rule }}</template>:
+            {{ memory.review.reason }}
+          </span>
+          <div v-if="memory.supersedes || memory.superseded_by">
+            <a v-if="memory.supersedes" href="#" class="text-primary"
+               @click.prevent="openOther(memory.supersedes)">supersedes #{{ memory.supersedes }}</a>
+            <span v-if="memory.supersedes && memory.superseded_by"> · </span>
+            <a v-if="memory.superseded_by" href="#" class="text-primary"
+               @click.prevent="openOther(memory.superseded_by)">superseded by #{{ memory.superseded_by }}</a>
+          </div>
+        </div>
       </q-card-section>
 
       <q-card-section class="q-gutter-md">
@@ -110,7 +139,7 @@ function close() {
             outlined
             dense
             clearable
-            :options="TYPES"
+            :options="MEMORY_TYPES"
           />
         </div>
 

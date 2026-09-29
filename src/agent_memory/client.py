@@ -15,10 +15,107 @@ import urllib.request
 
 from .config import resolve_api_token, resolve_api_url
 
+# The values a memory's `review_status` can take, as the server defines them
+# (server/review.py, STATUSES): the client half cannot import the server, so
+# the list is copied here and a test checks the two match.
+REVIEW_STATUSES = ("unverified", "verified", "flagged")
+# The verdicts that flag a memory (every one but approve): the values the
+# flagged listing takes as `verdict`. A copy of the server's, since the client
+# cannot import it; a test checks the two match.
+FLAGGED_VERDICTS = ("reject", "improve", "rewrite")
+
 
 class ApiUnreachable(RuntimeError):
     """The memory API could not be reached. Carries a ready-to-print, actionable
     message; the CLI renders it as a clean error instead of a traceback."""
+
+
+class DuplicateMemory(RuntimeError):
+    """The server refused an add (HTTP 409) because a memory this close already
+    exists in the same project. `existing_id` says which one; `score` is the
+    cosine between the two. Pass `force=True` to store it anyway."""
+
+    def __init__(self, existing_id: int, score: float):
+        self.existing_id = existing_id
+        self.score = score
+        super().__init__(f"duplicate of memory #{existing_id} (score {score:.2f})")
+
+
+class ReviewRefused(RuntimeError):
+    """The server refused an add (HTTP 422) because its review model said
+    the entry breaks the rules or falls short of them: `verdict` is "reject",
+    "improve" or "rewrite", `rule` the number of the rule it breaks (None for
+    a repeat, then `duplicate_of` names the memory it repeats),
+    `explanation` the model's one sentence. For an improve, `needs` is what
+    the entry lacks (reason, clarity, detail or scope) and `message` the
+    line to show: "Low value memory, retry with more context or skip",
+    then what is missing. A rewrite is always a merge: the entry repeats the
+    memory `duplicate_of` and adds to it, `rewrite` is the merged text and
+    `tags` the suggested tag names, to apply to that memory with `update`
+    instead of adding. Nothing was stored. Pass `force=True` to store the
+    entry as written."""
+
+    def __init__(self, verdict: str, rule: int | None, explanation: str,
+                 rewrite: str | None = None, tags: list[str] | None = None,
+                 duplicate_of: int | None = None, needs: str | None = None,
+                 message: str | None = None):
+        self.verdict = verdict
+        self.rule = rule
+        self.explanation = explanation
+        self.rewrite = rewrite
+        self.tags = list(tags or [])
+        self.duplicate_of = duplicate_of
+        self.needs = needs
+        self.message = message
+        super().__init__(message or f"review: {verdict}: {explanation}")
+
+
+class ApiRefused(RuntimeError):
+    """The server turned the request down and said why (an HTTP 4xx, or a 503
+    for a model the server does not have, with a plain `detail` string, such
+    as a search mode it cannot serve). `status` is the HTTP code; `str(e)` is
+    the server's message, ready to print."""
+
+    def __init__(self, status: int, detail: str):
+        self.status = status
+        self.detail = detail
+        super().__init__(detail)
+
+
+def _detail_from(body: str) -> str | None:
+    """The plain-string `detail` of an error body, or None when the body is
+    not the shape `{"detail": "<message>"}`."""
+    try:
+        d = json.loads(body).get("detail")
+    except (ValueError, AttributeError):
+        return None
+    return d if isinstance(d, str) else None
+
+
+def _duplicate_from(detail: str) -> DuplicateMemory | None:
+    """Build a DuplicateMemory from a 409 body, or None when the body is not
+    the duplicate shape `{"detail": {"reason": "duplicate", ...}}`."""
+    try:
+        d = json.loads(detail).get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(d, dict) or d.get("reason") != "duplicate":
+        return None
+    return DuplicateMemory(int(d["existing_id"]), float(d["score"]))
+
+
+def _review_refusal_from(detail: str) -> ReviewRefused | None:
+    """Build a ReviewRefused from a 422 body, or None when the body is not
+    the review shape `{"detail": {"reason": "review", ...}}`."""
+    try:
+        d = json.loads(detail).get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(d, dict) or d.get("reason") != "review":
+        return None
+    return ReviewRefused(str(d["verdict"]), d.get("rule"), str(d.get("explanation") or ""),
+                         d.get("rewrite"), d.get("tags"), d.get("duplicate_of"),
+                         d.get("needs"), d.get("message"))
 
 
 class ApiClient:
@@ -57,6 +154,18 @@ class ApiClient:
             if e.code == 404:
                 return 404, e.headers, None
             detail = e.read().decode(errors="replace")
+            if e.code == 409:
+                dup = _duplicate_from(detail)
+                if dup is not None:
+                    raise dup from e
+            if e.code == 422:
+                refusal = _review_refusal_from(detail)
+                if refusal is not None:
+                    raise refusal from e
+            if 400 <= e.code < 500 or e.code == 503:
+                message = _detail_from(detail)
+                if message is not None:
+                    raise ApiRefused(e.code, message) from e
             raise RuntimeError(f"{method} {path} → HTTP {e.code}: {detail}") from e
         except urllib.error.URLError as e:
             raise ApiUnreachable(
@@ -66,42 +175,93 @@ class ApiClient:
             ) from e
 
     # ---- operations ------------------------------------------------------
-    def add(self, content, agent, project, tags, mtype):
-        _, data = self._call("POST", "/memories", body={
+    def add(self, content, agent, project, tags, mtype, force=False):
+        """The new id only."""
+        return self.add_full(content, agent, project, tags, mtype, force=force)["id"]
+
+    def add_with_warnings(self, content, agent, project, tags, mtype, force=False):
+        """(id, warnings): warnings is the list of rule names the entry breaks
+        (see server/checks.py). See `add_full`."""
+        data = self.add_full(content, agent, project, tags, mtype, force=force)
+        return data["id"], data["warnings"]
+
+    def add_full(self, content, agent, project, tags, mtype, force=False):
+        """{"id", "warnings", "notes"}: warnings are the rule names the entry
+        breaks (see server/checks.py), notes say which tags were stored under
+        another name than written. The memory is stored either way, unless the
+        server finds a near-duplicate in the same project (then it raises
+        `DuplicateMemory`) or its review model, in refuse mode, rejects the
+        entry or wants it rewritten (then `ReviewRefused`); in both cases
+        nothing is stored. `force=True` skips both checks."""
+        body = {
             "content": content, "agent": agent, "project": project,
             "tags": list(tags), "type": mtype,
-        })
-        return data["id"]
+        }
+        params = {"force": "true"} if force else None
+        _, data = self._call("POST", "/memories", params=params, body=body)
+        return {"id": data["id"], "warnings": data.get("warnings") or [],
+                "notes": data.get("notes") or []}
 
     def query(self, *, since_days=None, since=None, until=None, project=None,
-              agent=None, tag=None, mtype=None, limit=None):
-        """Rows only. `limit=0` returns everything; None uses the server default."""
+              agent=None, tag=None, mtype=None, status=None, current=False,
+              archived=False, limit=None):
+        """Rows only. `status` keeps to one review status ("unverified",
+        "verified" or "flagged"; None for all). `current=True` hides the
+        memories a newer one supersedes. Archived memories are left out;
+        `archived=True` lists only them. `limit=0` returns everything;
+        None uses the server default."""
         rows, _ = self.query_with_total(
             since_days=since_days, since=since, until=until, project=project,
-            agent=agent, tag=tag, mtype=mtype, limit=limit)
+            agent=agent, tag=tag, mtype=mtype, status=status, current=current,
+            archived=archived, limit=limit)
         return rows
 
     def query_with_total(self, *, since_days=None, since=None, until=None, project=None,
-                         agent=None, tag=None, mtype=None, limit=None):
+                         agent=None, tag=None, mtype=None, status=None, current=False,
+                         archived=False, limit=None):
         """(rows, total): total is the match count ignoring the limit."""
         _, headers, data = self._request("GET", "/memories", params={
             "since_days": since_days, "since": since, "until": until,
-            "project": project, "agent": agent, "tag": tag, "type": mtype, "limit": limit,
+            "project": project, "agent": agent, "tag": tag, "type": mtype,
+            "status": status, "current": "true" if current else None,
+            "archived": "true" if archived else None, "limit": limit,
         })
         rows = data or []
         total = int((headers or {}).get("X-Total-Count") or len(rows))
         return rows, total
 
-    def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None):
+    def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None,
+               mode=None, current=False, archived=False):
+        """Rows with a `snippet` and a `score`. `mode` is "keyword", "semantic"
+        or "hybrid"; None leaves it out, so the server picks its default
+        (keyword). `current=True` hides the memories a newer one supersedes.
+        `archived=True` searches only the archived memories, which are left
+        out otherwise. A mode the server cannot serve raises `ApiRefused`."""
         _, data = self._call("GET", "/memories/search", params={
             "q": text, "project": project, "agent": agent,
-            "since": since, "tag": tag, "limit": limit,
+            "since": since, "tag": tag, "limit": limit, "mode": mode,
+            "current": "true" if current else None,
+            "archived": "true" if archived else None,
         })
         return data or []
 
     def get(self, mid):
         status, data = self._call("GET", f"/memories/{mid}")
         return None if status == 404 else data
+
+    def reviews(self, mid):
+        """The memory's review history: every verdict the model gave on it,
+        newest first, each with `created_at`. An empty list for a memory
+        that has not been reviewed; None when there is no such memory."""
+        status, data = self._call("GET", f"/memories/{mid}/reviews")
+        return None if status == 404 else (data or [])
+
+    def restore(self, mid):
+        """Bring an archived memory back into view. True when it was
+        archived, False when it was not (nothing changed), None when there
+        is no such memory."""
+        status, data = self._call("POST", f"/memories/{mid}/restore")
+        return None if status == 404 else bool(data["restored"])
 
     def update(self, mid, *, content=None, project=None, mtype=None,
                set_tags=None, add_tags=None, remove_tags=None):
@@ -130,8 +290,31 @@ class ApiClient:
         return data or {"deleted": 0, "missing": list(ids)}
 
     def list_tags(self):
+        """The tags in use, each with its count, description and
+        `review_status`."""
         _, data = self._call("GET", "/tags")
         return data or []
+
+    def tag_proposals(self):
+        """The tag proposals that wait for a person, oldest first: each with
+        its id, the tag, the verdict (merge, rename or drop), `into`,
+        `new_name` and the model's reason."""
+        _, data = self._call("GET", "/tags/flagged")
+        return data or []
+
+    def apply_tag_proposal(self, pid):
+        """Do what proposal `pid` says (merge, rename or delete the tag).
+        Returns `{"proposal", "result"}`; None when there is no such
+        proposal. One that is resolved already, or whose tag is gone, raises
+        `ApiRefused`."""
+        status, data = self._call("POST", f"/tags/proposals/{int(pid)}/apply")
+        return None if status == 404 else data
+
+    def reject_tag_proposal(self, pid):
+        """Turn proposal `pid` down; the tag stays and is verified. Returns
+        `{"proposal"}`; None when there is no such proposal."""
+        status, data = self._call("POST", f"/tags/proposals/{int(pid)}/reject")
+        return None if status == 404 else data
 
     def list_projects(self):
         _, data = self._call("GET", "/projects")
@@ -140,6 +323,51 @@ class ApiClient:
     def stats(self):
         _, data = self._call("GET", "/stats")
         return data
+
+    def reindex(self):
+        """Ask the server to give every memory and every tag a vector from its
+        current model. Returns `{"updated": memories, "tags": tags}`: how
+        many rows of each changed."""
+        _, data = self._call("POST", "/admin/reindex")
+        return data
+
+    def flagged(self, project=None, verdict=None, status=None, limit=None, archived=False):
+        """The memories the review flagged, newest review first, each with its
+        `review`. `verdict` is "reject", "improve" or "rewrite"; None lists all three. With
+        `status` ("unverified", "verified" or "flagged") the memories with
+        that review status instead. Archived memories are left out;
+        `archived=True` lists only them. `limit=0` returns everything; None
+        uses the server default."""
+        rows, _ = self.flagged_with_total(project=project, verdict=verdict, status=status,
+                                          limit=limit, archived=archived)
+        return rows
+
+    def flagged_with_total(self, project=None, verdict=None, status=None, limit=None,
+                           archived=False):
+        """(rows, total): total is the match count ignoring the limit."""
+        _, headers, data = self._request("GET", "/memories/flagged", params={
+            "project": project, "verdict": verdict, "status": status, "limit": limit,
+            "archived": "true" if archived else None,
+        })
+        rows = data or []
+        total = int((headers or {}).get("X-Total-Count") or len(rows))
+        return rows, total
+
+    def review_catch_up(self, limit=None):
+        """The catch-up: ask the server to review the unverified memories,
+        oldest first, one after another, up to `limit` (None uses the server
+        default, 0 means all). The reviews run in the background; returns
+        `{"scheduled": <how many>, "tags": <how many>, "running": <bool>}`:
+        `tags` is how many tags were scheduled after the memories, and
+        `running` is True when a catch-up was already running (the server
+        runs one at a time, so nothing new was scheduled). A server without a review model
+        raises `ApiRefused`."""
+        _, data = self._call("POST", "/admin/review", params={"limit": limit})
+        return {"scheduled": data["scheduled"], "tags": int(data.get("tags", 0)),
+                "running": bool(data.get("running", False))}
+
+    # The old name, kept for callers that still use it.
+    review_missing = review_catch_up
 
 
 def get_client():

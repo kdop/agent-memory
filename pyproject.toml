@@ -27,6 +27,11 @@ server = [
 # Pinned below 2.x: mcp 2 renames FastMCP to MCPServer and drops the in-memory
 # test helper; the migration is tracked in issue #1.
 mcp = ["mcp>=1.0,<2"]
+# Local text embeddings for the server (issue #18). Optional: without it the
+# server runs with a NullEmbedder and stores no vectors. Not part of [server] so
+# a plain install stays small; not part of [dev] so the suite runs without it
+# (the one real-model test is skipped).
+embed = ["fastembed>=0.3"]
 # Test-only. Pulls the server + mcp extras + httpx for the ASGI test client.
 dev = ["pytest", "pytest-asyncio", "httpx", "coverage[toml]",
        "agent-memory[server]", "agent-memory[mcp]"]
@@ -49,6 +54,10 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 # Async tests (SQLAlchemy async engine / httpx AsyncClient) — no per-test decorator.
 asyncio_mode = "auto"
+markers = [
+    "embed: loads the real embedding model (skipped unless fastembed is installed)",
+    "review: asks the real review model (skipped unless AGENT_MEMORY_REVIEW_URL names a reachable Ollama server)",
+]
 
 [tool.coverage.run]
 source = ["agent_memory"]

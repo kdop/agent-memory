@@ -1,8 +1,9 @@
 <script setup>
 // Tags management view: the table and the detail/edit modal.
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useTagsStore } from '@/stores/tags'
 import { useAuthStore } from '@/stores/auth'
+import { useHealthStore } from '@/stores/health'
 import TagsTable from '@/components/TagsTable.vue'
 import TagDetailModal from '@/components/TagDetailModal.vue'
 
@@ -21,6 +22,10 @@ function openTag(tag) {
 onMounted(() => {
   if (auth.isAuthed) tags.fetch()
 })
+
+// A catch-up just ended: reload the tags once.
+const health = useHealthStore()
+watch(() => health.ended, () => { if (auth.isAuthed) tags.fetch() })
 </script>
 
 <template>

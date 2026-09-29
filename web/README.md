@@ -61,9 +61,9 @@ src/
   api/client.js        # typed client for the whole CONTRACT.md
   stores/              # auth · memories (view-state ↔ URL) · tags
   composables/useUrlSync.js   # q/tags/order/page ↔ query params
-  layouts/MainLayout.vue      # top bar + right rail
-  pages/               # MemoriesPage · TagsPage
-  components/          # MemoriesTable · SearchBar · TagFilter · MemoryEditDialog
-                       # · TagsTable · TagDetailModal · LoginDialog
+  layouts/MainLayout.vue      # top bar (+ review model badge) + right rail
+  pages/               # MemoriesPage · FlaggedPage · TagsPage
+  components/          # MemoriesTable · SearchBar · TagFilter · AgentProjectFilter
+                       # · MemoryEditDialog · TagsTable · TagDetailModal · LoginDialog
   mocks/               # MSW handlers + deterministic seed (dev only)
 ```

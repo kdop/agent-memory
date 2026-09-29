@@ -26,7 +26,7 @@ the only thing with a `postgresql://` DSN.
 **2. Install the server extra and create the schema** (Alembic owns it):
 
 ```bash
-pip install -e ".[server]"
+pip install -e ".[server]"        # add the [embed] extra to search by meaning: ".[server,embed]"
 export AGENT_MEMORY_DB="postgresql://user:pass@localhost:5432/agent_memory"
 alembic upgrade head
 ```
@@ -52,14 +52,142 @@ memory add "Chose Postgres over SQLite" \
   --agent=my-agent --project=agent-memory --type=decision \
   --tags='[{"name":"design","description":"architecture choices"},{"name":"db"}]'
 memory query --project=agent-memory --since-days 0
-memory search "database" --project=agent-memory
+memory search "database" --project=agent-memory                    # by words (the default)
+memory search "why we picked the database" --mode semantic        # by meaning; needs the [embed] extra
+memory search "why we picked the database" --mode hybrid          # both lists, combined
 ```
 
 Memories are attributed per agent (`--agent`), scoped by `--project`, classified by
-`--type` (`decision | lesson | note | preference`), and tagged for retrieval. Tags are
-structured objects — `--tags` takes a **JSON array** of `{"name", "description"}`, and a
-new tag with no description defaults to its own name. Full command reference:
+`--type` (`constraint | decision | lesson | note | preference`), and tagged for
+retrieval. The type says how binding a memory is: a `constraint` is a hard rule, a
+`preference` a soft one, a `decision` a settled choice, a `lesson` a past cause and
+effect, a `note` plain reference (the skill spells out how an agent acts on each). Tags
+are structured objects — `--tags` takes a **JSON array** of `{"name", "description"}`,
+and a new tag with no description defaults to its own name. Full command reference:
 `memory --help`.
+
+**Search** has three modes, `--mode keyword|semantic|hybrid`. `keyword` (the default)
+finds memories that contain the words of the query and marks them in a snippet.
+`semantic` finds memories that mean the same thing, even in other words: the server
+turns each memory into a meaning vector with a small local model and compares the query
+against those vectors. `hybrid` runs both and combines the two lists, so a memory found
+both by words and by meaning comes first (how it is combined: [ARCHITECTURE.md](ARCHITECTURE.md)).
+The last two need the `[embed]` extra on the server (`pip install -e ".[server,embed]"`).
+Without it, `semantic` answers with an error that says so and `hybrid` falls back to
+keyword. Two environment variables control the model, both read by the server at
+start: `AGENT_MEMORY_EMBED_MODEL` (default `BAAI/bge-small-en-v1.5`; `off` turns it
+off) and `AGENT_MEMORY_EMBED_CACHE` (where the model files are stored; default
+`.cache/fastembed` under the repo root). `memory reindex` gives every memory, and
+every tag, that has no vector, or a vector from another model, a vector from the
+current model, and prints both counts; a tag's vector is what the review uses to pick
+the tags it offers. The model runs in a thread, so the server answers other requests
+meanwhile. The server also runs this once at start, so after installing the model, or
+switching to another, a restart is enough.
+
+**Adding** checks the entry. A new memory whose meaning is nearly the same as one
+already in the same project (cosine 0.92 or above) is refused and nothing is stored:
+the API answers `409` with the existing id, the CLI prints `✗ Duplicate of memory #<id>
+(score 0.97). Use 'memory update <id>' or --force.` and exits with code 3, and the MCP
+tool returns `{"error": "duplicate", "existing_id": <id>, "score": <score>}`. Update
+the existing memory, or pass `--force` when the new one is meant as a separate record.
+A server without the model has no vectors to compare, so it never refuses. Three
+warnings can print after the id, one per line: `warning: short` (under 40 characters),
+`warning: no-project` (no `--project`), and `warning: no-reasoning` (a `decision`,
+`lesson` or `constraint` with no word that says why, such as "because" or "rejected"). Warnings never
+block; the memory is stored either way.
+Tag names are cleaned on write (lowercase, hyphens for spaces and underscores), and a plural, or a tag whose vector is at cosine 0.90 or more to an existing one, reuses that tag; each reuse prints `note: tag "comms" stored as "communication"`, and more than 10 tags prints `warning: too-many-tags`.
+
+**Review by a model.** The server can also have a model read each new memory and judge
+it against the five rules in the skill. The model answers `approve`, `reject` with the
+number of the rule the entry breaks (or the id of the memory it repeats), or `rewrite`
+with a suggested text and suggested tags. `AGENT_MEMORY_REVIEW`, read by the server at
+start, picks the mode: `off` (the default) asks no model; `flag` stores the memory,
+answers, and asks the model afterwards, so the verdict is advice only; `refuse` asks
+the model before storing, and a `reject` or `rewrite` refuses the write. The old names
+`warn` and `enforce` still work for one release and mean `flag` and `refuse`; the server
+logs one line asking for the new name. The model runs on any Ollama server: `AGENT_MEMORY_REVIEW_URL` is its address, for example
+`http://192.168.1.20:11434`, `AGENT_MEMORY_REVIEW_MODEL` names the model to ask (default
+`qwen3:14b`), and `AGENT_MEMORY_REVIEW_TIMEOUT` is how many seconds to wait for an answer
+(default 30). In flag mode the verdict shows as a `review:` line on `show`, `query` and
+`search`, for example `review: reject, rule 2: <reason>`; a rewrite adds the suggested
+text under `suggested:` and a `suggested tags:` line. A memory keeps every verdict it
+ever got (a re-review adds one, never replaces one); `memory show <id> --reviews` prints
+them all under the memory, oldest first, each with its date. `memory review` lists the memories
+with a reject or rewrite verdict, newest first (`--project`, `--verdict`, `--limit`,
+`--all`); `memory review --catch-up` reviews the memories written while the model was
+off, oldest first, one after another. Every memory also carries a review status, printed
+right after its id as `status: unverified` (until the model has checked it), `verified`
+(approved) or `flagged` (rejected, or a rewrite suggested), and `--status` on `query` and
+`review` filters by it; only verified memories serve as reference for the duplicate check
+and for the neighbours the model sees, so an unchecked entry can never vouch for another.
+Two more cases look at those neighbours. An entry that reverses or replaces an older
+memory (a new choice on the same question) is approved and stored with `supersedes` set
+to the old id: both stay in the timeline, the new one's header says `supersedes #<id>`,
+the old one's says `superseded by #<id>`, and `--current` on `query` and `search`
+(`current=true` on the API and the MCP tools) hides the superseded ones; off by default,
+so nothing disappears on its own. An entry that repeats an older memory and adds to it
+gets a `rewrite` whose text is the old and the new merged, with `duplicate_of` the old
+id: in flag mode the new memory is stored and flagged with that suggestion, it
+supersedes the old one, and the old one is archived (below); in refuse mode the write is
+refused and the CLI ends with `Apply it with 'memory update <old id>' instead of adding.`
+The model never changes a memory's text; the writer applies a merge. In refuse mode a reject or rewrite refuses the write and nothing is stored: the API
+answers `422` with the verdict and the suggestion, the CLI prints `✗ Review: rewrite,
+rule 3: <reason>`, the suggestion, and `Fix the entry, or pass --force to store it as
+written.` and exits with code 4, and the MCP tool returns `{"error": "review", ...}`.
+`--force` stores the entry anyway; the review then runs after the write, as in flag mode.
+A model that is off, unreachable or slow never blocks a write: the memory is stored
+without a verdict and the server logs one line. The server also checks on its own
+whether the model is back: every `AGENT_MEMORY_REVIEW_POLL` seconds (default 300; 0 turns
+this off) it sends one cheap request to the Ollama server, and when it answers and
+unverified memories exist, it runs the same catch-up as `memory review --catch-up`, so
+memories written while the model was off get their verdict without anyone running a
+command. One catch-up runs at a time: `memory review --catch-up` while one is running
+says so and schedules nothing. `GET /health` reports what the last check found as
+`review_model`: `reachable`, `unreachable`, or `off` when the review or the poll is off;
+while a catch-up runs it also reports `catch_up: {"kind": "memories", "total": n,
+"done": k}` (else null; `kind` turns to `tags` for the second half), which the dashboard
+shows as a progress bar.
+A reject under rule 2 (a diary line) or rule 4 (what git holds), and the older memory
+of a merge, are **archived**: stamped with `archived_at` and left out of `query`,
+`search`, `review`, the counts and the reference set. `--archived` on `query`, `search`
+and `review` (`archived=true` on the API and the MCP tools) lists only them; `memory
+show <id>` still finds one, with `archived` in its header. `memory restore <id>` (MCP
+`memory_restore`, `POST /memories/{id}/restore`) brings one back; new text from `memory
+update` does too. Each poll tick deletes the memories archived more than
+`AGENT_MEMORY_ARCHIVE_DAYS` days ago (default 30; 0 keeps them for good), whether or not
+the model answers.
+Editing a memory's text with `memory update` sets it back to `unverified` and drops its
+verdict and its `supersedes` link, so the next catch-up reads the new text; a change of
+tags or project alone keeps both.
+
+**Tag review.** Tags get a review status too (`unverified`, `verified`, `flagged`), from
+the same model under the same setting. The catch-up reviews the unverified tags after
+the unverified memories, oldest first. The model sees the tag's name and description,
+how many memories use it and three of them, and the five verified tags closest to it,
+and answers `keep` (the tag is verified), `merge` into one of those tags, `rename`, or
+`drop` (the tag repeats a memory type, or names no subject). A merge is applied on its
+own only when the two tags' vectors score 0.90 or more, or their names match after the
+name cleanup (the same name, or its plural or singular). Anything else is a proposal
+that waits for a person, and the tag is flagged: `memory tags --pending` lists them
+(`GET /tags/flagged`, MCP `memory_tag_proposals`), `memory tags --apply <id>` does it
+(no undo) and `memory tags --reject <id>` keeps the tag and verifies it. `memory tags`
+marks a flagged tag. `tests/data/tag_verdict_set.json` holds 20 invented tags with the
+verdict the model should give; `tests/test_tag_review.py::test_tag_verdict_quality`
+measures the prompt against it, like the memory verdict set below.
+
+**Measuring the prompt.** The prompt's checklist was tuned by hand to `qwen3:14b`, so a
+change to its wording or to the model is measured, not felt. `tests/data/verdict_set.json`
+holds 30 invented entries with the verdict the model should give each one, across ten
+cases (a clean decision, lesson and preference; a diary line; a fact git already holds; a
+decision with no why; an exact and a reworded repeat; a reversal; a repeat that adds
+something), each with the existing entries the model is shown.
+`tests/test_verdict_quality.py` runs them through the real model and prints a table of
+passes per case and the overall rate. It runs only when `AGENT_MEMORY_REVIEW_URL` names
+an Ollama server that answers (`AGENT_MEMORY_REVIEW_MODEL` picks the model) and is
+skipped otherwise: `AGENT_MEMORY_REVIEW_URL=http://host:11434 pytest
+tests/test_verdict_quality.py -s`. The `floor` in the file is the overall pass rate the
+test asserts. It is the rate the current prompt and model reach, rounded down, so a
+change that lowers it fails the test; raise it when the prompt improves.
 
 - **[skills/memory/SKILL.md](skills/memory/SKILL.md)** — the logging protocol, as a
   Claude Code skill each project installs; see [Claude Code skill](#claude-code-skill)
@@ -74,6 +202,8 @@ new tag with no description defaults to its own name. Full command reference:
 | **CLI client** | `memory-cli` — a presentation layer over `ApiClient`. Stdlib-only, never opens a DB. | none |
 | **MCP client** | Same `ApiClient`, exposed as MCP tools over stdio. | `[mcp]` |
 | **Dashboard** | Vue 3 + Quasar single-page app, served by the API service under `/app`. | `web/` (Node) |
+| **Review model** | A model on an Ollama server (default `qwen3:14b`) that reads each new memory against the rules in the skill and answers approve, reject or rewrite. Off by default; `AGENT_MEMORY_REVIEW=flag` or `refuse` plus `AGENT_MEMORY_REVIEW_URL` turns it on. The call is plain `urllib`, so nothing extra is installed. | none |
+| **Meaning vectors** | A small local model (`BAAI/bge-small-en-v1.5`, 384 numbers per vector) run inside the API service through fastembed. It serves `--mode semantic`, `--mode hybrid` and the duplicate check on add. Optional: `pip install -e ".[embed]"`; without it the service runs with no vectors. `AGENT_MEMORY_EMBED_MODEL=off` turns it off; `AGENT_MEMORY_EMBED_CACHE` sets where model files land (default `.cache/fastembed`). | `[embed]` |
 
 ### Endpoint & auth resolution (clients)
 
@@ -87,7 +217,10 @@ new tag with no description defaults to its own name. Full command reference:
 
 Agents can reach the memory system over **MCP**. Install the extra and register the
 stdio server once — it's then available in every session, exposing tools
-`memory_add/query/search/show/update/delete/tags/projects/stats`:
+`memory_add/query/search/flagged/show/update/delete/tags/projects/stats` (`memory_search`
+takes `mode`, `memory_add` takes `force` and returns the warnings, or `{"error": "review",
+...}` when the review refuses the entry, and `memory_flagged` lists the memories the
+review flagged):
 
 ```bash
 pip install -e ".[mcp]"               # installs the `agent-memory-mcp` entry point
@@ -142,7 +275,27 @@ the built assets under `/app`, so it needs no separate host. Log in once with th
 token. See [web/README.md](web/README.md) for the dev setup (runs against an in-browser
 mock, no backend needed) and the build.
 
+Every memory shows its review status (unverified, verified, flagged) and, once the
+model has read it, the verdict with the rule and the reason; a rewrite shows the
+suggested text and tags, and a "Review again" button asks the model once more.
+`supersedes #id` and `superseded by #id` are links to the other memory. The search box
+has the three modes (keyword, semantic, hybrid) and shows each hit's score; the right
+rail filters by status and can hide superseded memories. The **Flagged** view lists what
+the review rejected or wants rewritten, and its **Catch up** button reviews the
+memories written while the model was off. The **Archived** view lists what the review
+put away, with the reason, the days left before it is deleted and a **Restore** button.
+The **Tags** view shows each tag's review status, and for a flagged tag the model's
+proposal with **Apply** and **Reject** buttons. The top bar shows whether the review
+model is reachable, and while a catch-up runs, a bar that says what it reviews
+("Reviewing tags: 5 of 40 done").
+
 ![dashboard](docs/dashboard.png)
+
+The Flagged view and a hybrid search with scores:
+
+![flagged view](docs/dashboard-flagged.png)
+
+![hybrid search](docs/dashboard-search.png)
 
 ## PostgreSQL
 
@@ -151,3 +304,74 @@ Postgres is the only backend. The server reads its DSN from `AGENT_MEMORY_DB`
 **Alembic** (`alembic upgrade head`) with the SQLAlchemy models as the source of truth.
 The database is **live and shared** across all agent sessions — back it up out-of-band.
 Clients never see the DSN; they only ever talk to the API.
+
+### Working on a copy
+
+Never develop against the live database. `scripts/db_copy.sh` gives you a copy in a
+podman container named `memcopy` (Postgres 16 on `127.0.0.1:5434`, data in the volume
+`memcopy-data`). `up` starts it, `load <source-dsn>` dumps the source into it and
+prints the row counts of `memories`, `tags` and `memory_tags` from both sides (exit 1
+if they differ), `verify <source-dsn>` repeats the count check, and `down` removes the
+container and the volume. The source is only ever read. Point `AGENT_MEMORY_DB` at the
+DSN the script prints and work there.
+
+```bash
+./scripts/db_copy.sh up
+./scripts/db_copy.sh load "$AGENT_MEMORY_DB"      # the live DSN, read only
+./scripts/db_copy.sh down
+```
+
+### Replaying the write checks
+
+Before a write check goes live, see what it would have done to the entries already
+there. `scripts/replay_write_checks.py` walks the copy's memories in the order they
+were written and runs the duplicate check and the warnings on each one as if it were
+new. It prints one line per memory (id, date, project, `refuse #<id> <score>` or `ok`,
+then the warnings) and ends with the totals. It only reads: vectors are computed on
+the fly with the same model the server uses (the `[embed]` extra), and it refuses any
+DSN whose host is not `localhost` or `127.0.0.1`. `--since` and `--until` narrow the
+report to a range of days; `--embedder fake` swaps in a hash-based stand-in for a
+quick check of the script itself.
+
+```bash
+python scripts/replay_write_checks.py --dsn postgresql://memory:memory@127.0.0.1:5434/memory
+python scripts/replay_write_checks.py --dsn ... --since 2026-09-01 --until 2026-09-30
+```
+
+## Releasing
+
+The live service never runs from a working checkout. It runs from a second checkout,
+`~/workspace/agent-memory-live`, that is always on a tag, with its own `.venv` and its
+own `.env`. `deploy/deploy.sh` is the only thing that changes it. To release, tag the
+commit on `main`, push the tag, and deploy it:
+
+```bash
+git tag v0.3.0 && git push origin v0.3.0
+deploy/deploy.sh deploy v0.3.0
+```
+
+`deploy` stops if the release checkout has changed or untracked files. Then it writes a
+`pg_dump` of the database to `backups/` in the release checkout and prints the row
+counts, fetches and checks out the tag, installs `.[server,mcp,embed]` into the release
+`.venv`, runs `alembic upgrade head`, prints the row counts again and stops if they
+changed, restarts the `agent-memory` user unit, waits for `/health`, and prints the
+reindex and poll lines from the log. `deploy/deploy.sh rollback v0.2.0` does the same
+in the other direction: it runs `alembic downgrade` to the schema of that tag first,
+then checks the tag out. `deploy/deploy.sh status` shows the tag the release checkout
+is on, the unit state and the health answer. `--release <path>` and `--unit <name>`
+point at another checkout or unit, `--dsn` names the database when it is not in the
+release `.env`, and `--no-restart` stops after the migration.
+
+The first time, create the release checkout and install the unit:
+
+```bash
+git clone git@github.com:kdop/agent-memory.git ~/workspace/agent-memory-live
+cp .env ~/workspace/agent-memory-live/.env          # the live DSN, token and port
+cp deploy/agent-memory.service ~/.config/systemd/user/agent-memory.service
+systemctl --user daemon-reload
+deploy/deploy.sh deploy v0.3.0                      # creates the .venv, migrates, starts the unit
+systemctl --user enable agent-memory
+```
+
+Run the script from a working checkout; it refuses to run from the release checkout
+itself.

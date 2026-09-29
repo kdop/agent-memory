@@ -1,0 +1,651 @@
+{
+  "about": [
+    "A fixed set of new memories with the verdict the review model should give each one.",
+    "All projects, people and events here are invented.",
+    "Each entry names its case, the new memory, the verified neighbours the model is shown, and what is expected.",
+    "expected.verdict must match. expected.rule is checked only when it is a number. expected.needs must match: one of reason, clarity, detail, scope for an improve, else null.",
+    "expected.duplicate_of and expected.supersedes say whether that id must be set (true) or must be unset (false).",
+    "floor is the overall pass rate the test asserts: the lowest of three runs, rounded down. Raise it when the prompt improves."
+  ],
+  "floor": 0.93,
+  "tags": ["database", "performance", "api", "config", "pipeline", "cli", "time", "errors", "outage", "packaging"],
+  "entries": [
+    {
+      "case": "clean-decision",
+      "memory": {
+        "project": "orchard",
+        "type": "decision",
+        "tags": ["export", "cron"],
+        "content": "Chose a nightly batch job over a live stream for the stock report because the warehouse counts stock once a day, so a stream would add a queue nobody watches. Streaming was rejected as cost without benefit."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "clean-decision",
+      "memory": {
+        "project": "lantern",
+        "type": "decision",
+        "tags": ["parsing", "performance"],
+        "content": "Log lines are split with a hand-written splitter, not a regex per line. The regex version took three times as long on a 1 GB file, and the format has only four fields, so the splitter is short."
+      },
+      "neighbours": [
+        {
+          "id": 301,
+          "project": "lantern",
+          "type": "decision",
+          "tags": ["packaging"],
+          "review_status": "verified",
+          "content": "Lantern is shipped as a single static binary with no runtime dependencies. Users install it on servers where they cannot add packages; a Python distribution was rejected for that reason."
+        }
+      ],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "clean-decision",
+      "memory": {
+        "project": "tidepool",
+        "type": "decision",
+        "tags": ["ingest", "errors"],
+        "content": "The loader retries a failed download three times with a ten second pause, then gives up and marks the day as missing. Endless retries were rejected because one bad file would hold the whole night's run."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "clean-lesson",
+      "memory": {
+        "project": "kestrel",
+        "type": "lesson",
+        "tags": ["notifications", "errors"],
+        "content": "Push messages went out with an empty body for an hour. Cause: the template file was read once at start, and a deploy replaced it with a zero-byte file mid-write. The worker now refuses to start on an empty template and re-reads it on a signal."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "clean-lesson",
+      "memory": {
+        "project": "orchard",
+        "type": "lesson",
+        "tags": ["money", "tax"],
+        "content": "An invoice total was off by one cent because tax was rounded per line and then summed. Cause: rounding before the sum. Tax is now computed on the order total and rounded once."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "clean-lesson",
+      "memory": {
+        "project": "lantern",
+        "type": "lesson",
+        "tags": ["parsing"],
+        "content": "A file with Windows line endings showed a stray character at the end of every line. Cause: the splitter only knew the newline character. A trailing carriage return is now stripped when a line is cut."
+      },
+      "neighbours": [
+        {
+          "id": 302,
+          "project": "lantern",
+          "type": "lesson",
+          "tags": ["parsing", "tail"],
+          "review_status": "verified",
+          "content": "Reading a log file that is still being written to returned half lines. Cause: the reader treated end-of-file as end-of-line. Now a trailing partial line is held back until a newline arrives."
+        }
+      ],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "clean-preference",
+      "memory": {
+        "project": "lantern",
+        "type": "preference",
+        "tags": ["cli", "testing"],
+        "content": "Every new command-line flag ships with a test that runs the binary with it. The owner asked for this after untested flags broke twice in one month."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "clean-preference",
+      "memory": {
+        "project": "tidepool",
+        "type": "preference",
+        "tags": ["pipeline", "style"],
+        "content": "Write plain SQL in pipeline stages, not the query builder. The owner finds the builder hard to read in a diff, and every stage is reviewed by diff."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "clean-preference",
+      "memory": {
+        "project": "orchard",
+        "type": "preference",
+        "tags": ["api", "time"],
+        "content": "Dates in API responses are ISO 8601 strings with a zone, never epoch seconds. The mobile team asked for this because the epoch form caused two off-by-a-day bugs on their side."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "diary",
+      "memory": {
+        "project": "orchard",
+        "type": "note",
+        "tags": ["export"],
+        "content": "Spent the morning on the export job and moved a few functions around; will look at the pruning step tomorrow."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "reject", "rule": 2, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "diary",
+      "memory": {
+        "project": "lantern",
+        "type": "note",
+        "tags": ["work-log"],
+        "content": "Ran the benchmark set again today, then fixed two typos in the help text and pushed."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "reject", "rule": 2, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "diary",
+      "memory": {
+        "project": "tidepool",
+        "type": "note",
+        "tags": ["pipeline"],
+        "content": "Went through yesterday's failed run with the owner, restarted it by hand, and it finished fine."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "reject", "rule": 2, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "git-fact",
+      "memory": {
+        "project": "orchard",
+        "type": "note",
+        "tags": ["payments"],
+        "content": "The refund handler lives in payments/refunds.py; it was moved there from payments/webhook.py in release 3.2."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "reject", "rule": 4, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "git-fact",
+      "memory": {
+        "project": "kestrel",
+        "type": "note",
+        "tags": ["fetcher"],
+        "content": "Commit 4c9e2d1 added the retry loop to the fetcher and raised its timeout from 5 to 10 seconds."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "reject", "rule": 4, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "git-fact",
+      "memory": {
+        "project": "lantern",
+        "type": "note",
+        "tags": ["release"],
+        "content": "Version 2.3.0 was tagged from main on the 14th. It contains the regex toggle and the theme loader."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "reject", "rule": 4, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-reason",
+      "memory": {
+        "project": "orchard",
+        "type": "decision",
+        "tags": ["ids", "database"],
+        "content": "Order ids are generated by the database, not by the application."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "reason", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-reason",
+      "memory": {
+        "project": "tidepool",
+        "type": "decision",
+        "tags": ["pipeline", "cron"],
+        "content": "The nightly pipeline starts at 03:00 UTC instead of 01:00."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "reason", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-reason",
+      "memory": {
+        "project": "kestrel",
+        "type": "lesson",
+        "tags": ["worker"],
+        "content": "Do not restart the notification worker while a send batch is running."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "reason", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "exact-repeat",
+      "memory": {
+        "project": "orchard",
+        "type": "decision",
+        "tags": ["money", "database"],
+        "content": "Prices are stored as integer cents in a BIGINT column, not as floats or NUMERIC. Floats round wrong and NUMERIC made the reporting queries twice as slow in our benchmark."
+      },
+      "neighbours": [
+        {
+          "id": 401,
+          "project": "orchard",
+          "type": "decision",
+          "tags": ["money", "database"],
+          "review_status": "verified",
+          "content": "Prices are stored as integer cents in a BIGINT column, not as floats or NUMERIC. Floats round wrong and NUMERIC made the reporting queries twice as slow in our benchmark."
+        }
+      ],
+      "expected": {"verdict": "reject", "rule": null, "needs": null, "duplicate_of": true, "supersedes": false}
+    },
+    {
+      "case": "exact-repeat",
+      "memory": {
+        "project": "lantern",
+        "type": "decision",
+        "tags": ["packaging"],
+        "content": "Lantern is shipped as a single static binary with no runtime dependencies. Users install it on servers where they cannot add packages; a Python distribution was rejected for that reason."
+      },
+      "neighbours": [
+        {
+          "id": 402,
+          "project": "lantern",
+          "type": "decision",
+          "tags": ["packaging", "distribution"],
+          "review_status": "verified",
+          "content": "Lantern is shipped as a single static binary with no runtime dependencies. Users install it on servers where they cannot add packages; a Python distribution was rejected for that reason."
+        },
+        {
+          "id": 403,
+          "project": "lantern",
+          "type": "preference",
+          "tags": ["cli", "style"],
+          "review_status": "verified",
+          "content": "Command-line flags use kebab-case and every flag has a one-line help string. Short forms only for the five most common flags; the owner found a cluttered help screen hard to read."
+        }
+      ],
+      "expected": {"verdict": "reject", "rule": null, "needs": null, "duplicate_of": true, "supersedes": false}
+    },
+    {
+      "case": "exact-repeat",
+      "memory": {
+        "project": "kestrel",
+        "type": "decision",
+        "tags": ["notifications"],
+        "content": "Push notifications are queued in a table and sent by a worker, not sent inline from the request handler. Inline sending made request latency depend on the push provider, which was slow at peak."
+      },
+      "neighbours": [
+        {
+          "id": 404,
+          "project": "kestrel",
+          "type": "decision",
+          "tags": ["notifications", "queue"],
+          "review_status": "verified",
+          "content": "Push notifications are queued in a table and sent by a worker, not sent inline from the request handler. Inline sending made request latency depend on the push provider, which was slow at peak."
+        }
+      ],
+      "expected": {"verdict": "reject", "rule": null, "needs": null, "duplicate_of": true, "supersedes": false}
+    },
+    {
+      "case": "reworded-repeat",
+      "memory": {
+        "project": "orchard",
+        "type": "decision",
+        "tags": ["database", "orders"],
+        "content": "The order store runs on Postgres rather than MySQL: stock counts need locks on single rows, two of our other services use Postgres already, and nobody on the team has operated MySQL live."
+      },
+      "neighbours": [
+        {
+          "id": 501,
+          "project": "orchard",
+          "type": "decision",
+          "tags": ["database", "orders"],
+          "review_status": "verified",
+          "content": "Picked Postgres over MySQL for the orchard order store. We need row-level locking for stock counts and the team already runs Postgres for two other services. MySQL was rejected because nobody here has run it in production."
+        }
+      ],
+      "expected": {"verdict": "reject", "rule": null, "needs": null, "duplicate_of": true, "supersedes": false}
+    },
+    {
+      "case": "reworded-repeat",
+      "memory": {
+        "project": "lantern",
+        "type": "lesson",
+        "tags": ["parsing", "tail"],
+        "content": "When following a file another process is still appending to, the viewer showed cut-off lines, since hitting the end of the file was taken as the end of a line. The fix keeps an unfinished last line back until its newline shows up."
+      },
+      "neighbours": [
+        {
+          "id": 502,
+          "project": "lantern",
+          "type": "lesson",
+          "tags": ["parsing", "tail"],
+          "review_status": "verified",
+          "content": "Reading a log file that is still being written to returned half lines. Cause: the reader treated end-of-file as end-of-line. Now a trailing partial line is held back until a newline arrives."
+        }
+      ],
+      "expected": {"verdict": "reject", "rule": null, "needs": null, "duplicate_of": true, "supersedes": false}
+    },
+    {
+      "case": "reworded-repeat",
+      "memory": {
+        "project": "tidepool",
+        "type": "lesson",
+        "tags": ["time", "bug"],
+        "content": "For seven days after daylight saving switched, the per-day totals landed on the wrong date because the day boundary was local midnight. The boundary is UTC midnight now, and the reports state that."
+      },
+      "neighbours": [
+        {
+          "id": 503,
+          "project": "tidepool",
+          "type": "lesson",
+          "tags": ["time", "bug"],
+          "review_status": "verified",
+          "content": "The daily aggregate was off by one day for a week after the clocks changed. Cause: the job used local midnight to cut the day. Days are now cut at UTC midnight and the report labels say so."
+        },
+        {
+          "id": 504,
+          "project": "tidepool",
+          "type": "decision",
+          "tags": ["pipeline", "idempotency"],
+          "review_status": "verified",
+          "content": "Pipeline jobs are idempotent and keyed by the day they process. Re-running a day replaces that day's output rather than appending. This was chosen so a failed night can be re-run without a cleanup step."
+        }
+      ],
+      "expected": {"verdict": "reject", "rule": null, "needs": null, "duplicate_of": true, "supersedes": false}
+    },
+    {
+      "case": "reversal",
+      "memory": {
+        "project": "orchard",
+        "type": "decision",
+        "tags": ["export", "cron"],
+        "content": "The order export now runs at 05:00 instead of 02:00, because the warehouse counts finish at 04:00 and the earlier run exported stale stock numbers."
+      },
+      "neighbours": [
+        {
+          "id": 601,
+          "project": "orchard",
+          "type": "note",
+          "tags": ["export", "cron"],
+          "review_status": "verified",
+          "content": "Order export runs as a cron job at 02:00 and writes one CSV per warehouse to the shared bucket. Files older than 30 days are pruned by the same job."
+        }
+      ],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": true}
+    },
+    {
+      "case": "reversal",
+      "memory": {
+        "project": "lantern",
+        "type": "decision",
+        "tags": ["config", "theme"],
+        "content": "A missing theme.toml now prints one warning on start instead of staying silent, because two users lost an hour thinking their theme file was read when it sat in the wrong folder."
+      },
+      "neighbours": [
+        {
+          "id": 602,
+          "project": "lantern",
+          "type": "note",
+          "tags": ["config", "theme"],
+          "review_status": "verified",
+          "content": "The colour theme is read from the theme.toml file in the user config folder. If the file is missing the built-in dark theme is used and no warning is printed."
+        }
+      ],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": true}
+    },
+    {
+      "case": "reversal",
+      "memory": {
+        "project": "tidepool",
+        "type": "decision",
+        "tags": ["pipeline", "storage"],
+        "content": "Stages now pass data as Parquet files instead of CSV, because the CSV round trip lost type information and the largest stage output took twenty minutes to parse. Being able to open outputs in a text editor was given up for that."
+      },
+      "neighbours": [
+        {
+          "id": 603,
+          "project": "tidepool",
+          "type": "decision",
+          "tags": ["pipeline", "storage"],
+          "review_status": "verified",
+          "content": "Pipeline stages pass data through CSV files in a shared folder, because every stage tool reads CSV and the team can inspect a stage's output with a text editor."
+        }
+      ],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": true}
+    },
+    {
+      "case": "partial-repeat-more",
+      "memory": {
+        "project": "orchard",
+        "type": "decision",
+        "tags": ["money", "database"],
+        "content": "Prices are stored as integer cents in a BIGINT column, not as floats or NUMERIC. Floats round wrong and NUMERIC made the reporting queries twice as slow in our benchmark; the benchmark was the monthly revenue report over two years of orders."
+      },
+      "neighbours": [
+        {
+          "id": 701,
+          "project": "orchard",
+          "type": "decision",
+          "tags": ["money", "database"],
+          "review_status": "verified",
+          "content": "Prices are stored as integer cents in a BIGINT column, not as floats or NUMERIC. Floats round wrong and NUMERIC made the reporting queries twice as slow in our benchmark."
+        }
+      ],
+      "expected": {"verdict": "rewrite", "rule": null, "needs": null, "duplicate_of": true, "supersedes": false}
+    },
+    {
+      "case": "partial-repeat-more",
+      "memory": {
+        "project": "lantern",
+        "type": "decision",
+        "tags": ["search", "performance"],
+        "content": "Search inside a log file uses a plain substring scan with a small in-memory index of line offsets, not a full regex engine on every keystroke. Regex on each keystroke was rejected as too slow on large files; a regex mode is available behind a toggle. The index is rebuilt when the file grows by more than 10 MB."
+      },
+      "neighbours": [
+        {
+          "id": 702,
+          "project": "lantern",
+          "type": "decision",
+          "tags": ["search", "performance"],
+          "review_status": "verified",
+          "content": "Search inside a log file uses a plain substring scan with a small in-memory index of line offsets, not a full regex engine on every keystroke. Regex on each keystroke was rejected as too slow on large files; a regex mode is available behind a toggle."
+        }
+      ],
+      "expected": {"verdict": "rewrite", "rule": null, "needs": null, "duplicate_of": true, "supersedes": false}
+    },
+    {
+      "case": "partial-repeat-more",
+      "memory": {
+        "project": "kestrel",
+        "type": "decision",
+        "tags": ["rate-limit", "worker"],
+        "content": "Rate limiting is per user per hour, enforced in the worker rather than at the API edge. Edge limiting was rejected because one user can trigger a burst from many endpoints and only the worker sees the total. The limit is 60 notifications per user per hour."
+      },
+      "neighbours": [
+        {
+          "id": 703,
+          "project": "kestrel",
+          "type": "decision",
+          "tags": ["rate-limit", "worker"],
+          "review_status": "verified",
+          "content": "Rate limiting is per user per hour, enforced in the worker rather than at the API edge. Edge limiting was rejected because one user can trigger a burst from many endpoints and only the worker sees the total."
+        }
+      ],
+      "expected": {"verdict": "rewrite", "rule": null, "needs": null, "duplicate_of": true, "supersedes": false}
+    },
+    {
+      "case": "no-why-exempt",
+      "memory": {
+        "project": "kestrel",
+        "type": "preference",
+        "tags": ["docs"],
+        "content": "Use British spelling in user-facing text and in the docs."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "no-why-exempt",
+      "memory": {
+        "project": "tidepool",
+        "type": "note",
+        "tags": ["api"],
+        "content": "The payment provider's sandbox resets every test account each Sunday at 00:00 UTC."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "constraint",
+      "memory": {
+        "project": "orchard",
+        "type": "constraint",
+        "tags": ["email", "config"],
+        "content": "Never send email from the staging environment. Staging holds a copy of the production customer table, and a test run once mailed 4,000 real customers."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "constraint",
+      "memory": {
+        "project": "orchard",
+        "type": "constraint",
+        "tags": ["database"],
+        "content": "Database migrations must never run during business hours."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "reason", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "constraint",
+      "memory": {
+        "project": "lantern",
+        "type": "constraint",
+        "tags": ["git"],
+        "content": "Keep commit subjects under 60 characters; the owner reads the log in a narrow terminal pane."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "approve", "rule": null, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "belongs-in-git",
+      "memory": {
+        "project": "orchard",
+        "type": "note",
+        "tags": ["api", "database"],
+        "content": "The orchard API is a FastAPI app with a Postgres database behind it and Redis for sessions."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "reject", "rule": 4, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "belongs-in-git",
+      "memory": {
+        "project": "lantern",
+        "type": "note",
+        "tags": ["config", "cli"],
+        "content": "Settings are read from config/settings.toml, and the command-line entry point is lantern/cli/main.py."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "reject", "rule": 4, "needs": null, "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-clarity",
+      "memory": {
+        "project": "kestrel",
+        "type": "lesson",
+        "tags": ["upgrade"],
+        "content": "Same trouble as before came back after the upgrade, because we forgot to redo the step from last time; do that step first next time."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "clarity", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-clarity",
+      "memory": {
+        "project": "tidepool",
+        "type": "preference",
+        "tags": ["ingest"],
+        "content": "Handle those files the way we agreed yesterday, not the way the script does it."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "clarity", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-clarity",
+      "memory": {
+        "project": "lantern",
+        "type": "note",
+        "tags": ["cli"],
+        "content": "Remember the trick with the flag when it hangs again."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "clarity", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-detail",
+      "memory": {
+        "project": "orchard",
+        "type": "decision",
+        "tags": ["database", "performance"],
+        "content": "The connection pool is set to the size that held up in the load test, because smaller pools queued requests at the evening peak."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "detail", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-detail",
+      "memory": {
+        "project": "tidepool",
+        "type": "lesson",
+        "tags": ["pipeline", "time"],
+        "content": "The nightly export must land before the warehouse's cut-off time, because files that arrive after it are ignored until the next day."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "detail", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-detail",
+      "memory": {
+        "project": "kestrel",
+        "type": "preference",
+        "tags": ["api", "performance"],
+        "content": "Keep API responses under the size the mobile team asked for, since larger payloads stall on their slow connections."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "detail", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-scope",
+      "memory": {
+        "project": "orchard",
+        "type": "constraint",
+        "tags": ["api", "errors"],
+        "content": "Never retry a failed request, because a retried charge once billed a customer twice."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "scope", "duplicate_of": false, "supersedes": false}
+    },
+    {
+      "case": "improve-scope",
+      "memory": {
+        "project": "tidepool",
+        "type": "lesson",
+        "tags": ["database", "performance"],
+        "content": "Indexes slow everything down: the bulk import into the events table ran four times slower with its three indexes. Drop indexes before any write."
+      },
+      "neighbours": [],
+      "expected": {"verdict": "improve", "rule": null, "needs": "scope", "duplicate_of": false, "supersedes": false}
+    }
+  ]
+}

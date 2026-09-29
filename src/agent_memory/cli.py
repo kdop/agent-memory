@@ -9,7 +9,14 @@ import argparse
 import json
 import sys
 
-from .client import ApiClient, ApiUnreachable
+from .client import (
+    REVIEW_STATUSES,
+    ApiClient,
+    ApiRefused,
+    ApiUnreachable,
+    DuplicateMemory,
+    ReviewRefused,
+)
 from .config import config_path, get_agent_name, load_config, save_config
 
 # Box-drawing separators used in the rendered output.
@@ -36,6 +43,28 @@ def _parse_tags_json(raw, flag):
     return parsed
 
 
+def _header(row):
+    """The `━━━ #<id> status: <status> ━━━…` line that opens every memory
+    block, on `show`, `query`, `search` and `review`. The status says whether
+    the review model has checked the memory: `unverified`, `verified` or
+    `flagged`. An archived memory adds `archived` right after it. A memory
+    that reverses or replaces an older one adds `supersedes #<id>` after
+    the status, and the older one `superseded by #<id>`. A search result
+    adds its score last: `━━━ #12 status: verified supersedes #3 score 0.87
+    ━━━…`."""
+    head = f"━━━ #{row['id']} status: {row.get('review_status') or 'unverified'}"
+    if row.get("archived_at"):
+        head += " archived"
+    if row.get("supersedes") is not None:
+        head += f" supersedes #{row['supersedes']}"
+    if row.get("superseded_by") is not None:
+        head += f" superseded by #{row['superseded_by']}"
+    score = row.get("score")
+    if score is not None:
+        head += f" score {score:.2f}"
+    return f"{head} {HBAR}"
+
+
 def _print_meta(row):
     """Print the shared 🕒/👤/🏷️ metadata lines for a memory dict."""
     print(f"🕒 {row['timestamp']}")
@@ -47,13 +76,90 @@ def _print_meta(row):
     print()
     if row.get('tags'):
         print(f"🏷️  {', '.join(row['tags'])}")
+    _print_review(row)
+
+
+def _verdict_head(verdict, rule, duplicate_of):
+    """`reject, rule 2`, or `reject, duplicate of #7` for a repeat, or just
+    `approve`: the verdict part of a review line."""
+    head = verdict
+    if rule is not None:
+        head += f", rule {rule}"
+    if duplicate_of is not None:
+        head += f", duplicate of #{duplicate_of}"
+    return head
+
+
+def _print_suggestion(rewrite, tags):
+    """The suggested text, indented under `suggested:`, and one
+    `suggested tags: a, b` line when the model named any."""
+    if rewrite:
+        print("suggested:")
+        for line in rewrite.splitlines():
+            print(f"    {line}")
+    if tags:
+        print(f"suggested tags: {', '.join(tags)}")
+
+
+def _print_review(row):
+    """One line with the review model's verdict, when the server has one:
+    `review: reject, rule 2: <reason>`. A repeat names the memory it repeats
+    instead of a rule. A rewrite is followed by the suggested text, indented
+    under `suggested:`, and by `suggested tags: a, b` when the model named
+    any. Nothing is applied: the memory stays as it was written. Nothing is
+    printed for a memory that has no review."""
+    review = row.get("review")
+    if not review:
+        return
+    head = _verdict_head(review["verdict"], review.get("rule"), review.get("duplicate_of"))
+    print(f"review: {head}: {review.get('reason', '')}")
+    if review["verdict"] == "rewrite":
+        _print_suggestion(review.get("rewrite"), review.get("tags"))
 
 
 def add_memory(args, client):
     agent = args.agent or get_agent_name()
     tags = _parse_tags_json(args.tags, "--tags") or []
-    mid = client.add(args.content, agent, args.project, tags, args.type)
-    print(f"✓ Memory #{mid} added ({agent})")
+    try:
+        added = client.add_full(args.content, agent, args.project, tags,
+                                args.type, force=args.force)
+    except DuplicateMemory as e:
+        # Nothing was stored. Exit 3 so a script can tell this apart from an error.
+        print(f"✗ Duplicate of memory #{e.existing_id} (score {e.score:.2f}). "
+              f"Use 'memory update {e.existing_id}' or --force.")
+        sys.exit(3)
+    except ReviewRefused as e:
+        # The review model said no, and nothing was stored. The suggestion is
+        # printed the way `show` prints a stored one. Exit 4: 3 is a duplicate.
+        if e.verdict == "improve":
+            # The server's own line: low value, then what is missing.
+            print(f"✗ {e.message or e.explanation}")
+            print("Add what is missing and add it again, skip it, or pass --force "
+                  "to store it as written.")
+            sys.exit(4)
+        print(f"✗ Review: {_verdict_head(e.verdict, e.rule, e.duplicate_of)}: {e.explanation}")
+        if e.verdict == "rewrite":
+            _print_suggestion(e.rewrite, e.tags)
+        if e.verdict == "rewrite" and e.duplicate_of is not None:
+            # A merge: the entry repeats that memory and adds to it, and the
+            # suggestion is the merged text. It belongs on the old memory,
+            # not in a new one; the writer applies it, never the model.
+            print(f"Apply it with 'memory update {e.duplicate_of}' instead of adding.")
+        else:
+            print("Fix the entry, or pass --force to store it as written.")
+        sys.exit(4)
+    print(f"✓ Memory #{added['id']} added ({agent})")
+    # One line per rule the entry breaks. The memory is stored either way.
+    for w in added["warnings"]:
+        print(f"warning: {w}")
+    # One line per tag stored under another name than written.
+    for n in added["notes"]:
+        print(f"note: {n}")
+
+
+# The --archived flag of query, search and review.
+ARCHIVED_HELP = ("Only the archived memories: the ones the review put away (a reject under "
+                 "rule 2 or 4, or the older memory of a merge), hidden otherwise")
 
 
 def _effective_limit(args):
@@ -61,37 +167,81 @@ def _effective_limit(args):
     return 0 if getattr(args, "all", False) else args.limit
 
 
-def query_memories(args, client):
-    rows, total = client.query_with_total(
-        since_days=args.since_days, since=args.since, until=args.until,
-        project=args.project, agent=args.agent, tag=args.tag,
-        mtype=args.type, limit=_effective_limit(args))
-    if not rows:
-        print("No memories found.")
-        return
+def _print_listing(rows, total, noun="memories"):
+    """Print a list of memories the way `query` does: one block per memory
+    with its header line (the id and the review status), its meta lines
+    (the review line included) and its content, then a footer that says how
+    many were shown out of `total`."""
     for row in rows:
-        print(f"\n━━━ #{row['id']} {HBAR}")
+        print(f"\n{_header(row)}")
         _print_meta(row)
         print(f"\n{row['content']}")
     print(f"\n{FOOT}")
     if total > len(rows):
-        print(f"Found {len(rows)} of {total} memories (use --all or --limit to see more)")
+        print(f"Found {len(rows)} of {total} {noun} (use --all or --limit to see more)")
     else:
-        print(f"Found {len(rows)} memories")
+        print(f"Found {len(rows)} {noun}")
+
+
+def query_memories(args, client):
+    rows, total = client.query_with_total(
+        since_days=args.since_days, since=args.since, until=args.until,
+        project=args.project, agent=args.agent, tag=args.tag,
+        mtype=args.type, status=args.status, current=args.current,
+        archived=args.archived, limit=_effective_limit(args))
+    if not rows:
+        print("No memories found.")
+        return
+    _print_listing(rows, total)
+
+
+def review_memories(args, client):
+    """`memory review`: list the memories the review flagged, or with
+    `--status` the memories with that review status. With `--catch-up`
+    (`--missing` is the old name), ask the server to review the unverified
+    memories, oldest first, instead."""
+    if args.catch_up:
+        if args.project or args.verdict or args.status or args.all or args.archived:
+            print("✗ --catch-up goes with --limit only, not with --project, --verdict, "
+                  "--status, --all or --archived.")
+            sys.exit(2)
+        result = client.review_catch_up(limit=args.limit)
+        if result["running"]:
+            print("✓ A catch-up is already running; nothing new scheduled")
+            return
+        tags = f" and {result['tags']} tag reviews" if result.get("tags") else ""
+        print(f"✓ Scheduled {result['scheduled']} reviews{tags}")
+        return
+    rows, total = client.flagged_with_total(
+        project=args.project, verdict=args.verdict, status=args.status,
+        limit=_effective_limit(args), archived=args.archived)
+    noun = f"{args.status} memories" if args.status else "flagged memories"
+    if args.archived:
+        noun = f"archived {noun}"
+    if not rows:
+        print(f"No {noun}.")
+        return
+    _print_listing(rows, total, noun=noun)
 
 
 def search_memories(args, client):
     limit = _effective_limit(args)
     rows = client.search(args.query, project=args.project, agent=args.agent,
-                         since=args.since, tag=args.tag, limit=limit)
+                         since=args.since, tag=args.tag, limit=limit, mode=args.mode,
+                         current=args.current, archived=args.archived)
     if not rows:
         print(f"No memories found for: {args.query}")
         return
     print(f"🔍 Search results for: {args.query}\n")
     for row in rows:
-        print(f"━━━ #{row['id']} {HBAR}")
+        print(_header(row))
         _print_meta(row)
-        print(f"\n{row['snippet']}\n")
+        # Keyword search sends a snippet with the matches marked. Semantic
+        # search has no words to mark, so it sends none: show the content.
+        body = row.get("snippet")
+        if body is None:
+            body = row.get("content", "")
+        print(f"\n{body}\n")
     print(f"{FOOT}")
     if limit and len(rows) >= limit:
         print(f"Found {len(rows)} matches (limit reached; use --all or --limit to see more)")
@@ -100,15 +250,69 @@ def search_memories(args, client):
 
 
 def list_tags(args, client):
+    """`memory tags`: the tags in use, a flagged one marked. With --pending,
+    --apply or --reject, the tag review's proposals instead."""
+    chosen = [f for f in ("pending", "apply", "reject") if getattr(args, f, None) not in (None, False)]
+    if len(chosen) > 1:
+        print("✗ --pending, --apply and --reject go alone, one at a time.")
+        sys.exit(2)
+    if args.pending:
+        return list_tag_proposals(client)
+    if args.apply is not None:
+        return resolve_tag_proposal(client, args.apply, apply=True)
+    if args.reject is not None:
+        return resolve_tag_proposal(client, args.reject, apply=False)
     rows = client.list_tags()
     if not rows:
         print("No tags found.")
         return
     print("🏷️  Tags:\n")
+    flagged = 0
     for t in rows:
-        print(f"  {t['name']:<20} ({t['count']})")
+        mark = "  [flagged]" if t.get("review_status") == "flagged" else ""
+        flagged += bool(mark)
+        print(f"  {t['name']:<20} ({t['count']}){mark}")
         if t.get('description') and t['description'] != t['name']:
             print(f"       ↳ {t['description']}")
+    if flagged:
+        print(f"\n{flagged} flagged: see 'memory tags --pending'")
+
+
+def _proposal_line(p):
+    """What a tag proposal asks for, in a few words."""
+    if p["verdict"] == "merge":
+        return f"merge '{p['tag']}' into '{p['into']}'"
+    if p["verdict"] == "rename":
+        return f"rename '{p['tag']}' to '{p['new_name']}'"
+    return f"drop '{p['tag']}'"
+
+
+def list_tag_proposals(client):
+    """`memory tags --pending`: the proposals that wait, oldest first, one
+    line each with the id to pass to --apply or --reject, and the reason."""
+    rows = client.tag_proposals()
+    if not rows:
+        print("No tag proposals waiting.")
+        return
+    print("🏷️  Tag proposals:\n")
+    for p in rows:
+        print(f"  #{p['id']}  {_proposal_line(p)}")
+        print(f"       ↳ {p['reason']}")
+    print(f"\n{len(rows)} waiting. Apply one with 'memory tags --apply <id>', "
+          "or keep the tag with 'memory tags --reject <id>'.")
+
+
+def resolve_tag_proposal(client, pid, apply):
+    """`memory tags --apply <id>` or `--reject <id>`."""
+    done = client.apply_tag_proposal(pid) if apply else client.reject_tag_proposal(pid)
+    if done is None:
+        print(f"✗ Proposal #{pid} not found")
+        sys.exit(1)
+    p = done["proposal"]
+    if apply:
+        print(f"✓ Applied #{pid}: {_proposal_line(p)}")
+    else:
+        print(f"✓ Rejected #{pid}: '{p['tag']}' stays as it is")
 
 
 def list_projects(args, client):
@@ -121,14 +325,43 @@ def list_projects(args, client):
         print(f"  {p['project']:<20} ({p['count']} memories)")
 
 
+def _print_history(rows):
+    """The memory's review history under its content, oldest first, one
+    `review <date>: <verdict>, rule <n>: <reason>` line per verdict, a
+    rewrite followed by its suggested text and tags the way the review line
+    is. `No reviews yet.` when the model has not checked the memory."""
+    print()
+    if not rows:
+        print("No reviews yet.")
+        return
+    for r in reversed(rows):
+        head = _verdict_head(r["verdict"], r.get("rule"), r.get("duplicate_of"))
+        print(f"review {r['created_at']}: {head}: {r.get('reason', '')}")
+        if r["verdict"] == "rewrite":
+            _print_suggestion(r.get("rewrite"), r.get("tags"))
+
+
 def show_memory(args, client):
     row = client.get(args.id)
     if not row:
         print(f"✗ Memory #{args.id} not found.")
         sys.exit(1)
-    print(f"\n━━━ #{row['id']} {HBAR}")
+    print(f"\n{_header(row)}")
     _print_meta(row)
     print(f"\n{row['content']}")
+    if args.reviews:
+        _print_history(client.reviews(args.id) or [])
+
+
+def restore_memory(args, client):
+    restored = client.restore(args.id)
+    if restored is None:
+        print(f"✗ Memory #{args.id} not found.")
+        sys.exit(1)
+    if restored:
+        print(f"✓ Memory #{args.id} restored")
+    else:
+        print(f"Memory #{args.id} is not archived; nothing to do.")
 
 
 def update_memory(args, client):
@@ -202,6 +435,13 @@ def show_stats(args, client):
     print(f"Last 7 days:       {s['week']}")
     print(f"\nOldest:            {s['oldest'] or 'N/A'}")
     print(f"Newest:            {s['newest'] or 'N/A'}")
+    if s.get("archived"):
+        print(f"\nArchived:          {s['archived']} (not counted above)")
+
+
+def reindex_memories(args, client):
+    done = client.reindex()
+    print(f"✓ Reindexed {done['updated']} memories, {done['tags']} tags")
 
 
 def config_command(args, parser):
@@ -240,7 +480,12 @@ def main():
         "--tags",
         help='JSON array of tag objects, e.g. \'[{"name":"auth","description":"authentication flow"},{"name":"db"}]\'. '
              "description is optional (a new tag with none defaults to its own name).")
-    add_parser.add_argument("--type", help="Memory type (decision, lesson, note, preference)")
+    add_parser.add_argument("--type", help="Memory type (constraint, decision, lesson, note, preference)")
+    add_parser.add_argument("--force", action="store_true",
+                            help="Store even when a near-duplicate exists in the project "
+                                 "(without it, a duplicate is refused with exit code 3), "
+                                 "and even when the server's review model would refuse "
+                                 "the entry (exit code 4)")
     add_parser.set_defaults(func=add_memory)
 
     query_parser = subparsers.add_parser("query", help="Query memories")
@@ -250,22 +495,56 @@ def main():
     query_parser.add_argument("--project", help="Filter by project")
     query_parser.add_argument("--agent", help="Filter by agent")
     query_parser.add_argument("--tag", help="Filter by tag")
-    query_parser.add_argument("--type", help="Filter by type")
+    query_parser.add_argument(
+        "--type", help="Filter by type (constraint, decision, lesson, note, preference)")
+    query_parser.add_argument(
+        "--status", choices=REVIEW_STATUSES,
+        help="Only memories with this review status: unverified (the model has not "
+             "checked it), verified (approved) or flagged (rejected, told to improve, or a "
+             "merge suggested)")
+    query_parser.add_argument(
+        "--current", action="store_true",
+        help="Hide the memories a newer one supersedes (those whose header says "
+             "'superseded by'); by default every memory is shown")
+    query_parser.add_argument("--archived", action="store_true", help=ARCHIVED_HELP)
     query_parser.add_argument("--limit", type=int, help="Limit results (default 100; 0 = all)")
     query_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     query_parser.set_defaults(func=query_memories)
 
-    search_parser = subparsers.add_parser("search", help="Full-text search")
+    search_parser = subparsers.add_parser(
+        "search", help="Search memories by words, by meaning, or both",
+        formatter_class=argparse.RawTextHelpFormatter)
     search_parser.add_argument("query", help="Search query")
+    search_parser.add_argument(
+        "--mode", choices=["keyword", "semantic", "hybrid"], default="keyword",
+        help="How to match (default keyword):\n"
+             "  keyword   matches words\n"
+             "  semantic  matches meaning; needs the embedding model on the server\n"
+             "  hybrid    combines both")
     search_parser.add_argument("--project", help="Filter by project")
     search_parser.add_argument("--agent", help="Filter by agent")
     search_parser.add_argument("--tag", help="Filter by tag")
     search_parser.add_argument("--since", help="Since date (YYYY-MM-DD)")
+    search_parser.add_argument(
+        "--current", action="store_true",
+        help="Hide the memories a newer one supersedes; by default every match is shown")
+    search_parser.add_argument("--archived", action="store_true", help=ARCHIVED_HELP)
     search_parser.add_argument("--limit", type=int, default=20, help="Limit results (default 20; 0 = all)")
     search_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     search_parser.set_defaults(func=search_memories)
 
-    tags_parser = subparsers.add_parser("tags", help="List all tags")
+    tags_parser = subparsers.add_parser(
+        "tags", help="List all tags, or the tag review's proposals",
+        description="List the tags in use, most used first; a tag the review model "
+                    "flagged is marked. The model proposes to merge, rename or drop a "
+                    "tag; --pending lists what waits, --apply does it (no undo), "
+                    "--reject keeps the tag as it is.")
+    tags_parser.add_argument("--pending", action="store_true",
+                             help="List the tag proposals that wait, oldest first")
+    tags_parser.add_argument("--apply", type=int, metavar="ID",
+                             help="Apply proposal ID: merge, rename or delete the tag. No undo")
+    tags_parser.add_argument("--reject", type=int, metavar="ID",
+                             help="Reject proposal ID: the tag stays and is verified")
     tags_parser.set_defaults(func=list_tags)
 
     projects_parser = subparsers.add_parser("projects", help="List all projects")
@@ -276,7 +555,19 @@ def main():
 
     show_parser = subparsers.add_parser("show", help="Show one memory by ID")
     show_parser.add_argument("id", type=int, help="Memory ID")
+    show_parser.add_argument(
+        "--reviews", action="store_true",
+        help="Also print the memory's review history under it, oldest first: every "
+             "verdict the model gave, with its date (the header and the review line "
+             "show only the newest)")
     show_parser.set_defaults(func=show_memory)
+
+    restore_parser = subparsers.add_parser(
+        "restore", help="Bring an archived memory back into view",
+        description="Clear a memory's archive stamp, so it shows in listings and searches "
+                    "again and is not deleted. Its status and reviews stay as they are.")
+    restore_parser.add_argument("id", type=int, help="Memory ID")
+    restore_parser.set_defaults(func=restore_memory)
 
     update_parser = subparsers.add_parser("update", help="Update fields of an existing memory by ID")
     update_parser.add_argument("id", type=int, help="Memory ID")
@@ -284,7 +575,9 @@ def main():
     content_group.add_argument("--content", help="New content (use '-' to read from stdin)")
     content_group.add_argument("--content-file", help="Read new content from file")
     update_parser.add_argument("--project", help="Set project (empty string clears)")
-    update_parser.add_argument("--type", help="Set type (empty string clears)")
+    update_parser.add_argument(
+        "--type", help="Set type (constraint, decision, lesson, note, preference; "
+                        "empty string clears)")
     update_parser.add_argument("--set-tags", help='Replace all tags: JSON array of tag objects, e.g. \'[{"name":"auth"}]\' ("[]" removes all)')
     update_parser.add_argument("--add-tags", help='Add tags (idempotent): JSON array of tag objects, e.g. \'[{"name":"db","description":"the database"}]\'')
     update_parser.add_argument("--remove-tags", help="Remove tags by name (comma-separated)")
@@ -294,6 +587,40 @@ def main():
     delete_parser.add_argument("ids", type=int, nargs="+", help="Memory ID(s) to delete")
     delete_parser.add_argument("--yes", "-y", action="store_true", help="Actually delete (without this, runs as dry-run)")
     delete_parser.set_defaults(func=delete_memory)
+
+    reindex_parser = subparsers.add_parser(
+        "reindex", help="Give every memory a vector from the server's current embedding model")
+    reindex_parser.set_defaults(func=reindex_memories)
+
+    review_parser = subparsers.add_parser(
+        "review",
+        help="List the memories the review model flagged (reject, improve or rewrite), newest first",
+        description="List the memories the review model flagged: those whose verdict is "
+                    "reject, improve or rewrite, newest review first, each with its verdict and "
+                    "reason. With --status, list the memories with that review status "
+                    "instead (--status unverified: the ones the model has not checked "
+                    "yet). With --catch-up, ask the server to review the unverified "
+                    "memories, oldest first (written while the model was off).")
+    review_parser.add_argument("--project", help="Only this project")
+    review_parser.add_argument("--verdict", choices=["reject", "improve", "rewrite"],
+                               help="Only this verdict (default: both)")
+    review_parser.add_argument(
+        "--status", choices=REVIEW_STATUSES,
+        help="List the memories with this review status instead of the flagged ones: "
+             "unverified, verified or flagged")
+    review_parser.add_argument(
+        "--limit", type=int,
+        help="How many to show (default 100; 0 = all). With --catch-up: how many "
+             "memories to review (default 50; 0 = all)")
+    review_parser.add_argument("--archived", action="store_true", help=ARCHIVED_HELP)
+    review_parser.add_argument("--all", action="store_true",
+                               help="Show every flagged memory (same as --limit 0)")
+    review_parser.add_argument(
+        "--catch-up", "--missing", dest="catch_up", action="store_true",
+        help="Do not list; ask the server to review the unverified memories, oldest "
+             "first, one after another. Runs in the background; prints how many were "
+             "scheduled. --missing is the old name for this flag")
+    review_parser.set_defaults(func=review_memories)
 
     config_parser = subparsers.add_parser("config", help="Get/set persistent client settings (api_url, api_token)")
     config_sub = config_parser.add_subparsers(dest="config_action")
@@ -317,7 +644,9 @@ def main():
 
     try:
         args.func(args, ApiClient())
-    except ApiUnreachable as e:
+    except (ApiUnreachable, ApiRefused) as e:
+        # No server, or the server said no and said why: show the message,
+        # never a traceback.
         print(f"✗ {e}", file=sys.stderr)
         sys.exit(1)
 

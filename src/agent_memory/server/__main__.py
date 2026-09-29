@@ -7,6 +7,7 @@ default), so `python -m agent_memory.server` needs no flags. The DB is
 AGENT_MEMORY_DB (a postgresql:// DSN) — back it up before pointing at real data.
 """
 
+import logging
 import sys
 
 from ..config import resolve_api_token, resolve_server_bind
@@ -25,6 +26,12 @@ def main():
     import uvicorn
 
     from .app import create_app
+
+    # uvicorn sets up only its own loggers; the server's lines (the reindex at
+    # startup, the review poll, the model) go through the root logger, which
+    # drops INFO unless it is turned on here. deploy/deploy.sh reads them
+    # from the journal after a restart.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
 
     host, port = resolve_server_bind()
     uvicorn.run(create_app(token=token), host=host, port=port)

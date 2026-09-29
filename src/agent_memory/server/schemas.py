@@ -8,12 +8,14 @@ a new tag's descriptor to its own name).
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from .review import needs_of
 
 # The only allowed memory `type` values. Anything else — a typo, a lazy default like
 # the old "code", a one-off like "feedback"/"reference" — is rejected at the API
 # boundary rather than silently accepted, so the classification stays meaningful.
-ALLOWED_MEMORY_TYPES = {"decision", "lesson", "note", "preference"}
+ALLOWED_MEMORY_TYPES = {"constraint", "decision", "lesson", "note", "preference"}
 
 
 def _validate_memory_type(v: str | None) -> str | None:
@@ -61,6 +63,54 @@ class MemoryIn(BaseModel):
     _validate_type = field_validator("type")(_validate_memory_type)
 
 
+class ReviewOut(BaseModel):
+    """What the review model said about a memory (see server/review.py)."""
+
+    verdict: str
+    rule: int | None = None
+    reason: str = ""
+    rewrite: str | None = None
+    duplicate_of: int | None = None
+    # Tags suggested for the rewrite, from the tags that existed at the time.
+    # Empty unless the verdict is rewrite.
+    tags: list[str] = []
+    # The memory this one reverses or replaces, when the model said so. The
+    # same value as the memory's own `supersedes`.
+    supersedes: int | None = None
+    # What an improve says the entry lacks: reason, clarity, detail or scope.
+    # Not a column: read from the stored reason, `needs <what>: <line>`.
+    needs: str | None = None
+
+    @model_validator(mode="after")
+    def _needs_from_reason(self):
+        if self.needs is None:
+            self.needs = needs_of(self.verdict, self.reason)
+        return self
+
+
+class ReviewEntry(BaseModel):
+    """One verdict in a memory's review history (`GET /memories/{id}/reviews`):
+    the fields of `ReviewOut` without `supersedes`, plus when it was given. The
+    link lives on the memory and follows the newest verdict, so an older
+    entry has none to show."""
+
+    created_at: str
+    verdict: str
+    rule: int | None = None
+    reason: str = ""
+    rewrite: str | None = None
+    duplicate_of: int | None = None
+    tags: list[str] = []
+    # As on `ReviewOut`: read from the reason of an improve.
+    needs: str | None = None
+
+    @model_validator(mode="after")
+    def _needs_from_reason(self):
+        if self.needs is None:
+            self.needs = needs_of(self.verdict, self.reason)
+        return self
+
+
 class MemoryOut(BaseModel):
     id: int
     timestamp: str | None = None
@@ -70,6 +120,32 @@ class MemoryOut(BaseModel):
     type: str | None = None
     tags: list[str] = []
     snippet: str | None = None
+    # Search only: the ts_rank of a keyword hit, the cosine of a semantic hit.
+    # None for rows that come from anything other than a search.
+    score: float | None = None
+    # The model's verdict, once the review has run. None until then, and
+    # always None when review is off.
+    review: ReviewOut | None = None
+    # Whether the model has checked this memory: `unverified` until a verdict
+    # is stored, then `verified` (approve) or `flagged` (reject, improve or
+    # rewrite).
+    review_status: str = "unverified"
+    # The older memory this one reverses or replaces, set from the model's
+    # verdict, never from a request; and the newest memory that supersedes
+    # this one, if any. Both None for a memory that stands on its own.
+    supersedes: int | None = None
+    superseded_by: int | None = None
+    # When the review archived this memory, or None while it is live. Only a
+    # read by id, or a listing with `archived=true`, returns an archived one.
+    archived_at: str | None = None
+
+
+class RestoreResult(BaseModel):
+    """What `POST /memories/{id}/restore` answers: `restored` is False when
+    the memory was not archived, so nothing changed."""
+
+    id: int
+    restored: bool
 
 
 class UpdateIn(BaseModel):
@@ -87,6 +163,11 @@ class UpdateIn(BaseModel):
 
 class AddResult(BaseModel):
     id: int
+    # Rule names the entry breaks (see server/checks.py). Empty when it is clean.
+    warnings: list[str] = []
+    # One line per tag stored under another name than written, e.g.
+    # `tag "comms" stored as "communication"`. Free text, unlike `warnings`.
+    notes: list[str] = []
 
 
 class UpdateResult(BaseModel):
@@ -102,6 +183,27 @@ class TagCount(BaseModel):
     name: str
     count: int
     description: str = ""
+    # Whether the review model has checked the tag: `unverified`, `verified`
+    # (kept) or `flagged` (a proposal waits on `GET /tags/flagged`).
+    review_status: str = "unverified"
+
+
+class TagProposal(BaseModel):
+    """A tag verdict other than keep (see server/tag_review.py): merge into
+    `into`, rename to `new_name`, or drop. `resolved` is None while it waits
+    for a person, then `applied` or `rejected`. `tag` is the tag's name when
+    the model saw it; `tag_id` is None once the tag is gone."""
+
+    id: int
+    tag: str
+    tag_id: int | None = None
+    verdict: str
+    into: str | None = None
+    new_name: str | None = None
+    reason: str = ""
+    model: str = ""
+    created_at: str
+    resolved: str | None = None
 
 
 class ProjectCount(BaseModel):

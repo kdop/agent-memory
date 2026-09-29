@@ -5,7 +5,7 @@
 # Python/Node and then calls this.
 #
 # Three stages, each must pass before the next starts:
-#   1. Python test suite (pytest) — unit + cross-surface (cli/api/mcp) + migration.
+#   1. Python test suite (pytest) — repository, routes, the three surfaces, migrations.
 #   2. Frontend build (npm run build) — the dashboard must compile cleanly.
 #   3. Live end-to-end smoke — spawns the REAL `python -m agent_memory.server`
 #      subprocess (reading env vars exactly like production) serving the just-built
@@ -117,5 +117,42 @@ status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
 DASH_TITLE=$(curl -s "$BASE/app" | grep -o '<title>[^<]*</title>' || true)
 [ -n "$DASH_TITLE" ] && ok "dashboard HTML served ($DASH_TITLE)" || fail "no <title> found in /app response"
+
+# The review and search-mode views (issue #68): the API routes answer, and the
+# built bundle carries the labels the screen shows for them.
+AUTH=(-H "Authorization: Bearer $TOKEN")
+[ "$(status "${AUTH[@]}" "$BASE/memories?status=flagged&current=true")" = "200" ] \
+  && ok "/memories?status=flagged&current=true -> 200" \
+  || fail "/memories should accept status= and current="
+
+[ "$(status "${AUTH[@]}" "$BASE/memories/flagged")" = "200" ] \
+  && ok "/memories/flagged -> 200" || fail "/memories/flagged should be 200"
+
+# The suite runs with the embedding model off, so hybrid falls back to keyword
+# and says so in the header the dashboard reads.
+FALLBACK=$(curl -s -D - -o /dev/null "${AUTH[@]}" "$BASE/memories/search?q=test&mode=hybrid" \
+  | tr -d '\r' | grep -i '^x-search-fallback:' || true)
+[ -n "$FALLBACK" ] && ok "/memories/search?mode=hybrid sends X-Search-Fallback ($FALLBACK)" \
+  || fail "hybrid search without a model should send X-Search-Fallback"
+
+curl -s "$BASE/health" | grep -q '"review_model"' \
+  && ok "/health reports review_model" || fail "/health should report review_model"
+curl -s "$BASE/health" | grep -q '"catch_up"' \
+  && ok "/health reports catch_up" || fail "/health should report catch_up"
+
+# The built JS: index.html names the one bundle; every new label must be in it.
+BUNDLE_PATH=$(curl -s "$BASE/app" | grep -o 'src="[^"]*\.js"' | head -1 | sed 's/^src="//; s/"$//')
+[ -n "$BUNDLE_PATH" ] || fail "no script bundle named in /app"
+BUNDLE=$(curl -s "$BASE$BUNDLE_PATH")
+for label in "keyword" "semantic" "hybrid" "Flagged" "Catch up" "Review again" \
+             "Current only" "unverified" "verified" "flagged" "supersedes #" "superseded by #" \
+             "review model:" "X-Search-Fallback" "/memories/flagged" "/admin/review" \
+             "Reviewing memories:" "remaining" "catch_up"; do
+  if printf '%s' "$BUNDLE" | grep -qF -- "$label"; then
+    ok "bundle has \"$label\""
+  else
+    fail "bundle ($BUNDLE_PATH) lacks \"$label\""
+  fi
+done
 
 log "All checks passed ✓"

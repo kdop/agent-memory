@@ -75,10 +75,13 @@ export const api = {
    * @param {string} [p.project]
    * @param {string} [p.agent]
    * @param {string} [p.type]
+   * @param {'unverified'|'verified'|'flagged'} [p.status]  one review status
+   * @param {boolean} [p.current]   true hides the memories a newer one supersedes
+   * @param {boolean} [p.archived]  true lists only the archived memories (hidden otherwise)
    * @param {number} [p.since_days]
    * @param {string} [p.since]
    * @param {string} [p.until]
-   * @param {'date_desc'|'date_asc'} [p.order]
+   * @param {'date_desc'|'date_asc'|'archived_desc'} [p.order]
    * @param {number} [p.limit=100]
    * @param {number} [p.offset=0]
    * @returns {Promise<{items: object[], total: number}>} total from X-Total-Count
@@ -88,6 +91,43 @@ export const api = {
     const res = await request('GET', '/memories', {
       params: { ...rest, tag }, // `tag` array → repeatable ?tag=a&tag=b
     })
+    const total = Number(res.headers.get('X-Total-Count') ?? res.data.length)
+    return { items: res.data, total }
+  },
+
+  /**
+   * GET /memories/search — ranked search in one of three modes.
+   * @param {object} p
+   * @param {string} p.q
+   * @param {'keyword'|'semantic'|'hybrid'} [p.mode='keyword']
+   * @param {string} [p.project]
+   * @param {string} [p.agent]
+   * @param {string} [p.since]
+   * @param {string} [p.tag]        one tag (the route takes a single one)
+   * @param {boolean} [p.current]
+   * @param {boolean} [p.archived]  true searches only the archived memories
+   * @param {number} [p.limit=20]
+   * @returns {Promise<{items: object[], fallback: string|null}>}
+   *   `fallback` is the X-Search-Fallback header: the mode the server used
+   *   instead of the one asked for (hybrid without a model → "keyword").
+   */
+  async searchMemories(p = {}) {
+    const res = await request('GET', '/memories/search', { params: p })
+    return { items: res.data, fallback: res.headers.get('X-Search-Fallback') || null }
+  },
+
+  /**
+   * GET /memories/flagged — the memories the review flagged, newest review first.
+   * @param {object} p
+   * @param {string} [p.project]
+   * @param {'reject'|'improve'|'rewrite'} [p.verdict]  only that verdict
+   * @param {'unverified'|'verified'|'flagged'} [p.status]  that status instead
+   * @param {boolean} [p.archived]  true lists only the archived memories
+   * @param {number} [p.limit=100]  0 = all
+   * @returns {Promise<{items: object[], total: number}>} total from X-Total-Count
+   */
+  async flaggedMemories(p = {}) {
+    const res = await request('GET', '/memories/flagged', { params: p })
     const total = Number(res.headers.get('X-Total-Count') ?? res.data.length)
     return { items: res.data, total }
   },
@@ -107,6 +147,13 @@ export const api = {
   /** GET /memories/{id} → MemoryOut (throws 404). */
   async getMemory(id) {
     const res = await request('GET', `/memories/${id}`)
+    return res.data
+  },
+
+  /** POST /memories/{id}/restore → { id, restored }. `restored` is false when
+   *  the memory was not archived; 404 when absent. */
+  async restoreMemory(id) {
+    const res = await request('POST', `/memories/${id}/restore`)
     return res.data
   },
 
@@ -150,11 +197,55 @@ export const api = {
     return res.data
   },
 
+  /** GET /tags/flagged → the tag review's proposals that wait: [{ id, tag,
+   *  verdict: merge | rename | drop, into, new_name, reason, model, created_at }]. */
+  async tagProposals() {
+    const res = await request('GET', '/tags/flagged')
+    return res.data
+  },
+
+  /** POST /tags/proposals/{id}/apply → { proposal, result }. No undo. 409 when it
+   *  is resolved already or its tag is gone. */
+  async applyTagProposal(id) {
+    const res = await request('POST', `/tags/proposals/${id}/apply`)
+    return res.data
+  },
+
+  /** POST /tags/proposals/{id}/reject → { proposal }. The tag stays and is verified. */
+  async rejectTagProposal(id) {
+    const res = await request('POST', `/tags/proposals/${id}/reject`)
+    return res.data
+  },
+
   /** POST /tags/{name}/detach → { detached }. Omit ids / [] = all memories. */
   async detachTag(name, memoryIds) {
     const res = await request('POST', `/tags/${encodeURIComponent(name)}/detach`, {
       body: { memory_ids: memoryIds ?? [] },
     })
+    return res.data
+  },
+
+  // ---- Review ------------------------------------------------------------
+
+  /**
+   * POST /admin/review — review the unverified memories, oldest first.
+   * → { scheduled: n, tags: m } or { scheduled: 0, tags: 0, running: true } when one is already
+   * running. 503 when the server has no review model.
+   */
+  async reviewCatchUp(limit) {
+    const res = await request('POST', '/admin/review', {
+      params: limit !== undefined ? { limit } : {},
+    })
+    return res.data
+  },
+
+  /**
+   * POST /admin/review/{id} — review one memory now, replacing any earlier
+   * verdict. → ReviewOut. 503 without a model, 404 when absent, 502 when the
+   * model gave no verdict.
+   */
+  async reviewMemory(id) {
+    const res = await request('POST', `/admin/review/${id}`)
     return res.data
   },
 
@@ -178,7 +269,11 @@ export const api = {
     return res.data
   },
 
-  /** GET /health → { status } (no auth). */
+  /** GET /health → { status, review_model?, catch_up?, archive_days? } (no auth).
+   *  `review_model` is `reachable`, `unreachable` or `off` when the server reports
+   *  it; `catch_up` is { kind: 'memories' | 'tags', total, done } while a catch-up
+   *  runs, else null;
+   *  `archive_days` is how long an archived memory is kept (0: for good). */
   async health() {
     const res = await request('GET', '/health', { auth: false })
     return res.data

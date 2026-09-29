@@ -26,7 +26,7 @@ project that logs to this system.
 
 1. **The DB is live and shared.** Back up (`pg_dump`) before any schema change or
    destructive op; verify row counts before/after. Never experiment against it — point
-   at a scratch database.
+   at a temporary copy (`scripts/db_copy.sh`).
 2. **Never hardcode the DB target.** The **server** resolves it from `AGENT_MEMORY_DB`
    (a `postgresql://` DSN, normalized to asyncpg); the **client** never sees a DB — it
    resolves `AGENT_MEMORY_API` → config `api_url` → local default. Keep those resolution
