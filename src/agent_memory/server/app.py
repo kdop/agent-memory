@@ -206,9 +206,13 @@ async def _review_in_order(app: FastAPI, ids: list[int]) -> None:
     in the order given. Each verdict is stored (and the memory's status set)
     before the next memory is read, so a memory verified here is already
     part of the reference set for the ones after it. A review that fails is
-    one log line, and the rest still run."""
+    one log line, and the rest still run. Each review that ends, with a
+    verdict or without, counts as done on `app.state.catch_up`."""
     for mid in ids:
         await _review_in_background(app, mid)
+        progress = getattr(app.state, "catch_up", None)
+        if progress is not None:
+            progress["done"] += 1
 
 
 def _catch_up_lock(app: FastAPI) -> asyncio.Lock:
@@ -229,7 +233,9 @@ async def _begin_catch_up(app: FastAPI, session: AsyncSession,
     releases it. Returns an empty list, with the lock released, when there
     is nothing to review, and None, without touching anything, when a
     catch-up is already running. The lock is never waited for: a caller
-    that finds it taken does nothing."""
+    that finds it taken does nothing. With ids to review, it also sets
+    `app.state.catch_up` to `{"total": n, "done": 0}`, which `GET /health`
+    shows until `_run_catch_up` ends."""
     lock = _catch_up_lock(app)
     if lock.locked():
         return None
@@ -243,19 +249,22 @@ async def _begin_catch_up(app: FastAPI, session: AsyncSession,
         raise
     if not ids:
         lock.release()
+    else:
+        app.state.catch_up = {"total": len(ids), "done": 0}
     return ids
 
 
 async def _run_catch_up(app: FastAPI, ids: list[int]) -> None:
     """One catch-up, under the lock `_begin_catch_up` took: review `ids` in
-    order, then release the lock, whatever happened. One log line at the
-    start, with the count, and one at the end."""
+    order, then clear `app.state.catch_up` and release the lock, whatever
+    happened. One log line at the start, with the count, and one at the end."""
     log.info("catch-up started: %d unverified memories to review", len(ids))
     done = False
     try:
         await _review_in_order(app, ids)
         done = True
     finally:
+        app.state.catch_up = None
         _catch_up_lock(app).release()
         log.info("catch-up %s", "finished" if done else "stopped")
 
@@ -386,9 +395,12 @@ def create_app(
     async def health(request: Request):
         """Open to all. `review_model` is what the poll's last check found:
         `reachable`, `unreachable`, or `off` when the review or the poll
-        is off (and for an app whose lifespan never ran)."""
+        is off (and for an app whose lifespan never ran). `catch_up` is
+        `{"total": n, "done": k}` while a catch-up runs, else null; the
+        dashboard draws its progress bar from it."""
         return {"status": "ok",
-                "review_model": getattr(request.app.state, "review_model", "off")}
+                "review_model": getattr(request.app.state, "review_model", "off"),
+                "catch_up": getattr(request.app.state, "catch_up", None)}
 
     @app.post("/memories", response_model=AddResult, status_code=201, dependencies=guard)
     async def add_memory(body: MemoryIn, request: Request, background: BackgroundTasks,

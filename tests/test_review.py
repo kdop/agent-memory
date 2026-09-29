@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -1289,6 +1290,64 @@ async def test_without_a_review_model_the_review_routes_answer_503():
     assert await statuses() == [(1, "unverified")]
 
 
+class Stepped(FakeReviewer):
+    """A fake whose reviews each wait on their own `threading.Event`, so a
+    test lets them end one at a time. `entered[i]` is set when review i
+    starts; `gates[i]` lets it end."""
+
+    def __init__(self, n, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.entered = [threading.Event() for _ in range(n)]
+        self.gates = [threading.Event() for _ in range(n)]
+
+    def review(self, memory, neighbours, tags=()):
+        i = len(self.calls)
+        self.entered[i].set()
+        if not self.gates[i].wait(timeout=10):
+            raise TimeoutError("the test never let the review end")
+        return super().review(memory, neighbours, tags)
+
+
+async def _progress(a):
+    return (await a.client.get("/health")).json()["catch_up"]
+
+
+async def test_health_shows_the_catch_up_progress_while_it_runs():
+    await add_rows("one", "two", "three")
+    fake = Stepped(3, APPROVE)
+    async with App(reviewer=fake) as a:
+        assert await _progress(a) is None
+        tick = asyncio.create_task(_review_tick(a.app))
+        for i in range(3):
+            await asyncio.to_thread(fake.entered[i].wait, 10)
+            assert await _progress(a) == {"total": 3, "done": i}
+            fake.gates[i].set()
+        await tick
+        assert await _progress(a) is None
+    assert [s for _, s in await statuses()] == ["verified"] * 3
+
+
+async def test_a_failing_review_counts_as_done_in_the_progress(caplog):
+    await add_rows("one", "two", "three")
+    fake = Stepped(3, APPROVE, verdicts={"one": RuntimeError("model blew up"), "two": None})
+    with caplog.at_level(logging.WARNING, logger="agent_memory.server.app"):
+        async with App(reviewer=fake) as a:
+            # Started by the route this time; its task runs inside the call.
+            post = asyncio.create_task(a.client.post("/admin/review"))
+            await asyncio.to_thread(fake.entered[0].wait, 10)
+            assert await _progress(a) == {"total": 3, "done": 0}
+            fake.gates[0].set()                 # raises
+            await asyncio.to_thread(fake.entered[1].wait, 10)
+            assert await _progress(a) == {"total": 3, "done": 1}
+            fake.gates[1].set()                 # no verdict
+            await asyncio.to_thread(fake.entered[2].wait, 10)
+            assert await _progress(a) == {"total": 3, "done": 2}
+            fake.gates[2].set()
+            assert (await post).json() == {"scheduled": 3}
+            assert await _progress(a) is None
+    assert [s for _, s in await statuses()] == ["unverified", "unverified", "verified"]
+
+
 # ── the poll ─────────────────────────────────────────────────────────────────
 def _poll_task():
     """The poll task the lifespan started, or None."""
@@ -1308,8 +1367,8 @@ async def test_a_tick_checks_the_model_and_catches_up_when_it_answers(caplog):
         async with App(reviewer=fake) as a:
             await _review_tick(a.app)
             assert (fake.checks, fake.calls) == (1, [])
-            assert (await a.client.get("/health")).json() == {"status": "ok",
-                                                              "review_model": "unreachable"}
+            assert (await a.client.get("/health")).json() == {
+                "status": "ok", "review_model": "unreachable", "catch_up": None}
             assert await statuses() == [(one, "unverified"), (two, "unverified")]
 
             fake.up = True
@@ -1422,8 +1481,8 @@ async def test_the_lifespan_runs_the_poll_and_health_follows_it(caplog):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=a.app),
                                              base_url="http://testserver") as c:
                     await until(lambda: fake.checks >= 1)
-                    assert (await c.get("/health")).json() == {"status": "ok",
-                                                               "review_model": "unreachable"}
+                    assert (await c.get("/health")).json() == {
+                        "status": "ok", "review_model": "unreachable", "catch_up": None}
                     fake.up = True
                     await until(lambda: len(fake.calls) == 2)
                     await until(lambda: not _catch_up_lock(a.app).locked())
@@ -1478,7 +1537,8 @@ async def test_no_loop_when_the_review_or_the_poll_is_off(monkeypatch, reviewer,
     assert getattr(reviewer, "checks", 0) == checks
     # Without a lifespan at all, health says off too.
     async with App(reviewer=FakeReviewer()) as a:
-        assert (await a.client.get("/health")).json() == {"status": "ok", "review_model": "off"}
+        assert (await a.client.get("/health")).json() == {"status": "ok", "review_model": "off",
+                                                          "catch_up": None}
 
 
 # ── the real model, when there is one ────────────────────────────────────────

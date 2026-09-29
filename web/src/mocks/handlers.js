@@ -78,8 +78,11 @@ function mockVerdict(m) {
            duplicate_of: null, tags: m.tags.slice(0, 2), supersedes: null }
 }
 
-// Mock review model state and the one-at-a-time catch-up flag.
-let catchUpRunning = false
+// The running catch-up's progress, as GET /health reports it: { total, done },
+// or null when none runs. Only one runs at a time.
+let catchUp = null
+// How long the mock takes per memory, so the progress bar can be seen.
+const MOCK_REVIEW_MS = 2000
 
 /** Sorted TagCount[] with live counts. */
 function tagCounts() {
@@ -92,7 +95,8 @@ function tagCounts() {
 
 export const handlers = [
   // ---- GET /health (no auth) ----
-  http.get('/health', () => HttpResponse.json({ status: 'ok', review_model: 'reachable' })),
+  http.get('/health', () =>
+    HttpResponse.json({ status: 'ok', review_model: 'reachable', catch_up: catchUp })),
 
   // ---- GET /memories/bulk (before /memories/:id) ----
   http.get('/memories/bulk', ({ request }) => {
@@ -170,23 +174,25 @@ export const handlers = [
   http.post('/admin/review', ({ request }) => {
     const denied = unauthorized(request)
     if (denied) return denied
-    if (catchUpRunning) return HttpResponse.json({ scheduled: 0, running: true })
+    if (catchUp) return HttpResponse.json({ scheduled: 0, running: true })
     const sp = new URL(request.url).searchParams
     const limit = Math.max(0, parseInt(sp.get('limit') ?? '50', 10) || 0)
     const pending = db.memories.filter((m) => (m.review_status ?? 'unverified') === 'unverified')
     const ids = (limit ? pending.slice(0, limit) : pending).map((m) => m.id)
     if (ids.length) {
-      catchUpRunning = true
+      catchUp = { total: ids.length, done: 0 }
       // Verdicts land one by one, a little later, as on the real server.
-      setTimeout(() => {
-        for (const id of ids) {
-          const m = db.memories.find((x) => x.id === id)
-          if (!m) continue
+      const step = () => {
+        const m = db.memories.find((x) => x.id === ids[catchUp.done])
+        if (m) {
           m.review = mockVerdict(m)
           m.review_status = m.review.verdict === 'approve' ? 'verified' : 'flagged'
         }
-        catchUpRunning = false
-      }, 1500)
+        catchUp = { total: ids.length, done: catchUp.done + 1 }
+        if (catchUp.done < catchUp.total) setTimeout(step, MOCK_REVIEW_MS)
+        else catchUp = null
+      }
+      setTimeout(step, MOCK_REVIEW_MS)
     }
     return HttpResponse.json({ scheduled: ids.length })
   }),

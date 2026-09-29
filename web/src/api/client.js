@@ -239,8 +239,9 @@ export const api = {
     return res.data
   },
 
-  /** GET /health → { status, review_model? } (no auth). `review_model` is
-   *  `reachable`, `unreachable` or `off` when the server reports it. */
+  /** GET /health → { status, review_model?, catch_up? } (no auth). `review_model`
+   *  is `reachable`, `unreachable` or `off` when the server reports it; `catch_up`
+   *  is { total, done } while a catch-up runs, else null. */
   async health() {
     const res = await request('GET', '/health', { auth: false })
     return res.data

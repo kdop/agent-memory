@@ -139,7 +139,9 @@ unverified memories exist, it runs the same catch-up as `memory review --catch-u
 memories written while the model was off get their verdict without anyone running a
 command. One catch-up runs at a time: `memory review --catch-up` while one is running
 says so and schedules nothing. `GET /health` reports what the last check found as
-`review_model`: `reachable`, `unreachable`, or `off` when the review or the poll is off.
+`review_model`: `reachable`, `unreachable`, or `off` when the review or the poll is off;
+while a catch-up runs it also reports `catch_up: {"total": n, "done": k}` (else null),
+which the dashboard shows as a progress bar.
 Editing a memory's text with `memory update` sets it back to `unverified` and drops its
 verdict and its `supersedes` link, so the next catch-up reads the new text; a change of
 tags or project alone keeps both.
