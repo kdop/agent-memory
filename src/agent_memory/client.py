@@ -19,6 +19,10 @@ from .config import resolve_api_token, resolve_api_url
 # (server/review.py, STATUSES): the client half cannot import the server, so
 # the list is copied here and a test checks the two match.
 REVIEW_STATUSES = ("unverified", "verified", "flagged")
+# The verdicts that flag a memory (every one but approve): the values the
+# flagged listing takes as `verdict`. A copy of the server's, since the client
+# cannot import it; a test checks the two match.
+FLAGGED_VERDICTS = ("reject", "improve", "rewrite")
 
 
 class ApiUnreachable(RuntimeError):
@@ -39,26 +43,31 @@ class DuplicateMemory(RuntimeError):
 
 class ReviewRefused(RuntimeError):
     """The server refused an add (HTTP 422) because its review model said
-    the entry breaks the rules: `verdict` is "reject" or "rewrite", `rule`
-    the number of the rule it breaks (None for a repeat, then `duplicate_of`
-    names the memory it repeats), `explanation` the model's one sentence.
-    For a rewrite, `rewrite` is the suggested text and `tags` the suggested
-    tag names (None and [] for a reject). A rewrite with `duplicate_of` set
-    is a merge: the entry repeats that memory and adds to it, and `rewrite`
-    is the merged text, to apply to that memory with `update` instead of
-    adding. Nothing was stored. Pass `force=True` to store the entry as
-    written."""
+    the entry breaks the rules or falls short of them: `verdict` is "reject",
+    "improve" or "rewrite", `rule` the number of the rule it breaks (None for
+    a repeat, then `duplicate_of` names the memory it repeats),
+    `explanation` the model's one sentence. For an improve, `needs` is what
+    the entry lacks (reason, clarity, detail or scope) and `message` the
+    line to show: "Low value memory, retry with more context or skip",
+    then what is missing. A rewrite is always a merge: the entry repeats the
+    memory `duplicate_of` and adds to it, `rewrite` is the merged text and
+    `tags` the suggested tag names, to apply to that memory with `update`
+    instead of adding. Nothing was stored. Pass `force=True` to store the
+    entry as written."""
 
     def __init__(self, verdict: str, rule: int | None, explanation: str,
                  rewrite: str | None = None, tags: list[str] | None = None,
-                 duplicate_of: int | None = None):
+                 duplicate_of: int | None = None, needs: str | None = None,
+                 message: str | None = None):
         self.verdict = verdict
         self.rule = rule
         self.explanation = explanation
         self.rewrite = rewrite
         self.tags = list(tags or [])
         self.duplicate_of = duplicate_of
-        super().__init__(f"review: {verdict}: {explanation}")
+        self.needs = needs
+        self.message = message
+        super().__init__(message or f"review: {verdict}: {explanation}")
 
 
 class ApiRefused(RuntimeError):
@@ -105,7 +114,8 @@ def _review_refusal_from(detail: str) -> ReviewRefused | None:
     if not isinstance(d, dict) or d.get("reason") != "review":
         return None
     return ReviewRefused(str(d["verdict"]), d.get("rule"), str(d.get("explanation") or ""),
-                         d.get("rewrite"), d.get("tags"), d.get("duplicate_of"))
+                         d.get("rewrite"), d.get("tags"), d.get("duplicate_of"),
+                         d.get("needs"), d.get("message"))
 
 
 class ApiClient:
@@ -280,7 +290,7 @@ class ApiClient:
 
     def flagged(self, project=None, verdict=None, status=None, limit=None):
         """The memories the review flagged, newest review first, each with its
-        `review`. `verdict` is "reject" or "rewrite"; None lists both. With
+        `review`. `verdict` is "reject", "improve" or "rewrite"; None lists all three. With
         `status` ("unverified", "verified" or "flagged") the memories with
         that review status instead. `limit=0` returns everything; None uses
         the server default."""
