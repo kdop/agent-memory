@@ -592,7 +592,8 @@ have the same length.
   `{"scheduled": 0, "running": true}`), so one catch-up runs at a time. A check that
   raises counts as unreachable, any other error in a tick is one log line, and the
   loop goes on; the log also says when the loop starts, when a catch-up starts (with
-  the count) and when it ends. `GET /health` returns `review_model`. `update` with new
+  the count) and when it ends. `GET /health` returns `review_model`, and `catch_up`:
+  `{"total": n, "done": k}` (on `app.state.catch_up`) while a catch-up runs, else null. `update` with new
   content sets the memory back to `unverified` and deletes its review rows and its
   `supersedes` link (every verdict was about the old text), so the next catch-up reads
   it again; a change of tags, project or type alone keeps all three.

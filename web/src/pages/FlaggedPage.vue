@@ -4,16 +4,18 @@
 // memories view, fed with its own rows. A verdict filter narrows the list;
 // "Catch up" asks the server to review the unverified memories
 // (POST /admin/review) and shows what it scheduled.
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { useAuthStore } from '@/stores/auth'
 import { useTagsStore } from '@/stores/tags'
+import { useHealthStore } from '@/stores/health'
 import { api } from '@/api/client'
 import MemoriesTable from '@/components/MemoriesTable.vue'
 
 const $q = useQuasar()
 const auth = useAuthStore()
 const tags = useTagsStore()
+const health = useHealthStore()
 
 const VERDICT_OPTIONS = [
   { label: 'all verdicts', value: '' },
@@ -55,6 +57,7 @@ async function runCatchUp() {
   catchingUp.value = true
   try {
     const r = await api.reviewCatchUp()
+    health.check() // show the progress bar now, not at the next slow poll
     if (r.running) {
       catchUp.value = 'running'
       $q.notify({ type: 'info', message: 'A catch-up is already running.' })
@@ -85,6 +88,9 @@ onMounted(() => {
   fetch()
   if (!tags.list.length) tags.fetch() // the edit dialog's tag picker
 })
+
+// A catch-up just ended: reload the list once to show the new verdicts.
+watch(() => health.ended, () => { if (auth.isAuthed) fetch() })
 </script>
 
 <template>

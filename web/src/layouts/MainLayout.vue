@@ -2,13 +2,14 @@
 // App shell: top bar + two-pane body (main content | right rail) + login gate.
 // Pages and components render their UI into the router-view page and the named right-rail slot.
 // The health banner under the top bar shows the review model's state when the
-// server reports one (`review_model` on GET /health).
-import { onMounted, ref } from 'vue'
+// server reports one (`review_model` on GET /health). While a catch-up runs,
+// a thin progress bar under the top bar shows how far it got (`catch_up`).
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import { useAuthStore } from '@/stores/auth'
 import { useMemoriesStore } from '@/stores/memories'
-import { api } from '@/api/client'
+import { useHealthStore } from '@/stores/health'
 import Landing from '@/components/Landing.vue'
 
 const auth = useAuthStore()
@@ -16,9 +17,10 @@ const memories = useMemoriesStore()
 const route = useRoute()
 const router = useRouter()
 const $q = useQuasar()
+const health = useHealthStore()
 
 // `reachable`, `unreachable`, `off`, or null when the server does not say.
-const reviewModel = ref(null)
+const reviewModel = computed(() => health.reviewModel)
 const REVIEW_MODEL_COLOR = { reachable: 'positive', unreachable: 'warning', off: 'grey-7' }
 const REVIEW_MODEL_TEXT = {
   reachable: 'Review model: reachable. New memories get a verdict.',
@@ -26,14 +28,16 @@ const REVIEW_MODEL_TEXT = {
   off: 'Review model: off. Memories are not reviewed.',
 }
 
-onMounted(async () => {
-  try {
-    const h = await api.health()
-    reviewModel.value = typeof h?.review_model === 'string' ? h.review_model : null
-  } catch {
-    reviewModel.value = null
-  }
+// The catch-up's progress, for the bar: "10 of 100 done, 90 remaining".
+const catchUp = computed(() => health.catchUp)
+const catchUpText = computed(() => {
+  const c = catchUp.value
+  if (!c) return ''
+  return `Reviewing memories: ${c.done} of ${c.total} done, ${c.total - c.done} remaining`
 })
+
+onMounted(() => health.check())
+onUnmounted(() => health.stop())
 
 function toggleDark() {
   $q.dark.toggle()
@@ -104,6 +108,12 @@ function onLogout() {
 
     <!-- ===================== Main content ===================== -->
     <q-page-container>
+      <!-- Catch-up progress: only while a catch-up runs. -->
+      <div v-if="auth.isAuthed && catchUp" class="q-px-md q-pt-sm" data-test="catch-up-progress">
+        <div class="text-caption">{{ catchUpText }}</div>
+        <q-linear-progress :value="catchUp.total ? catchUp.done / catchUp.total : 0"
+                           color="primary" rounded size="6px" />
+      </div>
       <!-- Health banner: only when the review model is on but not answering. -->
       <q-banner v-if="auth.isAuthed && reviewModel === 'unreachable'" dense
                 class="bg-orange-1 text-orange-9 q-mx-md q-mt-md rounded-borders">

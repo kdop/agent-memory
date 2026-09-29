@@ -163,9 +163,14 @@ the model gave no verdict; **`503`** without a model. The dashboard then re-read
 - `GET /projects` → `[{ "project", "count" }]`
 - `GET /agents` → `[{ "agent", "count" }]`
 - `GET /stats` → `{ "total", "agents", "projects", "tags", "today", "week", "oldest", "newest" }`
-- `GET /health` → `{ "status": "ok", "review_model": "reachable" }` (no auth).
-  `review_model` is `reachable`, `unreachable`, or `off` when the review or its poll is
-  off; the dashboard shows it in the top bar when present.
+- `GET /health` → `{ "status": "ok", "review_model": "reachable", "catch_up": null }` (no
+  auth). `review_model` is `reachable`, `unreachable`, or `off` when the review or its poll
+  is off; the dashboard shows it in the top bar when present. `catch_up` is
+  `{ "total": 100, "done": 10 }` while a catch-up runs (`done` counts the memories whose
+  review ended, with a verdict or without), else `null`. The dashboard polls `/health`
+  every 3 s while a catch-up runs and every 30 s otherwise, shows a progress bar under
+  the top bar ("Reviewing memories: 10 of 100 done, 90 remaining") while `catch_up` is
+  not null, and reloads the current list once when it ends.
 
 ## Mock seed (for `web/src/mocks/`)
 
@@ -176,4 +181,6 @@ exercise pagination (3 pages), search, AND-filtering, and tag merge. Most memori
 `verified`, some `flagged` (a mix of `reject` and `rewrite` verdicts), the newest
 `unverified`; a few carry `supersedes` / `superseded_by` links. The mock also serves the
 search modes (with a `score`), `/memories/flagged` and the two review routes, and
-`GET /health` reports `review_model: reachable`.
+`GET /health` reports `review_model: reachable`. The mock catch-up takes 2 s per memory
+and reports its progress as `catch_up`, so the progress bar can be seen: press
+**Catch up** on the Flagged page.

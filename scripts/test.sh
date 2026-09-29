@@ -137,6 +137,8 @@ FALLBACK=$(curl -s -D - -o /dev/null "${AUTH[@]}" "$BASE/memories/search?q=test&
 
 curl -s "$BASE/health" | grep -q '"review_model"' \
   && ok "/health reports review_model" || fail "/health should report review_model"
+curl -s "$BASE/health" | grep -q '"catch_up"' \
+  && ok "/health reports catch_up" || fail "/health should report catch_up"
 
 # The built JS: index.html names the one bundle; every new label must be in it.
 BUNDLE_PATH=$(curl -s "$BASE/app" | grep -o 'src="[^"]*\.js"' | head -1 | sed 's/^src="//; s/"$//')
@@ -144,7 +146,8 @@ BUNDLE_PATH=$(curl -s "$BASE/app" | grep -o 'src="[^"]*\.js"' | head -1 | sed 's
 BUNDLE=$(curl -s "$BASE$BUNDLE_PATH")
 for label in "keyword" "semantic" "hybrid" "Flagged" "Catch up" "Review again" \
              "Current only" "unverified" "verified" "flagged" "supersedes #" "superseded by #" \
-             "review model:" "X-Search-Fallback" "/memories/flagged" "/admin/review"; do
+             "review model:" "X-Search-Fallback" "/memories/flagged" "/admin/review" \
+             "Reviewing memories:" "remaining" "catch_up"; do
   if printf '%s' "$BUNDLE" | grep -qF -- "$label"; then
     ok "bundle has \"$label\""
   else

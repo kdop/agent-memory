@@ -34,7 +34,8 @@ async def test_health_is_open_and_every_other_route_needs_the_token():
         async with bare:
             health = await bare.get("/health")
             assert health.status_code == 200
-            assert health.json() == {"status": "ok", "review_model": "off"}
+            assert health.json() == {"status": "ok", "review_model": "off",
+                                     "catch_up": None}
             for method, path in (("GET", "/stats"), ("GET", "/memories"), ("GET", "/tags"),
                                  ("POST", "/memories"),
                                  ("POST", "/admin/reindex"), ("GET", "/memories/1/reviews"),

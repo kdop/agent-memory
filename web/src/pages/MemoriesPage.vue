@@ -5,10 +5,11 @@
 //   #active-filters     — promoted tag chips (filled by TagFilter via teleport)
 //   MemoriesTable       — paginated table + create/edit/delete
 //   TagFilter           — right rail (teleported), promotes chips up here
-import { onMounted } from 'vue'
+import { onMounted, watch } from 'vue'
 import { useMemoriesStore } from '@/stores/memories'
 import { useTagsStore } from '@/stores/tags'
 import { useAuthStore } from '@/stores/auth'
+import { useHealthStore } from '@/stores/health'
 import { useUrlSync } from '@/composables/useUrlSync'
 import SearchBar from '@/components/SearchBar.vue'
 import MemoriesTable from '@/components/MemoriesTable.vue'
@@ -27,6 +28,10 @@ onMounted(async () => {
   if (!auth.isAuthed) return // login gate will trigger the fetch after auth
   await Promise.all([memories.fetch(), tags.fetch()])
 })
+
+// A catch-up just ended: reload the list once to show the new verdicts.
+const health = useHealthStore()
+watch(() => health.ended, () => { if (auth.isAuthed) memories.fetch() })
 </script>
 
 <template>
