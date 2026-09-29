@@ -13,7 +13,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
@@ -29,6 +29,7 @@ from .embedding import Embedder, make_embedder
 from .review import Reviewer, Verdict, make_reviewer
 from .review import review_mode as review_mode_from_env
 from .review import review_poll as review_poll_from_env
+from .tag_review import TagReviewer, make_tag_reviewer
 from .schemas import (
     AddResult,
     AgentCount,
@@ -43,6 +44,7 @@ from .schemas import (
     TagDetachIn,
     TagMergeIn,
     TagPatch,
+    TagProposal,
     UpdateIn,
     UpdateResult,
 )
@@ -233,9 +235,60 @@ async def _review_in_order(app: FastAPI, ids: list[int]) -> None:
     verdict or without, counts as done on `app.state.catch_up`."""
     for mid in ids:
         await _review_in_background(app, mid)
-        progress = getattr(app.state, "catch_up", None)
-        if progress is not None:
-            progress["done"] += 1
+        _count_done(app)
+
+
+def _count_done(app: FastAPI) -> None:
+    progress = getattr(app.state, "catch_up", None)
+    if progress is not None:
+        progress["done"] += 1
+
+
+def get_tag_reviewer(app: FastAPI) -> TagReviewer | None:
+    """The tag reviewer on `app.state`: the memory review's model, asked
+    about tags (tag_review.py). None when the review has no real model."""
+    return getattr(app.state, "tag_reviewer", None)
+
+
+async def _review_tag(app: FastAPI, tid: int) -> dict | None:
+    """Ask the model about tag `tid` and act on the answer, the way
+    `_review_memory` does for a memory: read in one session, ask the model
+    in a thread with no session open, write in a second one. Returns what
+    `repo.set_tag_review` did, or None when the model gave no verdict (the
+    tag stays unverified) or the tag is gone."""
+    reviewer = get_tag_reviewer(app)
+    sessionmaker = app.state.sessionmaker
+    embedder = getattr(app.state, "embedder", None)
+    async with sessionmaker() as session, session.begin():
+        found = await repo.tag_review_input(session, tid)
+    if found is None:
+        return None
+    tag, memories, neighbours = found
+    verdict = await asyncio.to_thread(reviewer.review, tag, memories, neighbours)
+    if verdict is None:
+        return None
+    async with sessionmaker() as session, session.begin():
+        try:
+            done = await repo.set_tag_review(session, tid, verdict, reviewer.model_name,
+                                             embedder=embedder)
+        except LookupError:
+            return None  # deleted while the model thought
+    if done["merged_into"]:
+        log.info("tag %r merged into %r: %s", done["tag"], done["merged_into"], verdict.reason)
+    return done
+
+
+async def _review_tags_in_order(app: FastAPI, ids: list[int]) -> None:
+    """The tag half of the catch-up: review the tags `ids` one after
+    another, oldest first, so a tag verified here is on the list the later
+    ones are compared with. A review that fails is one log line, and the
+    rest still run; each one that ends counts as done."""
+    for tid in ids:
+        try:
+            await _review_tag(app, tid)
+        except Exception as e:
+            log.warning("review of tag #%d failed: %s: %s", tid, type(e).__name__, e)
+        _count_done(app)
 
 
 def _catch_up_lock(app: FastAPI) -> asyncio.Lock:
@@ -248,17 +301,36 @@ def _catch_up_lock(app: FastAPI) -> asyncio.Lock:
     return lock
 
 
+class CatchUp(NamedTuple):
+    """What one catch-up reviews: the unverified memories, then the
+    unverified tags, each oldest first."""
+
+    memories: list[int]
+    tags: list[int]
+
+    def __bool__(self) -> bool:
+        return bool(self.memories or self.tags)
+
+
+def _progress(kind: str, total: int) -> dict:
+    """The `catch_up` value `GET /health` shows: which half runs (`memories`
+    or `tags`), how many it has and how many are done."""
+    return {"kind": kind, "total": total, "done": 0}
+
+
 async def _begin_catch_up(app: FastAPI, session: AsyncSession,
-                          limit: int | None = None) -> list[int] | None:
+                          limit: int | None = None) -> CatchUp | None:
     """Start a catch-up: take the lock and pick the unverified memories,
-    oldest first, up to `limit` (None or 0 means all). Returns their ids
-    with the lock held; the caller hands them to `_run_catch_up`, which
-    releases it. Returns an empty list, with the lock released, when there
-    is nothing to review, and None, without touching anything, when a
-    catch-up is already running. The lock is never waited for: a caller
-    that finds it taken does nothing. With ids to review, it also sets
-    `app.state.catch_up` to `{"total": n, "done": 0}`, which `GET /health`
-    shows until `_run_catch_up` ends."""
+    oldest first, up to `limit` (None or 0 means all), and, when the server
+    has a tag reviewer, the unverified tags the same way. Returns them as a
+    `CatchUp` with the lock held; the caller hands it to `_run_catch_up`,
+    which releases it. Returns an empty `CatchUp` (false), with the lock
+    released, when there is nothing to review, and None, without touching
+    anything, when a catch-up is already running. The lock is never waited
+    for: a caller that finds it taken does nothing. With something to
+    review, it also sets `app.state.catch_up` to `{"kind", "total",
+    "done"}` for the first half, which `GET /health` shows until
+    `_run_catch_up` ends."""
     lock = _catch_up_lock(app)
     if lock.locked():
         return None
@@ -267,24 +339,38 @@ async def _begin_catch_up(app: FastAPI, session: AsyncSession,
     await lock.acquire()
     try:
         ids = await repo.unverified_ids(session, limit=limit)
+        tags = (await repo.unverified_tag_ids(session, limit=limit)
+                if get_tag_reviewer(app) is not None else [])
     except BaseException:
         lock.release()
         raise
-    if not ids:
+    plan = CatchUp(ids, tags)
+    if not plan:
         lock.release()
+    elif ids:
+        app.state.catch_up = _progress("memories", len(ids))
     else:
-        app.state.catch_up = {"total": len(ids), "done": 0}
-    return ids
+        app.state.catch_up = _progress("tags", len(tags))
+    return plan
 
 
-async def _run_catch_up(app: FastAPI, ids: list[int]) -> None:
-    """One catch-up, under the lock `_begin_catch_up` took: review `ids` in
-    order, then clear `app.state.catch_up` and release the lock, whatever
-    happened. One log line at the start, with the count, and one at the end."""
-    log.info("catch-up started: %d unverified memories to review", len(ids))
+async def _run_catch_up(app: FastAPI, plan: CatchUp) -> None:
+    """One catch-up, under the lock `_begin_catch_up` took: review the
+    memories in order, then the tags, then clear `app.state.catch_up` and
+    release the lock, whatever happened. One log line at the start, with
+    the counts, and one at the end."""
+    if plan.tags:
+        log.info("catch-up started: %d unverified memories and %d unverified tags to review",
+                 len(plan.memories), len(plan.tags))
+    else:
+        log.info("catch-up started: %d unverified memories to review", len(plan.memories))
     done = False
     try:
-        await _review_in_order(app, ids)
+        if plan.memories:
+            await _review_in_order(app, plan.memories)
+        if plan.tags:
+            app.state.catch_up = _progress("tags", len(plan.tags))
+            await _review_tags_in_order(app, plan.tags)
         done = True
     finally:
         app.state.catch_up = None
@@ -329,9 +415,9 @@ async def _review_tick(app: FastAPI) -> None:
     if not up:
         return
     async with app.state.sessionmaker() as session, session.begin():
-        ids = await _begin_catch_up(app, session)
-    if ids:
-        await _run_catch_up(app, ids)
+        plan = await _begin_catch_up(app, session)
+    if plan:
+        await _run_catch_up(app, plan)
 
 
 async def _review_poll(app: FastAPI, interval: float) -> None:
@@ -370,6 +456,7 @@ def create_app(
     review_mode: str | None = None,
     review_poll: float | None = None,
     archive_days: float | None = None,
+    tag_reviewer: TagReviewer | None = None,
 ) -> FastAPI:
     """Build the app. In production (`sessionmaker` omitted) the lifespan builds a
     pooled engine from AGENT_MEMORY_DB and disposes it on shutdown; tests inject a
@@ -390,7 +477,10 @@ def create_app(
     `reachable` or `unreachable`; `GET /health` reports it). Each tick of
     the poll also deletes the memories archived more than `archive_days`
     days ago (or, when it is omitted, AGENT_MEMORY_ARCHIVE_DAYS, default 30;
-    0 or less keeps them for good)."""
+    0 or less keeps them for good). `app.state.tag_reviewer` asks the same
+    model about tags in the catch-up: `tag_reviewer` when given, else
+    `make_tag_reviewer(reviewer)` (None unless the reviewer is a real
+    Ollama one)."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -404,6 +494,8 @@ def create_app(
         # start and an app built for tests stays cheap.
         app.state.embedder = embedder if embedder is not None else make_embedder()
         app.state.reviewer = reviewer if reviewer is not None else make_reviewer()
+        app.state.tag_reviewer = (tag_reviewer if tag_reviewer is not None
+                                  else make_tag_reviewer(app.state.reviewer))
         wanted = review_mode if review_mode is not None else review_mode_from_env()
         app.state.review_mode = _mode_for(app.state.reviewer, wanted)
         if app.state.embedder.model_name is not None:
@@ -437,6 +529,8 @@ def create_app(
     if reviewer is not None:
         app.state.reviewer = reviewer
         app.state.review_mode = _mode_for(reviewer, review_mode)
+        app.state.tag_reviewer = (tag_reviewer if tag_reviewer is not None
+                                  else make_tag_reviewer(reviewer))
     guard = [Depends(require_token)]
 
     @app.get("/health")
@@ -444,7 +538,8 @@ def create_app(
         """Open to all. `review_model` is what the poll's last check found:
         `reachable`, `unreachable`, or `off` when the review or the poll
         is off (and for an app whose lifespan never ran). `catch_up` is
-        `{"total": n, "done": k}` while a catch-up runs, else null; the
+        `{"kind": "memories" | "tags", "total": n, "done": k}` while a
+        catch-up runs (memories first, then tags), else null; the
         dashboard draws its progress bar from it. `archive_days` is how long
         an archived memory is kept before it is deleted (0: for good); the
         dashboard counts the days left from it."""
@@ -662,6 +757,40 @@ def create_app(
     async def list_tags(session: AsyncSession = SessionDep):
         return await repo.list_tags(session)
 
+    @app.get("/tags/flagged", response_model=list[TagProposal], dependencies=guard)
+    async def flagged_tags(session: AsyncSession = SessionDep):
+        """The tag proposals that wait for a person, oldest first: a merge the
+        server did not apply on its own, a rename or a drop, each with the
+        model's reason. Apply one with `POST /tags/proposals/{id}/apply`, turn
+        it down with `.../reject`."""
+        return await repo.tag_proposals(session)
+
+    @app.post("/tags/proposals/{pid}/apply", dependencies=guard)
+    async def apply_tag_proposal(pid: int, session: AsyncSession = SessionDep,
+                                 embedder: Embedder | None = EmbedderDep):
+        """Do what proposal `pid` says: merge, rename or delete the tag. No
+        undo. 404 when there is no such proposal; 409 when it is resolved
+        already, or its tag, or the tag to merge into, is gone."""
+        try:
+            result = await repo.apply_tag_proposal(session, pid, embedder=embedder)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Proposal #{pid} not found")
+        return result
+
+    @app.post("/tags/proposals/{pid}/reject", dependencies=guard)
+    async def reject_tag_proposal(pid: int, session: AsyncSession = SessionDep):
+        """Turn proposal `pid` down: the tag stays as it is and is verified.
+        404 when there is no such proposal; 409 when it is resolved already."""
+        try:
+            result = await repo.reject_tag_proposal(session, pid)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Proposal #{pid} not found")
+        return result
+
     @app.patch("/tags/{name}", dependencies=guard)
     async def patch_tag(name: str, body: TagPatch, session: AsyncSession = SessionDep,
                         embedder: Embedder | None = EmbedderDep):
@@ -725,24 +854,26 @@ def create_app(
                               reviewer: Reviewer | None = ReviewerDep,
                               limit: int = Query(default=50, ge=0, description="0 = no limit")):
         """The catch-up: review the unverified memories, oldest first, up to
-        `limit`. This is how memories written while the model was off get
-        their verdict later; the poll runs the same catch-up on its own when
-        it finds the model back. The reviews run one after another, in that
-        order, in one background task after this response, so each verdict
-        is stored before the next memory is compared; one that fails is a
-        log line, as after an add, and the rest still run. Returns how many
-        were scheduled; `{"scheduled": 0, "running": true}` when a catch-up
-        (this route's or the poll's) is already running, since only one runs
-        at a time. 503 when the server has no review model."""
+        `limit`, and then, when the server has a tag reviewer, the unverified
+        tags the same way. This is how memories written while the model was
+        off get their verdict later; the poll runs the same catch-up on its
+        own when it finds the model back. The reviews run one after another,
+        in that order, in one background task after this response, so each
+        verdict is stored before the next memory is compared; one that fails
+        is a log line, as after an add, and the rest still run. Returns how
+        many were scheduled, as `{"scheduled": memories, "tags": tags}`;
+        `{"scheduled": 0, "tags": 0, "running": true}` when a catch-up (this
+        route's or the poll's) is already running, since only one runs at a
+        time. 503 when the server has no review model."""
         if not _has_model(reviewer):
             reason = getattr(reviewer, "reason", "the server has no review model")
             raise HTTPException(status_code=503, detail=f"Cannot review: {reason}")
-        ids = await _begin_catch_up(request.app, session, limit=limit)
-        if ids is None:
-            return {"scheduled": 0, "running": True}
-        if ids:
-            background.add_task(_run_catch_up, request.app, ids)
-        return {"scheduled": len(ids)}
+        plan = await _begin_catch_up(request.app, session, limit=limit)
+        if plan is None:
+            return {"scheduled": 0, "tags": 0, "running": True}
+        if plan:
+            background.add_task(_run_catch_up, request.app, plan)
+        return {"scheduled": len(plan.memories), "tags": len(plan.tags)}
 
     @app.post("/admin/review/{mid}", response_model=ReviewOut, dependencies=guard)
     async def review_memory(mid: int, request: Request,

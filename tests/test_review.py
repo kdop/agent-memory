@@ -724,7 +724,7 @@ async def test_new_content_starts_over_and_other_changes_keep_the_review():
         assert len(fake.calls) == calls
 
         fake.verdict = APPROVE
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 1}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 1, "tags": 0}
         assert fake.calls[-1][0]["content"] == "other words"
         assert (await a.get(mid))["review_status"] == "verified"
 
@@ -1219,13 +1219,13 @@ async def test_the_catch_up_reviews_the_unverified_oldest_first_in_one_task(monk
     fake = FakeReviewer(APPROVE)
     async with App(reviewer=fake) as app:
         resp = await app.client.post("/admin/review", params={"limit": 2})
-        assert resp.status_code == 200 and resp.json() == {"scheduled": 2}
+        assert resp.status_code == 200 and resp.json() == {"scheduled": 2, "tags": 0}
         assert fake.ids == [c, a]
         assert (await app.client.post("/admin/review", params={"limit": 0})).json() == {
-            "scheduled": 3}
+            "scheduled": 3, "tags": 0}
         assert fake.ids == [c, a, e, b, d]
         # Nothing left: no task at all.
-        assert (await app.client.post("/admin/review")).json() == {"scheduled": 0}
+        assert (await app.client.post("/admin/review")).json() == {"scheduled": 0, "tags": 0}
     assert seen == [[c, a], [e, b, d]]
     assert await statuses() == [(mid, "verified") for mid in ids] + [(reviewed, "flagged")]
 
@@ -1239,7 +1239,7 @@ async def test_the_catch_up_limit_defaults_to_50(monkeypatch):
 
     monkeypatch.setattr(repo, "unverified_ids", unverified_ids)
     async with App(reviewer=FakeReviewer()) as a:
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 0}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 0, "tags": 0}
         assert (await a.client.post("/admin/review", params={"limit": -1})).status_code == 422
     assert asked == [50]
 
@@ -1252,7 +1252,7 @@ async def test_the_catch_up_verifies_each_memory_before_the_next_is_compared():
         await set_age(mid, minutes)
     fake = FakeReviewer(APPROVE)
     async with App(reviewer=fake) as a:
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 3}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 3, "tags": 0}
     assert fake.ids == [other, first, second]
     neighbours = [[(n["id"], n["review_status"]) for n in call[1]] for call in fake.calls]
     assert neighbours == [[], [(other, "verified")],
@@ -1266,14 +1266,14 @@ async def test_a_failing_review_in_the_catch_up_does_not_stop_the_rest(caplog):
                                            "three": REJECT, "four": None})
     with caplog.at_level(logging.WARNING, logger="agent_memory.server.app"):
         async with App(reviewer=fake) as a:
-            assert (await a.client.post("/admin/review")).json() == {"scheduled": 4}
+            assert (await a.client.post("/admin/review")).json() == {"scheduled": 4, "tags": 0}
     assert await statuses() == [(one, "verified"), (two, "unverified"), (three, "flagged"),
                                 (four, "unverified")]
     assert _messages(caplog) == [f"review of memory #{two} failed: RuntimeError: model blew up"]
     # The two without a verdict are still unverified: the next catch-up takes them.
     fake.verdicts.clear()
     async with App(reviewer=fake) as a:
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 2}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 2, "tags": 0}
     assert fake.ids[-2:] == [two, four]
 
 
@@ -1283,7 +1283,7 @@ async def test_the_catch_up_stores_the_link():
     await set_age(new, 10)
     fake = FakeReviewer(APPROVE, verdicts={NEW: supersede(old)})
     async with App(reviewer=fake) as a:
-        assert (await a.client.post("/admin/review")).json() == {"scheduled": 2}
+        assert (await a.client.post("/admin/review")).json() == {"scheduled": 2, "tags": 0}
         assert (await a.get(new))["supersedes"] == old
     # The old one was verified first, so it was the neighbour the new one saw.
     assert [n["id"] for n in fake.calls[1][1]] == [old]
@@ -1328,7 +1328,7 @@ async def test_health_shows_the_catch_up_progress_while_it_runs():
         tick = asyncio.create_task(_review_tick(a.app))
         for i in range(3):
             await asyncio.to_thread(fake.entered[i].wait, 10)
-            assert await _progress(a) == {"total": 3, "done": i}
+            assert await _progress(a) == {"kind": "memories", "total": 3, "done": i}
             fake.gates[i].set()
         await tick
         assert await _progress(a) is None
@@ -1343,15 +1343,15 @@ async def test_a_failing_review_counts_as_done_in_the_progress(caplog):
             # Started by the route this time; its task runs inside the call.
             post = asyncio.create_task(a.client.post("/admin/review"))
             await asyncio.to_thread(fake.entered[0].wait, 10)
-            assert await _progress(a) == {"total": 3, "done": 0}
+            assert await _progress(a) == {"kind": "memories", "total": 3, "done": 0}
             fake.gates[0].set()                 # raises
             await asyncio.to_thread(fake.entered[1].wait, 10)
-            assert await _progress(a) == {"total": 3, "done": 1}
+            assert await _progress(a) == {"kind": "memories", "total": 3, "done": 1}
             fake.gates[1].set()                 # no verdict
             await asyncio.to_thread(fake.entered[2].wait, 10)
-            assert await _progress(a) == {"total": 3, "done": 2}
+            assert await _progress(a) == {"kind": "memories", "total": 3, "done": 2}
             fake.gates[2].set()
-            assert (await post).json() == {"scheduled": 3}
+            assert (await post).json() == {"scheduled": 3, "tags": 0}
             assert await _progress(a) is None
     assert [s for _, s in await statuses()] == ["unverified", "unverified", "verified"]
 
@@ -1442,7 +1442,7 @@ async def test_one_catch_up_at_a_time_whoever_started_it(caplog):
             await asyncio.to_thread(fake.started.wait, 10)
             assert _catch_up_lock(a.app).locked()
             resp = await a.client.post("/admin/review")
-            assert resp.json() == {"scheduled": 0, "running": True}
+            assert resp.json() == {"scheduled": 0, "tags": 0, "running": True}
             assert len(fake.calls) == 1
             fake.release.set()
             await tick
@@ -1456,10 +1456,10 @@ async def test_one_catch_up_at_a_time_whoever_started_it(caplog):
             await asyncio.to_thread(fake.started.wait, 10)
             await _review_tick(a.app)
             assert fake.checks == 1 and len(fake.calls) == 1
-            assert (await a.client.post("/admin/review")).json() == {"scheduled": 0,
+            assert (await a.client.post("/admin/review")).json() == {"scheduled": 0, "tags": 0,
                                                                      "running": True}
             fake.release.set()
-            assert (await post).json() == {"scheduled": 1}
+            assert (await post).json() == {"scheduled": 1, "tags": 0}
             assert fake.ids == [three] and not _catch_up_lock(a.app).locked()
     assert _messages(caplog).count("catch-up started: 2 unverified memories to review") == 1
 

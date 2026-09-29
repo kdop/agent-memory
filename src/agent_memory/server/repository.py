@@ -18,8 +18,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
 from .embedding import Embedder, cosine
-from .models import Memory, MemoryReview, MemoryTag, Tag
-from .review import NEIGHBOUR_COUNT, STATUSES, TAG_COUNT, UNVERIFIED, VERIFIED, Verdict, status_for
+from .models import Memory, MemoryReview, MemoryTag, Tag, TagReview
+from .review import (
+    FLAGGED,
+    NEIGHBOUR_COUNT,
+    STATUSES,
+    TAG_COUNT,
+    UNVERIFIED,
+    VERIFIED,
+    Verdict,
+    status_for,
+)
+from . import tag_review as tr
 
 # ts_headline markers match the old snippet() output so clients render identically.
 _HEADLINE = "StartSel=→ , StopSel= ←, MaxWords=32, MinWords=1, ShortWord=0, HighlightAll=FALSE"
@@ -571,15 +581,18 @@ async def delete(session, ids) -> None:
 
 
 async def list_tags(session) -> list[dict]:
+    """The tags in use by a live memory, most used first, each with its
+    count, description and review status."""
     count = func.count(Memory.id)
     stmt = (
-        select(Tag.name, count.label("count"), Tag.description)
+        select(Tag.name, count.label("count"), Tag.description, Tag.review_status)
         .join(Tag.memories)
         .where(_archived_cond())
-        .group_by(Tag.id, Tag.name, Tag.description)
+        .group_by(Tag.id, Tag.name, Tag.description, Tag.review_status)
         .order_by(count.desc(), Tag.name)
     )
-    return [{"name": n, "count": c, "description": d} for n, c, d in await session.execute(stmt)]
+    return [{"name": n, "count": c, "description": d, "review_status": st}
+            for n, c, d, st in await session.execute(stmt)]
 
 
 async def list_projects(session) -> list[dict]:
@@ -1120,3 +1133,208 @@ async def reindex(session, embedder: Embedder | None, batch: int = 64) -> dict:
     memories = await fill(Memory, lambda m: m.content)
     tags = await fill(Tag, _tag_text)
     return {"updated": memories, "tags": tags}
+
+
+# ---- tag review: the model's verdict on a tag -------------------------------
+async def unverified_tag_ids(session, *, limit=None) -> list[int]:
+    """The ids of the unverified tags, oldest first (tags have no date, so
+    by id): the order the catch-up reviews them in, after the memories.
+    `limit` of 0 or None means all."""
+    stmt = select(Tag.id).where(Tag.review_status == UNVERIFIED).order_by(Tag.id.asc())
+    if limit:
+        stmt = stmt.limit(int(limit))
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def _live_tag_counts(session, tag_ids=None) -> dict[int, int]:
+    """How many live memories use each tag, as `{tag id: count}`; a tag no
+    live memory uses is missing."""
+    stmt = (select(MemoryTag.tag_id, func.count())
+            .join(Memory, Memory.id == MemoryTag.memory_id)
+            .where(_archived_cond())
+            .group_by(MemoryTag.tag_id))
+    if tag_ids is not None:
+        stmt = stmt.where(MemoryTag.tag_id.in_(list(tag_ids)))
+    return dict((await session.execute(stmt)).all())
+
+
+async def tag_review_input(session, tag_id: int) -> tuple[dict, list[dict], list[dict]] | None:
+    """What the tag reviewer gets for tag `tag_id`, as `(tag, memories,
+    neighbours)`, or None when there is no such tag.
+
+    `tag` has its id, name, description and `count`, the live memories that
+    use it. `memories` are `tag_review.MEMORY_COUNT` of them, newest first
+    (project, type, content). `neighbours` are up to
+    `tag_review.NEIGHBOUR_COUNT` verified tags, the tag itself left out:
+    with a vector, the closest to the tag's own by cosine (only vectors from
+    the same model), best first; without one, the most used. As with the
+    memories, only verified tags serve as reference."""
+    tag = await session.get(Tag, tag_id)
+    if tag is None:
+        return None
+    counts = await _live_tag_counts(session)
+    rows = (await session.execute(
+        select(Memory.project, Memory.type, Memory.content)
+        .join(MemoryTag, MemoryTag.memory_id == Memory.id)
+        .where(MemoryTag.tag_id == tag_id, _archived_cond())
+        .order_by(Memory.timestamp.desc(), Memory.id.desc())
+        .limit(tr.MEMORY_COUNT))).all()
+    memories = [{"project": p, "type": t, "content": c} for p, t, c in rows]
+    others = (await session.execute(
+        select(Tag).where(Tag.review_status == VERIFIED, Tag.id != tag_id))).scalars().all()
+    if tag.embedding is not None:
+        mine = list(tag.embedding)
+        scored = [(cosine(mine, list(o.embedding)), o) for o in others
+                  if o.embedding is not None and o.embedding_model == tag.embedding_model]
+        scored.sort(key=lambda pair: (-pair[0], pair[1].name))
+        picked = [(o, score) for score, o in scored]
+    else:
+        ranked = sorted(others, key=lambda o: (-counts.get(o.id, 0), o.name))
+        picked = [(o, None) for o in ranked]
+    neighbours = [{"name": o.name, "description": o.description,
+                   "count": counts.get(o.id, 0), "score": score}
+                  for o, score in picked[:tr.NEIGHBOUR_COUNT]]
+    me = {"id": tag.id, "name": tag.name, "description": tag.description,
+          "count": counts.get(tag.id, 0)}
+    return me, memories, neighbours
+
+
+def _names_match(a: str, b: str) -> bool:
+    """Whether two tag names are one after the name cleanup: the same clean
+    name, or one is the plural or singular of the other."""
+    ca, cb = clean_tag_name(a), clean_tag_name(b)
+    return ca == cb or cb in _plural_forms(ca) or ca in _plural_forms(cb)
+
+
+def same_tag(tag: Tag, other: Tag) -> bool:
+    """The second check a merge needs before the server applies it on its
+    own: the names match after the cleanup, or both tags have a vector from
+    the same model and those score `tag_review.MERGE_THRESHOLD` or more."""
+    if _names_match(tag.name, other.name):
+        return True
+    if (tag.embedding is None or other.embedding is None
+            or tag.embedding_model != other.embedding_model):
+        return False
+    return cosine(list(tag.embedding), list(other.embedding)) >= tr.MERGE_THRESHOLD
+
+
+def _dump_proposal(r: TagReview) -> dict:
+    return {"id": r.id, "tag": r.tag_name, "tag_id": r.tag_id, "verdict": r.verdict,
+            "into": r.into, "new_name": r.new_name, "reason": r.reason, "model": r.model,
+            "created_at": r.created_at.isoformat(sep=" ", timespec="seconds"),
+            "resolved": r.resolved}
+
+
+async def set_tag_review(session, tag_id: int, verdict, model: str,
+                         embedder: Embedder | None = None) -> dict:
+    """Act on the model's `verdict` (a `tag_review.TagVerdict`) for tag
+    `tag_id` and say what was done, as `{"tag", "verdict", "status",
+    "merged_into", "proposal"}`.
+
+    keep: the tag is verified; nothing else is stored. merge: when the tag
+    to merge into exists and `same_tag` agrees, the merge is applied at once
+    with `merge_tags` (the tag goes, its memories move to the other one)
+    and a row is stored as `applied`, so the change leaves a trace. Every
+    other merge, and every rename or drop, flags the tag and stores the
+    proposal for a person (`proposal` is its id). Raises `LookupError` when
+    there is no such tag."""
+    tag = await session.get(Tag, tag_id)
+    if tag is None:
+        raise LookupError(f"Tag #{tag_id} not found")
+    out = {"tag": tag.name, "verdict": verdict.verdict, "status": None,
+           "merged_into": None, "proposal": None}
+    if verdict.verdict == tr.KEEP:
+        tag.review_status = VERIFIED
+        out["status"] = VERIFIED
+        await session.flush()
+        return out
+    target = await _find_tag(session, verdict.into) if verdict.verdict == tr.MERGE else None
+    auto = target is not None and target.id != tag.id and same_tag(tag, target)
+    row = TagReview(tag_id=tag.id, tag_name=tag.name, verdict=verdict.verdict,
+                    into=verdict.into, new_name=verdict.new_name, reason=verdict.reason,
+                    model=model, created_at=datetime.now(timezone.utc),
+                    resolved=tr.APPLIED if auto else None)
+    session.add(row)
+    await session.flush()
+    out["proposal"] = row.id
+    if auto:
+        await merge_tags(session, [tag.name], target.name, embedder=embedder)
+        row.tag_id = None  # the tag is gone; the database cleared it too
+        out["merged_into"] = target.name
+    else:
+        tag.review_status = FLAGGED
+        out["status"] = FLAGGED
+        await session.flush()
+    return out
+
+
+async def tag_proposals(session, *, pending=True) -> list[dict]:
+    """The stored tag verdicts, oldest first. With `pending` (the default)
+    only those that wait for a person: not resolved, and the tag still
+    there."""
+    stmt = select(TagReview).order_by(TagReview.created_at.asc(), TagReview.id.asc())
+    if pending:
+        stmt = stmt.where(TagReview.resolved.is_(None), TagReview.tag_id.is_not(None))
+    return [_dump_proposal(r) for r in (await session.execute(stmt)).scalars().all()]
+
+
+async def _open_proposal(session, pid: int) -> tuple[TagReview, Tag | None] | None:
+    """The proposal `pid` and its tag, or None when there is no such
+    proposal. Raises `ValueError` when it is already resolved."""
+    row = await session.get(TagReview, pid)
+    if row is None:
+        return None
+    if row.resolved is not None:
+        raise ValueError(f"Proposal #{pid} is already {row.resolved}")
+    tag = await session.get(Tag, row.tag_id) if row.tag_id is not None else None
+    return row, tag
+
+
+async def apply_tag_proposal(session, pid: int, embedder: Embedder | None = None) -> dict | None:
+    """Do what proposal `pid` says: merge the tag into `into` (`merge_tags`),
+    rename it to `new_name` (`patch_tag`; a name that is taken merges into
+    that tag, and the tag that is left is verified), or delete it
+    (`delete_tag`). Mark the proposal `applied` and return
+    `{"proposal": <the row>, "result": <what the tag route would return>}`.
+    None when there is no such proposal; `ValueError` when it is already
+    resolved, its tag is gone, or the tag to merge into is gone. No undo."""
+    found = await _open_proposal(session, pid)
+    if found is None:
+        return None
+    row, tag = found
+    if tag is None:
+        raise ValueError(f"Proposal #{pid}: the tag '{row.tag_name}' no longer exists")
+    if row.verdict == tr.MERGE:
+        target = await _find_tag(session, row.into or "")
+        if target is None:
+            raise ValueError(f"Proposal #{pid}: the tag '{row.into}' to merge into no longer exists")
+        result = await merge_tags(session, [tag.name], target.name, embedder=embedder)
+        row.tag_id = None
+    elif row.verdict == tr.RENAME:
+        new_name = clean_tag_name(row.new_name or "") or (row.new_name or "").strip()
+        result = await patch_tag(session, tag.name, new_name=new_name, embedder=embedder)
+        kept = await _find_tag(session, result["name"])
+        kept.review_status = VERIFIED
+        if kept.id != row.tag_id:  # the name was taken: merged into that tag
+            row.tag_id = None
+    else:
+        result = await delete_tag(session, tag.name)
+        row.tag_id = None
+    row.resolved = tr.APPLIED
+    await session.flush()
+    return {"proposal": _dump_proposal(row), "result": result}
+
+
+async def reject_tag_proposal(session, pid: int) -> dict | None:
+    """Turn proposal `pid` down: mark it `rejected` and verify its tag, which
+    a person has now chosen to keep as it is. Returns the row; None when
+    there is no such proposal; `ValueError` when it is already resolved."""
+    found = await _open_proposal(session, pid)
+    if found is None:
+        return None
+    row, tag = found
+    row.resolved = tr.REJECTED
+    if tag is not None:
+        tag.review_status = VERIFIED
+    await session.flush()
+    return {"proposal": _dump_proposal(row)}

@@ -144,8 +144,9 @@ memories written while the model was off get their verdict without anyone runnin
 command. One catch-up runs at a time: `memory review --catch-up` while one is running
 says so and schedules nothing. `GET /health` reports what the last check found as
 `review_model`: `reachable`, `unreachable`, or `off` when the review or the poll is off;
-while a catch-up runs it also reports `catch_up: {"total": n, "done": k}` (else null),
-which the dashboard shows as a progress bar.
+while a catch-up runs it also reports `catch_up: {"kind": "memories", "total": n,
+"done": k}` (else null; `kind` turns to `tags` for the second half), which the dashboard
+shows as a progress bar.
 A reject under rule 2 (a diary line) or rule 4 (what git holds), and the older memory
 of a merge, are **archived**: stamped with `archived_at` and left out of `query`,
 `search`, `review`, the counts and the reference set. `--archived` on `query`, `search`
@@ -158,6 +159,21 @@ the model answers.
 Editing a memory's text with `memory update` sets it back to `unverified` and drops its
 verdict and its `supersedes` link, so the next catch-up reads the new text; a change of
 tags or project alone keeps both.
+
+**Tag review.** Tags get a review status too (`unverified`, `verified`, `flagged`), from
+the same model under the same setting. The catch-up reviews the unverified tags after
+the unverified memories, oldest first. The model sees the tag's name and description,
+how many memories use it and three of them, and the five verified tags closest to it,
+and answers `keep` (the tag is verified), `merge` into one of those tags, `rename`, or
+`drop` (the tag repeats a memory type, or names no subject). A merge is applied on its
+own only when the two tags' vectors score 0.90 or more, or their names match after the
+name cleanup (the same name, or its plural or singular). Anything else is a proposal
+that waits for a person, and the tag is flagged: `memory tags --pending` lists them
+(`GET /tags/flagged`, MCP `memory_tag_proposals`), `memory tags --apply <id>` does it
+(no undo) and `memory tags --reject <id>` keeps the tag and verifies it. `memory tags`
+marks a flagged tag. `tests/data/tag_verdict_set.json` holds 20 invented tags with the
+verdict the model should give; `tests/test_tag_review.py::test_tag_verdict_quality`
+measures the prompt against it, like the memory verdict set below.
 
 **Measuring the prompt.** The prompt's checklist was tuned by hand to `qwen3:14b`, so a
 change to its wording or to the model is measured, not felt. `tests/data/verdict_set.json`
@@ -268,7 +284,10 @@ rail filters by status and can hide superseded memories. The **Flagged** view li
 the review rejected or wants rewritten, and its **Catch up** button reviews the
 memories written while the model was off. The **Archived** view lists what the review
 put away, with the reason, the days left before it is deleted and a **Restore** button.
-The top bar shows whether the review model is reachable.
+The **Tags** view shows each tag's review status, and for a flagged tag the model's
+proposal with **Apply** and **Reject** buttons. The top bar shows whether the review
+model is reachable, and while a catch-up runs, a bar that says what it reviews
+("Reviewing tags: 5 of 40 done").
 
 ![dashboard](docs/dashboard.png)
 

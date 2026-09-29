@@ -13,7 +13,7 @@ const SLOW_MS = 30000
 
 export const useHealthStore = defineStore('health', () => {
   const reviewModel = ref(null) // `reachable`, `unreachable`, `off`, or null
-  const catchUp = ref(null)     // { total, done } while a catch-up runs, else null
+  const catchUp = ref(null)     // { kind, total, done } while a catch-up runs, else null
   const ended = ref(0)
   const archiveDays = ref(null)
   let timer = null
@@ -25,7 +25,9 @@ export const useHealthStore = defineStore('health', () => {
       const h = await api.health()
       reviewModel.value = typeof h?.review_model === 'string' ? h.review_model : null
       const c = h?.catch_up
-      catchUp.value = c && typeof c.total === 'number' ? { total: c.total, done: c.done ?? 0 } : null
+      catchUp.value = c && typeof c.total === 'number'
+        ? { kind: c.kind === 'tags' ? 'tags' : 'memories', total: c.total, done: c.done ?? 0 }
+        : null
       archiveDays.value = typeof h?.archive_days === 'number' ? h.archive_days : null
     } catch {
       reviewModel.value = null

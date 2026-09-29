@@ -29,7 +29,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .review import STATUSES, UNVERIFIED
 
-# The CHECK on `memories.review_status`: one of the three statuses, nothing else.
+# The CHECK on `memories.review_status` and `tags.review_status`: one of the
+# three statuses, nothing else.
 REVIEW_STATUS_CHECK = "review_status IN (" + ", ".join(f"'{s}'" for s in STATUSES) + ")"
 
 
@@ -177,12 +178,58 @@ class Tag(Base):
     embedding: Mapped[list[float] | None] = mapped_column(ARRAY(REAL))
     embedding_model: Mapped[str | None] = mapped_column(Text)
 
+    # Whether the review model has checked this tag (server/tag_review.py):
+    # `unverified` until it has, then `verified` (keep, or a proposal a
+    # person rejected) or `flagged` (a rename, drop or merge proposal waits
+    # in `tag_reviews`). Only verified tags are shown to the model as the
+    # tags a new one may be the same as.
+    review_status: Mapped[str] = mapped_column(
+        Text, default=UNVERIFIED, server_default=UNVERIFIED, index=True
+    )
+
     memories: Mapped[list[Memory]] = relationship(
         secondary="memory_tags", back_populates="tags",
     )
 
     # Case-insensitive uniqueness on the tag name.
-    __table_args__ = (Index("idx_tags_lower_name", func.lower(name), unique=True),)
+    __table_args__ = (
+        Index("idx_tags_lower_name", func.lower(name), unique=True),
+        CheckConstraint(REVIEW_STATUS_CHECK, name="ck_tags_review_status"),
+    )
+
+
+class TagReview(Base):
+    """A verdict of the review model on a tag that is not a plain keep: a
+    merge, rename or drop. A merge the server applied on its own is stored
+    as `applied`; every other row waits (`resolved` NULL) until a person
+    applies or rejects it. The row outlives its tag, so a merge or drop
+    leaves a trace: `tag_id` is cleared when the tag goes, and `tag_name`
+    keeps the name it had."""
+
+    __tablename__ = "tag_reviews"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tag_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("tags.id", ondelete="SET NULL"), index=True
+    )
+    tag_name: Mapped[str] = mapped_column(Text)
+    # merge, rename or drop (see server/tag_review.py).
+    verdict: Mapped[str] = mapped_column(Text)
+    # The tag to merge into (merge), the better name (rename).
+    into: Mapped[str | None] = mapped_column(Text)
+    new_name: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # NULL while it waits, then `applied` or `rejected`.
+    resolved: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint("resolved IS NULL OR resolved IN ('applied', 'rejected')",
+                        name="ck_tag_reviews_resolved"),
+    )
 
 
 class MemoryTag(Base):

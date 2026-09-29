@@ -280,8 +280,31 @@ class ApiClient:
         return data or {"deleted": 0, "missing": list(ids)}
 
     def list_tags(self):
+        """The tags in use, each with its count, description and
+        `review_status`."""
         _, data = self._call("GET", "/tags")
         return data or []
+
+    def tag_proposals(self):
+        """The tag proposals that wait for a person, oldest first: each with
+        its id, the tag, the verdict (merge, rename or drop), `into`,
+        `new_name` and the model's reason."""
+        _, data = self._call("GET", "/tags/flagged")
+        return data or []
+
+    def apply_tag_proposal(self, pid):
+        """Do what proposal `pid` says (merge, rename or delete the tag).
+        Returns `{"proposal", "result"}`; None when there is no such
+        proposal. One that is resolved already, or whose tag is gone, raises
+        `ApiRefused`."""
+        status, data = self._call("POST", f"/tags/proposals/{int(pid)}/apply")
+        return None if status == 404 else data
+
+    def reject_tag_proposal(self, pid):
+        """Turn proposal `pid` down; the tag stays and is verified. Returns
+        `{"proposal"}`; None when there is no such proposal."""
+        status, data = self._call("POST", f"/tags/proposals/{int(pid)}/reject")
+        return None if status == 404 else data
 
     def list_projects(self):
         _, data = self._call("GET", "/projects")
@@ -324,12 +347,14 @@ class ApiClient:
         """The catch-up: ask the server to review the unverified memories,
         oldest first, one after another, up to `limit` (None uses the server
         default, 0 means all). The reviews run in the background; returns
-        `{"scheduled": <how many>, "running": <bool>}`, where `running` is
-        True when a catch-up was already running (the server runs one at a
-        time, so nothing new was scheduled). A server without a review model
+        `{"scheduled": <how many>, "tags": <how many>, "running": <bool>}`:
+        `tags` is how many tags were scheduled after the memories, and
+        `running` is True when a catch-up was already running (the server
+        runs one at a time, so nothing new was scheduled). A server without a review model
         raises `ApiRefused`."""
         _, data = self._call("POST", "/admin/review", params={"limit": limit})
-        return {"scheduled": data["scheduled"], "running": bool(data.get("running", False))}
+        return {"scheduled": data["scheduled"], "tags": int(data.get("tags", 0)),
+                "running": bool(data.get("running", False))}
 
     # The old name, kept for callers that still use it.
     review_missing = review_catch_up

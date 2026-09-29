@@ -1,0 +1,802 @@
+{
+  "about": [
+    "A fixed set of tags with the verdict the review model should give each one.",
+    "All projects and events here are invented.",
+    "Each entry names its case, the tag (name, description), how many memories use it, up to three of them, the verified tags the model is shown, and what is expected.",
+    "expected.verdict must match. For a merge, expected.into must match too; a rename is checked on the verdict only.",
+    "floor is the overall pass rate the test asserts: the lowest of three runs, rounded down (18/20 in each of three runs with qwen3:14b)."
+  ],
+  "floor": 0.9,
+  "entries": [
+    {
+      "case": "keep",
+      "tag": {
+        "name": "kubernetes",
+        "description": "the cluster the services run on: pods, nodes, manifests"
+      },
+      "count": 7,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "harbor",
+          "content": "Pinned the pod memory limit at 512 MB because the worker leaked past 1 GB and took the node down."
+        },
+        {
+          "type": "lesson",
+          "project": "harbor",
+          "content": "A readiness probe on the database port made every pod restart during a failover, so the probe now calls /health."
+        },
+        {
+          "type": "note",
+          "project": "harbor",
+          "content": "The staging cluster has three nodes; production has six."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        },
+        {
+          "name": "logging",
+          "description": "what the services write to their logs and where"
+        },
+        {
+          "name": "api",
+          "description": "the HTTP API other services call"
+        },
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        }
+      ],
+      "expected": {
+        "verdict": "keep"
+      }
+    },
+    {
+      "case": "keep",
+      "tag": {
+        "name": "billing",
+        "description": "invoices, payment runs and the tax on them"
+      },
+      "count": 5,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "ledger",
+          "content": "Invoices are made on the first of the month because customers asked for one invoice per month, not one per order."
+        },
+        {
+          "type": "constraint",
+          "project": "ledger",
+          "content": "Never round the tax per line; round the total, since the auditor checks the total."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "email",
+          "description": "outgoing mail: templates, sending and bounces"
+        },
+        {
+          "name": "reports",
+          "description": "the weekly and monthly reports sent to customers"
+        },
+        {
+          "name": "search",
+          "description": "finding records by text or by meaning"
+        },
+        {
+          "name": "authentication",
+          "description": "how users log in and prove who they are"
+        }
+      ],
+      "expected": {
+        "verdict": "keep"
+      }
+    },
+    {
+      "case": "keep",
+      "tag": {
+        "name": "caching",
+        "description": "what is cached where, and for how long"
+      },
+      "count": 4,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "atlas",
+          "content": "Map tiles are cached for a day because the base map changes weekly at most."
+        },
+        {
+          "type": "lesson",
+          "project": "atlas",
+          "content": "The cache key left out the user's language, so French users got German labels."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        },
+        {
+          "name": "api",
+          "description": "the HTTP API other services call"
+        },
+        {
+          "name": "performance",
+          "description": "how fast things run and how much memory they use"
+        },
+        {
+          "name": "search",
+          "description": "finding records by text or by meaning"
+        }
+      ],
+      "expected": {
+        "verdict": "keep"
+      }
+    },
+    {
+      "case": "keep",
+      "tag": {
+        "name": "accessibility",
+        "description": "screen readers, contrast and keyboard use"
+      },
+      "count": 3,
+      "memories": [
+        {
+          "type": "constraint",
+          "project": "parlor",
+          "content": "Every button needs a text label, because the screen reader reads icons as 'button'."
+        },
+        {
+          "type": "decision",
+          "project": "parlor",
+          "content": "Raised the grey text to 4.5:1 contrast since two users could not read the form hints."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "frontend",
+          "description": "the web client: pages, components, styles"
+        },
+        {
+          "name": "testing",
+          "description": "the test suite and how it runs"
+        },
+        {
+          "name": "email",
+          "description": "outgoing mail: templates, sending and bounces"
+        }
+      ],
+      "expected": {
+        "verdict": "keep"
+      }
+    },
+    {
+      "case": "merge-synonym",
+      "tag": {
+        "name": "authn",
+        "description": "logging users in"
+      },
+      "count": 2,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "harbor",
+          "content": "Sessions last eight hours because the support staff work one shift and should not log in twice."
+        },
+        {
+          "type": "lesson",
+          "project": "harbor",
+          "content": "The login form sent the password in the query string when JavaScript was off; it posts now."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "authentication",
+          "description": "how users log in and prove who they are"
+        },
+        {
+          "name": "api",
+          "description": "the HTTP API other services call"
+        },
+        {
+          "name": "email",
+          "description": "outgoing mail: templates, sending and bounces"
+        },
+        {
+          "name": "logging",
+          "description": "what the services write to their logs and where"
+        }
+      ],
+      "expected": {
+        "verdict": "merge",
+        "into": "authentication"
+      }
+    },
+    {
+      "case": "merge-synonym",
+      "tag": {
+        "name": "outage",
+        "description": "when production went down"
+      },
+      "count": 2,
+      "memories": [
+        {
+          "type": "lesson",
+          "project": "atlas",
+          "content": "The March outage came from a full disk on the log volume; the alert now fires at 80 percent."
+        },
+        {
+          "type": "note",
+          "project": "atlas",
+          "content": "Status page updates go out within 15 minutes of an outage starting."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "incidents",
+          "description": "times the service was down or broken, and what was learned"
+        },
+        {
+          "name": "logging",
+          "description": "what the services write to their logs and where"
+        },
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        },
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        }
+      ],
+      "expected": {
+        "verdict": "merge",
+        "into": "incidents"
+      }
+    },
+    {
+      "case": "merge-synonym",
+      "tag": {
+        "name": "setup",
+        "description": "installing and the first-run steps"
+      },
+      "count": 2,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "quill",
+          "content": "The installer checks the Python version first because older versions failed half way with an unclear error."
+        },
+        {
+          "type": "note",
+          "project": "quill",
+          "content": "First run writes a config file to the user's home folder."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "installation",
+          "description": "installing the tool and getting it running the first time"
+        },
+        {
+          "name": "testing",
+          "description": "the test suite and how it runs"
+        },
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        },
+        {
+          "name": "logging",
+          "description": "what the services write to their logs and where"
+        }
+      ],
+      "expected": {
+        "verdict": "merge",
+        "into": "installation"
+      }
+    },
+    {
+      "case": "merge-synonym",
+      "tag": {
+        "name": "configuration",
+        "description": "settings files and environment variables"
+      },
+      "count": 3,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "quill",
+          "content": "Settings are read from the environment first and the file second, so a container can override the file."
+        },
+        {
+          "type": "lesson",
+          "project": "quill",
+          "content": "A trailing space in a setting value broke the port number; values are stripped now."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "config",
+          "description": "settings files, environment variables and their defaults"
+        },
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        },
+        {
+          "name": "api",
+          "description": "the HTTP API other services call"
+        },
+        {
+          "name": "logging",
+          "description": "what the services write to their logs and where"
+        }
+      ],
+      "expected": {
+        "verdict": "merge",
+        "into": "config"
+      }
+    },
+    {
+      "case": "merge-plural",
+      "tag": {
+        "name": "migrations",
+        "description": "schema migrations"
+      },
+      "count": 2,
+      "memories": [
+        {
+          "type": "constraint",
+          "project": "ledger",
+          "content": "Every schema migration needs a downgrade, because rollbacks are done by migration, not by restore."
+        },
+        {
+          "type": "lesson",
+          "project": "ledger",
+          "content": "A migration that added a NOT NULL column locked the invoices table for four minutes."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "migration",
+          "description": "database schema changes and how they are run"
+        },
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        },
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        },
+        {
+          "name": "testing",
+          "description": "the test suite and how it runs"
+        }
+      ],
+      "expected": {
+        "verdict": "merge",
+        "into": "migration"
+      }
+    },
+    {
+      "case": "merge-plural",
+      "tag": {
+        "name": "dependency",
+        "description": "a third-party package"
+      },
+      "count": 1,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "quill",
+          "content": "The client uses only the standard library because a CLI that installs packages starts slowly."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "dependencies",
+          "description": "third-party packages the project uses and their versions"
+        },
+        {
+          "name": "packaging",
+          "description": "building and publishing the package"
+        },
+        {
+          "name": "testing",
+          "description": "the test suite and how it runs"
+        }
+      ],
+      "expected": {
+        "verdict": "merge",
+        "into": "dependencies"
+      }
+    },
+    {
+      "case": "merge-plural",
+      "tag": {
+        "name": "webhook",
+        "description": "webhook"
+      },
+      "count": 2,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "ledger",
+          "content": "Webhook calls are retried three times with a growing wait because the receiving shops go down for minutes at a time."
+        },
+        {
+          "type": "constraint",
+          "project": "ledger",
+          "content": "Sign every webhook body with the shop's secret, since the shops check the signature."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "webhooks",
+          "description": "calls we send to other systems when something happens"
+        },
+        {
+          "name": "api",
+          "description": "the HTTP API other services call"
+        },
+        {
+          "name": "email",
+          "description": "outgoing mail: templates, sending and bounces"
+        },
+        {
+          "name": "billing",
+          "description": "invoices, payment runs and the tax on them"
+        }
+      ],
+      "expected": {
+        "verdict": "merge",
+        "into": "webhooks"
+      }
+    },
+    {
+      "case": "rename",
+      "tag": {
+        "name": "Retry Logic",
+        "description": "how and when failed calls are retried"
+      },
+      "count": 3,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "atlas",
+          "content": "Calls to the map provider are retried twice with a one second wait, because its errors clear within seconds."
+        },
+        {
+          "type": "lesson",
+          "project": "atlas",
+          "content": "Retrying a POST without an idempotency key made duplicate orders."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "api",
+          "description": "the HTTP API other services call"
+        },
+        {
+          "name": "logging",
+          "description": "what the services write to their logs and where"
+        },
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        },
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        }
+      ],
+      "expected": {
+        "verdict": "rename"
+      }
+    },
+    {
+      "case": "rename",
+      "tag": {
+        "name": "perfomance",
+        "description": "speed and memory use"
+      },
+      "count": 3,
+      "memories": [
+        {
+          "type": "lesson",
+          "project": "atlas",
+          "content": "The tile server spent most of its time parsing JSON; switching to a binary format halved the response time."
+        },
+        {
+          "type": "decision",
+          "project": "atlas",
+          "content": "Profiles run on every release candidate because a slow release went unnoticed for a month."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        },
+        {
+          "name": "api",
+          "description": "the HTTP API other services call"
+        },
+        {
+          "name": "logging",
+          "description": "what the services write to their logs and where"
+        },
+        {
+          "name": "frontend",
+          "description": "the web client: pages, components, styles"
+        }
+      ],
+      "expected": {
+        "verdict": "rename"
+      }
+    },
+    {
+      "case": "rename",
+      "tag": {
+        "name": "fix-the-login-redirect-loop-on-safari",
+        "description": "fix the login redirect loop on safari"
+      },
+      "count": 1,
+      "memories": [
+        {
+          "type": "lesson",
+          "project": "parlor",
+          "content": "Safari dropped the session cookie on the redirect because it lacked SameSite=Lax, which caused the loop back to the login page."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "email",
+          "description": "outgoing mail: templates, sending and bounces"
+        },
+        {
+          "name": "billing",
+          "description": "invoices, payment runs and the tax on them"
+        },
+        {
+          "name": "search",
+          "description": "finding records by text or by meaning"
+        },
+        {
+          "name": "reports",
+          "description": "the weekly and monthly reports sent to customers"
+        }
+      ],
+      "expected": {
+        "verdict": "rename"
+      }
+    },
+    {
+      "case": "drop-type",
+      "tag": {
+        "name": "decisions",
+        "description": "decisions"
+      },
+      "count": 6,
+      "memories": [
+        {
+          "type": "decision",
+          "project": "harbor",
+          "content": "Chose Redis for the job queue because the team already runs it."
+        },
+        {
+          "type": "decision",
+          "project": "ledger",
+          "content": "Invoices are made monthly because customers asked for one per month."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        },
+        {
+          "name": "billing",
+          "description": "invoices, payment runs and the tax on them"
+        },
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        }
+      ],
+      "expected": {
+        "verdict": "drop"
+      }
+    },
+    {
+      "case": "drop-type",
+      "tag": {
+        "name": "lessons-learned",
+        "description": "things we learned"
+      },
+      "count": 4,
+      "memories": [
+        {
+          "type": "lesson",
+          "project": "atlas",
+          "content": "The cache key left out the language, so users got the wrong labels."
+        },
+        {
+          "type": "lesson",
+          "project": "harbor",
+          "content": "A readiness probe on the database port restarted every pod during a failover."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "caching",
+          "description": "what is cached where, and for how long"
+        },
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        },
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        }
+      ],
+      "expected": {
+        "verdict": "drop"
+      }
+    },
+    {
+      "case": "drop-type",
+      "tag": {
+        "name": "rules",
+        "description": "rules to follow"
+      },
+      "count": 3,
+      "memories": [
+        {
+          "type": "constraint",
+          "project": "ledger",
+          "content": "Never round the tax per line; round the total."
+        },
+        {
+          "type": "constraint",
+          "project": "parlor",
+          "content": "Every button needs a text label for the screen reader."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "billing",
+          "description": "invoices, payment runs and the tax on them"
+        },
+        {
+          "name": "frontend",
+          "description": "the web client: pages, components, styles"
+        },
+        {
+          "name": "testing",
+          "description": "the test suite and how it runs"
+        }
+      ],
+      "expected": {
+        "verdict": "drop"
+      }
+    },
+    {
+      "case": "drop-meaningless",
+      "tag": {
+        "name": "various",
+        "description": "various things"
+      },
+      "count": 4,
+      "memories": [
+        {
+          "type": "note",
+          "project": "quill",
+          "content": "First run writes a config file to the home folder."
+        },
+        {
+          "type": "decision",
+          "project": "atlas",
+          "content": "Map tiles are cached for a day because the base map changes weekly."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        },
+        {
+          "name": "logging",
+          "description": "what the services write to their logs and where"
+        },
+        {
+          "name": "api",
+          "description": "the HTTP API other services call"
+        }
+      ],
+      "expected": {
+        "verdict": "drop"
+      }
+    },
+    {
+      "case": "drop-meaningless",
+      "tag": {
+        "name": "keep-in-mind",
+        "description": "things to keep in mind"
+      },
+      "count": 3,
+      "memories": [
+        {
+          "type": "constraint",
+          "project": "ledger",
+          "content": "Every schema migration needs a downgrade."
+        },
+        {
+          "type": "lesson",
+          "project": "harbor",
+          "content": "The login form sent the password in the query string when JavaScript was off."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        },
+        {
+          "name": "authentication",
+          "description": "how users log in and prove who they are"
+        },
+        {
+          "name": "deploy",
+          "description": "shipping a build to the servers"
+        }
+      ],
+      "expected": {
+        "verdict": "drop"
+      }
+    },
+    {
+      "case": "drop-meaningless",
+      "tag": {
+        "name": "2026-03",
+        "description": "2026-03"
+      },
+      "count": 2,
+      "memories": [
+        {
+          "type": "lesson",
+          "project": "atlas",
+          "content": "The March outage came from a full disk on the log volume."
+        },
+        {
+          "type": "note",
+          "project": "ledger",
+          "content": "The tax rate table was updated for the new year."
+        }
+      ],
+      "neighbours": [
+        {
+          "name": "logging",
+          "description": "what the services write to their logs and where"
+        },
+        {
+          "name": "billing",
+          "description": "invoices, payment runs and the tax on them"
+        },
+        {
+          "name": "database",
+          "description": "the Postgres database, its tables and queries"
+        }
+      ],
+      "expected": {
+        "verdict": "drop"
+      }
+    }
+  ]
+}

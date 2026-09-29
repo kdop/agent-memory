@@ -203,7 +203,8 @@ def review_memories(args, client):
         if result["running"]:
             print("✓ A catch-up is already running; nothing new scheduled")
             return
-        print(f"✓ Scheduled {result['scheduled']} reviews")
+        tags = f" and {result['tags']} tag reviews" if result.get("tags") else ""
+        print(f"✓ Scheduled {result['scheduled']} reviews{tags}")
         return
     rows, total = client.flagged_with_total(
         project=args.project, verdict=args.verdict, status=args.status,
@@ -243,15 +244,69 @@ def search_memories(args, client):
 
 
 def list_tags(args, client):
+    """`memory tags`: the tags in use, a flagged one marked. With --pending,
+    --apply or --reject, the tag review's proposals instead."""
+    chosen = [f for f in ("pending", "apply", "reject") if getattr(args, f, None) not in (None, False)]
+    if len(chosen) > 1:
+        print("✗ --pending, --apply and --reject go alone, one at a time.")
+        sys.exit(2)
+    if args.pending:
+        return list_tag_proposals(client)
+    if args.apply is not None:
+        return resolve_tag_proposal(client, args.apply, apply=True)
+    if args.reject is not None:
+        return resolve_tag_proposal(client, args.reject, apply=False)
     rows = client.list_tags()
     if not rows:
         print("No tags found.")
         return
     print("🏷️  Tags:\n")
+    flagged = 0
     for t in rows:
-        print(f"  {t['name']:<20} ({t['count']})")
+        mark = "  [flagged]" if t.get("review_status") == "flagged" else ""
+        flagged += bool(mark)
+        print(f"  {t['name']:<20} ({t['count']}){mark}")
         if t.get('description') and t['description'] != t['name']:
             print(f"       ↳ {t['description']}")
+    if flagged:
+        print(f"\n{flagged} flagged: see 'memory tags --pending'")
+
+
+def _proposal_line(p):
+    """What a tag proposal asks for, in a few words."""
+    if p["verdict"] == "merge":
+        return f"merge '{p['tag']}' into '{p['into']}'"
+    if p["verdict"] == "rename":
+        return f"rename '{p['tag']}' to '{p['new_name']}'"
+    return f"drop '{p['tag']}'"
+
+
+def list_tag_proposals(client):
+    """`memory tags --pending`: the proposals that wait, oldest first, one
+    line each with the id to pass to --apply or --reject, and the reason."""
+    rows = client.tag_proposals()
+    if not rows:
+        print("No tag proposals waiting.")
+        return
+    print("🏷️  Tag proposals:\n")
+    for p in rows:
+        print(f"  #{p['id']}  {_proposal_line(p)}")
+        print(f"       ↳ {p['reason']}")
+    print(f"\n{len(rows)} waiting. Apply one with 'memory tags --apply <id>', "
+          "or keep the tag with 'memory tags --reject <id>'.")
+
+
+def resolve_tag_proposal(client, pid, apply):
+    """`memory tags --apply <id>` or `--reject <id>`."""
+    done = client.apply_tag_proposal(pid) if apply else client.reject_tag_proposal(pid)
+    if done is None:
+        print(f"✗ Proposal #{pid} not found")
+        sys.exit(1)
+    p = done["proposal"]
+    if apply:
+        print(f"✓ Applied #{pid}: {_proposal_line(p)}")
+    else:
+        print(f"✓ Rejected #{pid}: '{p['tag']}' stays as it is")
 
 
 def list_projects(args, client):
@@ -471,7 +526,18 @@ def main():
     search_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     search_parser.set_defaults(func=search_memories)
 
-    tags_parser = subparsers.add_parser("tags", help="List all tags")
+    tags_parser = subparsers.add_parser(
+        "tags", help="List all tags, or the tag review's proposals",
+        description="List the tags in use, most used first; a tag the review model "
+                    "flagged is marked. The model proposes to merge, rename or drop a "
+                    "tag; --pending lists what waits, --apply does it (no undo), "
+                    "--reject keeps the tag as it is.")
+    tags_parser.add_argument("--pending", action="store_true",
+                             help="List the tag proposals that wait, oldest first")
+    tags_parser.add_argument("--apply", type=int, metavar="ID",
+                             help="Apply proposal ID: merge, rename or delete the tag. No undo")
+    tags_parser.add_argument("--reject", type=int, metavar="ID",
+                             help="Reject proposal ID: the tag stays and is verified")
     tags_parser.set_defaults(func=list_tags)
 
     projects_parser = subparsers.add_parser("projects", help="List all projects")
