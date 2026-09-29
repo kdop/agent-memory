@@ -62,7 +62,7 @@ def run(*args, home=None):
 def test_no_command_prints_usage_and_exits_2():
     out = run()
     assert out.returncode == 2
-    assert "deploy <tag>" in out.stderr
+    assert "deploy <ref>" in out.stderr
     assert "rollback <tag>" in out.stderr
     assert "status" in out.stderr
 
@@ -79,7 +79,7 @@ def test_no_command_prints_usage_and_exits_2():
 def test_bad_arguments_exit_2(args):
     out = run(*args)
     assert out.returncode == 2, out.stderr
-    assert "deploy <tag>" in out.stderr
+    assert "deploy <ref>" in out.stderr
 
 
 def test_help_prints_usage():
@@ -151,7 +151,7 @@ def test_unknown_tag_stops_before_the_backup(release):
     out = run("deploy", "v9", "--release", str(release), "--no-restart",
               "--dsn", "postgresql://nobody:nothing@127.0.0.1:1/none")
     assert out.returncode == 1
-    assert "fetching tags: tag v9 not found" in out.stderr
+    assert "fetching: v9 is not a tag, a branch on origin, or a commit" in out.stderr
     assert not (release / "backups").exists()
 
 
@@ -161,8 +161,8 @@ def test_option_order_does_not_matter(release):
     b = run("deploy", "--dsn", "postgresql://nobody:nothing@127.0.0.1:1/none",
             "v9", f"--release={release}", "--no-restart")
     assert a.returncode == b.returncode == 1
-    assert "tag v9 not found" in a.stderr
-    assert "tag v9 not found" in b.stderr
+    assert "v9 is not a tag, a branch on origin, or a commit" in a.stderr
+    assert "v9 is not a tag, a branch on origin, or a commit" in b.stderr
 
 
 # ---- status ------------------------------------------------------------------

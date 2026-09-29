@@ -2,7 +2,7 @@
 # Put a tagged release live: back up the database, check the tag out in the
 # release checkout, install, migrate, restart the service, check that it answers.
 #
-#   deploy/deploy.sh deploy <tag>     back up, check out the tag, install, migrate up, restart
+#   deploy/deploy.sh deploy <ref>     back up, check out the ref (tag, branch or commit), install, migrate up, restart
 #   deploy/deploy.sh rollback <tag>   back up, migrate down to the tag's schema, check out, install, restart
 #   deploy/deploy.sh status           tag or commit of the release checkout, unit state, health
 #
@@ -135,17 +135,24 @@ counts() {
 
 print_counts() { printf '%s\n' "$1" | awk '{ printf "  %-16s %10s\n", $1, $2 }'; }
 
+# fetch_tags: fetch, then resolve $TAG to a commit. A tag is used as is; a
+# branch name resolves to the branch on origin; anything else must be a commit.
 fetch_tags() {
-  log "fetching tags"
-  git -C "$RELEASE" fetch --tags --quiet || fail "git fetch --tags failed in $RELEASE"
-  git -C "$RELEASE" rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null \
-    || fail "tag $TAG not found in $RELEASE"
-  ok "tag $TAG is $(git -C "$RELEASE" rev-parse --short "$TAG^{commit}")"
+  log "fetching"
+  git -C "$RELEASE" fetch --tags --quiet origin || fail "git fetch failed in $RELEASE"
+  local ref
+  for ref in "refs/tags/$TAG" "refs/remotes/origin/$TAG" "$TAG"; do
+    if REF_SHA=$(git -C "$RELEASE" rev-parse -q --verify "$ref^{commit}" 2>/dev/null); then
+      ok "$TAG is $(git -C "$RELEASE" rev-parse --short "$REF_SHA")"
+      return
+    fi
+  done
+  fail "$TAG is not a tag, a branch on origin, or a commit in $RELEASE"
 }
 
 backup() {
   local dir="$RELEASE/backups" file
-  file="$dir/$(date +%Y-%m-%d-%H%M%S)-$1.sql"
+  file="$dir/$(date +%Y-%m-%d-%H%M%S)-${1//\//-}.sql"
   log "backup"
   mkdir -p "$dir"
   pg_dump --no-owner --no-privileges -f "$file" "$DSN" || fail "pg_dump failed"
@@ -156,7 +163,7 @@ backup() {
 
 checkout_tag() {
   log "checking out $TAG"
-  git -C "$RELEASE" checkout --quiet "$TAG" || fail "git checkout $TAG failed"
+  git -C "$RELEASE" checkout --quiet --detach "$REF_SHA" || fail "git checkout $TAG failed"
   ok "$(describe)"
 }
 
@@ -169,6 +176,10 @@ install() {
   (cd "$RELEASE" && "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check -e '.[server,mcp,embed]') \
     || fail "pip install failed"
   ok "agent-memory $("$VENV/bin/python" -c 'import importlib.metadata as m; print(m.version("agent-memory"))') in $VENV"
+  if [ -f "$RELEASE/web/package.json" ] && command -v npm >/dev/null; then
+    (cd "$RELEASE/web" && npm ci --silent && npm run build --silent >/dev/null) || fail "dashboard build failed"
+    ok "dashboard built in $RELEASE/web/dist"
+  fi
 }
 
 alembic() { (cd "$RELEASE" && AGENT_MEMORY_DB="$DSN" "$VENV/bin/alembic" "$@"); }
@@ -184,11 +195,11 @@ migrate_up() {
 # the files this way needs no second checkout.
 tag_revision() {
   local files f revs="" downs="" r d heads=""
-  files=$(git -C "$RELEASE" ls-tree -r --name-only "$TAG" -- alembic/versions | grep '\.py$' || true)
+  files=$(git -C "$RELEASE" ls-tree -r --name-only "$REF_SHA" -- alembic/versions | grep '\.py$' || true)
   [ -n "$files" ] || fail "tag $TAG has no alembic/versions"
   for f in $files; do
-    r=$(git -C "$RELEASE" show "$TAG:$f" | sed -n -E "s/^revision[^=]*= *['\"]([0-9a-f]+)['\"].*/\1/p" | head -1)
-    d=$(git -C "$RELEASE" show "$TAG:$f" | sed -n -E "s/^down_revision[^=]*= *['\"]([0-9a-f]+)['\"].*/\1/p" | head -1)
+    r=$(git -C "$RELEASE" show "$REF_SHA:$f" | sed -n -E "s/^revision[^=]*= *['\"]([0-9a-f]+)['\"].*/\1/p" | head -1)
+    d=$(git -C "$RELEASE" show "$REF_SHA:$f" | sed -n -E "s/^down_revision[^=]*= *['\"]([0-9a-f]+)['\"].*/\1/p" | head -1)
     [ -n "$r" ] || continue
     revs="$revs $r"
     downs="$downs ${d:-none}"
