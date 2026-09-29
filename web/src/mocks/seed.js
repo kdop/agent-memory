@@ -133,6 +133,7 @@ export function buildSeed() {
       review: null,
       supersedes: null,
       superseded_by: null,
+      archived_at: null,
     })
   }
 
@@ -151,17 +152,32 @@ export function buildSeed() {
         tags: [m.tags[0], 'why'].filter(Boolean),
         supersedes: null,
       }
+    } else if (m.id % 14 === 0) {
+      m.review_status = 'flagged'
+      m.review = {
+        verdict: 'reject',
+        rule: 1,
+        reason: 'Will not matter in a later session: it repeats a newer memory.',
+        rewrite: null,
+        duplicate_of: m.id + 1,
+        tags: [],
+        supersedes: null,
+      }
     } else if (m.id % 7 === 0) {
+      // A reject under rule 2 archives the memory; spread the stamps over
+      // the last month (from today, not the seed clock) so the Archived page
+      // shows a range of days left.
       m.review_status = 'flagged'
       m.review = {
         verdict: 'reject',
         rule: 2,
         reason: 'A diary line: it records what was done, which git history already has.',
         rewrite: null,
-        duplicate_of: m.id % 14 === 0 ? m.id + 1 : null,
+        duplicate_of: null,
         tags: [],
         supersedes: null,
       }
+      m.archived_at = stamp(new Date(Date.now() - (m.id % 29) * DAY - 3600_000))
     } else {
       m.review_status = 'verified'
       m.review = {
@@ -185,7 +201,12 @@ export function buildSeed() {
 /** Live seed instance the handlers mutate (merge/detach/patch/delete). */
 export const db = buildSeed()
 
-/** Recompute a tag's link count on demand. */
+/** Recompute a tag's link count on demand. Archived memories do not count. */
 export function tagCount(db, name) {
-  return db.memories.reduce((n, m) => n + (m.tags.includes(name) ? 1 : 0), 0)
+  return db.memories.reduce((n, m) => n + (!m.archived_at && m.tags.includes(name) ? 1 : 0), 0)
+}
+
+/** A Date as the server writes a timestamp: "YYYY-MM-DD HH:MM:SS+00:00". */
+export function stamp(d) {
+  return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '+00:00')
 }

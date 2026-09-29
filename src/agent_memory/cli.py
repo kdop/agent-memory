@@ -47,11 +47,14 @@ def _header(row):
     """The `━━━ #<id> status: <status> ━━━…` line that opens every memory
     block, on `show`, `query`, `search` and `review`. The status says whether
     the review model has checked the memory: `unverified`, `verified` or
-    `flagged`. A memory that reverses or replaces an older one adds
-    `supersedes #<id>` after the status, and the older one `superseded by
-    #<id>`. A search result adds its score last: `━━━ #12 status: verified
-    supersedes #3 score 0.87 ━━━…`."""
+    `flagged`. An archived memory adds `archived` right after it. A memory
+    that reverses or replaces an older one adds `supersedes #<id>` after
+    the status, and the older one `superseded by #<id>`. A search result
+    adds its score last: `━━━ #12 status: verified supersedes #3 score 0.87
+    ━━━…`."""
     head = f"━━━ #{row['id']} status: {row.get('review_status') or 'unverified'}"
+    if row.get("archived_at"):
+        head += " archived"
     if row.get("supersedes") is not None:
         head += f" supersedes #{row['supersedes']}"
     if row.get("superseded_by") is not None:
@@ -145,6 +148,11 @@ def add_memory(args, client):
         print(f"warning: {w}")
 
 
+# The --archived flag of query, search and review.
+ARCHIVED_HELP = ("Only the archived memories: the ones the review put away (a reject under "
+                 "rule 2 or 4, or the older memory of a merge), hidden otherwise")
+
+
 def _effective_limit(args):
     """--all wins over --limit; limit 0 means no limit on the server."""
     return 0 if getattr(args, "all", False) else args.limit
@@ -171,7 +179,7 @@ def query_memories(args, client):
         since_days=args.since_days, since=args.since, until=args.until,
         project=args.project, agent=args.agent, tag=args.tag,
         mtype=args.type, status=args.status, current=args.current,
-        limit=_effective_limit(args))
+        archived=args.archived, limit=_effective_limit(args))
     if not rows:
         print("No memories found.")
         return
@@ -184,9 +192,9 @@ def review_memories(args, client):
     (`--missing` is the old name), ask the server to review the unverified
     memories, oldest first, instead."""
     if args.catch_up:
-        if args.project or args.verdict or args.status or args.all:
+        if args.project or args.verdict or args.status or args.all or args.archived:
             print("✗ --catch-up goes with --limit only, not with --project, --verdict, "
-                  "--status or --all.")
+                  "--status, --all or --archived.")
             sys.exit(2)
         result = client.review_catch_up(limit=args.limit)
         if result["running"]:
@@ -196,8 +204,10 @@ def review_memories(args, client):
         return
     rows, total = client.flagged_with_total(
         project=args.project, verdict=args.verdict, status=args.status,
-        limit=_effective_limit(args))
+        limit=_effective_limit(args), archived=args.archived)
     noun = f"{args.status} memories" if args.status else "flagged memories"
+    if args.archived:
+        noun = f"archived {noun}"
     if not rows:
         print(f"No {noun}.")
         return
@@ -208,7 +218,7 @@ def search_memories(args, client):
     limit = _effective_limit(args)
     rows = client.search(args.query, project=args.project, agent=args.agent,
                          since=args.since, tag=args.tag, limit=limit, mode=args.mode,
-                         current=args.current)
+                         current=args.current, archived=args.archived)
     if not rows:
         print(f"No memories found for: {args.query}")
         return
@@ -277,6 +287,17 @@ def show_memory(args, client):
     print(f"\n{row['content']}")
     if args.reviews:
         _print_history(client.reviews(args.id) or [])
+
+
+def restore_memory(args, client):
+    restored = client.restore(args.id)
+    if restored is None:
+        print(f"✗ Memory #{args.id} not found.")
+        sys.exit(1)
+    if restored:
+        print(f"✓ Memory #{args.id} restored")
+    else:
+        print(f"Memory #{args.id} is not archived; nothing to do.")
 
 
 def update_memory(args, client):
@@ -350,6 +371,8 @@ def show_stats(args, client):
     print(f"Last 7 days:       {s['week']}")
     print(f"\nOldest:            {s['oldest'] or 'N/A'}")
     print(f"Newest:            {s['newest'] or 'N/A'}")
+    if s.get("archived"):
+        print(f"\nArchived:          {s['archived']} (not counted above)")
 
 
 def reindex_memories(args, client):
@@ -418,6 +441,7 @@ def main():
         "--current", action="store_true",
         help="Hide the memories a newer one supersedes (those whose header says "
              "'superseded by'); by default every memory is shown")
+    query_parser.add_argument("--archived", action="store_true", help=ARCHIVED_HELP)
     query_parser.add_argument("--limit", type=int, help="Limit results (default 100; 0 = all)")
     query_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     query_parser.set_defaults(func=query_memories)
@@ -439,6 +463,7 @@ def main():
     search_parser.add_argument(
         "--current", action="store_true",
         help="Hide the memories a newer one supersedes; by default every match is shown")
+    search_parser.add_argument("--archived", action="store_true", help=ARCHIVED_HELP)
     search_parser.add_argument("--limit", type=int, default=20, help="Limit results (default 20; 0 = all)")
     search_parser.add_argument("--all", action="store_true", help="Return every match (same as --limit 0)")
     search_parser.set_defaults(func=search_memories)
@@ -460,6 +485,13 @@ def main():
              "verdict the model gave, with its date (the header and the review line "
              "show only the newest)")
     show_parser.set_defaults(func=show_memory)
+
+    restore_parser = subparsers.add_parser(
+        "restore", help="Bring an archived memory back into view",
+        description="Clear a memory's archive stamp, so it shows in listings and searches "
+                    "again and is not deleted. Its status and reviews stay as they are.")
+    restore_parser.add_argument("id", type=int, help="Memory ID")
+    restore_parser.set_defaults(func=restore_memory)
 
     update_parser = subparsers.add_parser("update", help="Update fields of an existing memory by ID")
     update_parser.add_argument("id", type=int, help="Memory ID")
@@ -504,6 +536,7 @@ def main():
         "--limit", type=int,
         help="How many to show (default 100; 0 = all). With --catch-up: how many "
              "memories to review (default 50; 0 = all)")
+    review_parser.add_argument("--archived", action="store_true", help=ARCHIVED_HELP)
     review_parser.add_argument("--all", action="store_true",
                                help="Show every flagged memory (same as --limit 0)")
     review_parser.add_argument(

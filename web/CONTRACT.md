@@ -30,7 +30,8 @@ and validates it on login by calling `GET /tags`.
   "review_status": "unverified",                // unverified | verified | flagged
   "review": ReviewOut,                          // null until the review model has answered
   "supersedes": 12,                             // older memory this one replaces, or null
-  "superseded_by": 57                           // newer memory that replaces this one, or null
+  "superseded_by": 57,                          // newer memory that replaces this one, or null
+  "archived_at": "2026-09-20 10:00:00+00:00"    // when the review archived it, or null (live)
 }
 
 // ReviewOut — what the review model said about the memory
@@ -65,9 +66,10 @@ Query params (all optional):
 | `type` | string | exact: `constraint`\|`decision`\|`lesson`\|`note`\|`preference` |
 | `status` | `unverified`\|`verified`\|`flagged` | one review status |
 | `current` | bool | `true` hides the memories a newer one supersedes |
+| `archived` | bool | `true` lists **only** the archived memories; by default they are left out |
 | `since_days` | int | rolling window: since the start of the day N days ago (0=today, 7=past week); overrides since/until |
 | `since` / `until` | string | ISO date/datetime bounds |
-| `order` | `date_desc`\|`date_asc` | default `date_desc` (ignored when `q` set → rank order) |
+| `order` | `date_desc`\|`date_asc`\|`archived_desc` | default `date_desc` (ignored when `q` set → rank order); `archived_desc` = newest archived first |
 | `limit` | int | default **100** |
 | `offset` | int | default 0 |
 
@@ -81,8 +83,8 @@ GET /memories?tag=auth&tag=db&order=date_desc&limit=100&offset=0
 
 ### `GET /memories/search` — ranked search in one mode
 Query params: `q` (required), `mode` = `keyword`|`semantic`|`hybrid` (default `keyword`),
-`project`, `agent`, `since`, `tag` (**one** tag), `current` (bool), `limit` (default 20,
-0 = all). No `offset`, no `X-Total-Count`: the whole ranked list comes back at once.
+`project`, `agent`, `since`, `tag` (**one** tag), `current` (bool), `archived` (bool,
+only the archived memories), `limit` (default 20, 0 = all). No `offset`, no `X-Total-Count`: the whole ranked list comes back at once.
 
 **Response `200`**: `MemoryOut[]`, best first, each with `score` (ts_rank for keyword,
 cosine for semantic, the fused rank for hybrid). Keyword hits also carry `snippet`.
@@ -96,7 +98,8 @@ and the other two modes here.
 ### `GET /memories/flagged` — what the review flagged
 Query params: `project`, `verdict` = `reject`|`rewrite` (only that verdict), `status`
 (that review status instead of the flagged verdicts, so `status=unverified` lists what
-the model has not read yet), `limit` (default 100, 0 = all).
+the model has not read yet), `archived` (bool, only the archived memories), `limit`
+(default 100, 0 = all).
 
 **Response `200`**: `MemoryOut[]` newest review first, each with `review`, plus
 **`X-Total-Count`** ignoring the limit.
@@ -115,10 +118,15 @@ Any `type` other than the five (`constraint`, `decision`, `lesson`, `note`,
 ### `GET /memories/{id}`
 **`200`** → `MemoryOut`; **`404`** if absent.
 
+### `POST /memories/{id}/restore` — bring an archived memory back
+Clears `archived_at`; the status and reviews stay. **`200`** → `{ "id": 42, "restored": true }`
+(`false` when it was not archived: nothing changes); **`404`** if absent.
+
 ### `PATCH /memories/{id}` — edit (only sent fields apply)
 Body (any subset): `{ "content"?, "project"?, "type"?, "set_tags"?: TagIn[],
 "add_tags"?: TagIn[], "remove_tags"?: string[] }`.
-`project`/`type` = `""` clears; `set_tags` = `[]` removes all.
+`project`/`type` = `""` clears; `set_tags` = `[]` removes all. New `content` also clears
+`archived_at`: the memory is live again and waits for its check.
 **`200`** → `{ "changes": ["content", "+tags: x", …] }`; **`404`** if absent.
 
 ### `DELETE /memories?ids=1&ids=2`
@@ -147,6 +155,18 @@ is created if missing and keeps `description` when provided (else its existing o
 Body: `{ "memory_ids"?: int[] }` — omit or `[]` = **all** memories. The tag itself stays.
 **`200`** → `{ "detached": 8 }`; **`404`** if the tag is absent.
 
+## Archive
+
+The review archives a memory it rejects under rule 2 (a diary line) or rule 4 (what git
+holds), and the older memory of a merge (a `rewrite` with `duplicate_of`; the newer one
+then supersedes it). An archived memory carries `archived_at`, is left out of every list,
+search, count and of `/projects`, `/agents`, `/tags` and `/stats` (which adds
+`"archived": n`), unless a list asks for `archived=true`. `GET /memories/{id}` still
+returns it. The server deletes it `archive_days` days after it was archived (see
+`/health`), unless it is restored. The **Archived** page lists them
+(`GET /memories?archived=true&order=archived_desc&limit=0`) with the newest review's
+reason, the days left and a **Restore** button.
+
 ## Review
 
 ### `POST /admin/review?limit=50` — catch up
@@ -165,9 +185,9 @@ the model gave no verdict; **`503`** without a model. The dashboard then re-read
 
 - `GET /projects` → `[{ "project", "count" }]`
 - `GET /agents` → `[{ "agent", "count" }]`
-- `GET /stats` → `{ "total", "agents", "projects", "tags", "today", "week", "oldest", "newest" }`
-- `GET /health` → `{ "status": "ok", "review_model": "reachable", "catch_up": null }` (no
-  auth). `review_model` is `reachable`, `unreachable`, or `off` when the review or its poll
+- `GET /stats` → `{ "total", "agents", "projects", "tags", "today", "week", "oldest", "newest", "archived" }`
+- `GET /health` → `{ "status": "ok", "review_model": "reachable", "catch_up": null, "archive_days": 30 }` (no
+  auth). `archive_days` is how long an archived memory is kept (0: for good). `review_model` is `reachable`, `unreachable`, or `off` when the review or its poll
   is off; the dashboard shows it in the top bar when present. `catch_up` is
   `{ "total": 100, "done": 10 }` while a catch-up runs (`done` counts the memories whose
   review ended, with a verdict or without), else `null`. The dashboard polls `/health`
@@ -182,7 +202,8 @@ Seed the mock with ~250 memories across agents `alpha`/`beta`, projects
 descriptions and realistic counts, timestamps spread over the last ~60 days — enough to
 exercise pagination (3 pages), search, AND-filtering, and tag merge. Most memories are
 `verified`, some `flagged` (a mix of `reject` and `rewrite` verdicts), the newest
-`unverified`; a few carry `supersedes` / `superseded_by` links. The mock also serves the
+`unverified`; a few carry `supersedes` / `superseded_by` links. The rule 2 rejects are
+archived, stamped over the last month, so the Archived page shows a range of days left. The mock also serves the
 search modes (with a `score`), `/memories/flagged` and the two review routes, and
 `GET /health` reports `review_model: reachable`. The mock catch-up takes 2 s per memory
 and reports its progress as `catch_up`, so the progress bar can be seen: press

@@ -77,10 +77,11 @@ export const api = {
    * @param {string} [p.type]
    * @param {'unverified'|'verified'|'flagged'} [p.status]  one review status
    * @param {boolean} [p.current]   true hides the memories a newer one supersedes
+   * @param {boolean} [p.archived]  true lists only the archived memories (hidden otherwise)
    * @param {number} [p.since_days]
    * @param {string} [p.since]
    * @param {string} [p.until]
-   * @param {'date_desc'|'date_asc'} [p.order]
+   * @param {'date_desc'|'date_asc'|'archived_desc'} [p.order]
    * @param {number} [p.limit=100]
    * @param {number} [p.offset=0]
    * @returns {Promise<{items: object[], total: number}>} total from X-Total-Count
@@ -104,6 +105,7 @@ export const api = {
    * @param {string} [p.since]
    * @param {string} [p.tag]        one tag (the route takes a single one)
    * @param {boolean} [p.current]
+   * @param {boolean} [p.archived]  true searches only the archived memories
    * @param {number} [p.limit=20]
    * @returns {Promise<{items: object[], fallback: string|null}>}
    *   `fallback` is the X-Search-Fallback header: the mode the server used
@@ -120,6 +122,7 @@ export const api = {
    * @param {string} [p.project]
    * @param {'reject'|'rewrite'} [p.verdict]  only that verdict
    * @param {'unverified'|'verified'|'flagged'} [p.status]  that status instead
+   * @param {boolean} [p.archived]  true lists only the archived memories
    * @param {number} [p.limit=100]  0 = all
    * @returns {Promise<{items: object[], total: number}>} total from X-Total-Count
    */
@@ -144,6 +147,13 @@ export const api = {
   /** GET /memories/{id} → MemoryOut (throws 404). */
   async getMemory(id) {
     const res = await request('GET', `/memories/${id}`)
+    return res.data
+  },
+
+  /** POST /memories/{id}/restore → { id, restored }. `restored` is false when
+   *  the memory was not archived; 404 when absent. */
+  async restoreMemory(id) {
+    const res = await request('POST', `/memories/${id}/restore`)
     return res.data
   },
 
@@ -239,9 +249,10 @@ export const api = {
     return res.data
   },
 
-  /** GET /health → { status, review_model?, catch_up? } (no auth). `review_model`
-   *  is `reachable`, `unreachable` or `off` when the server reports it; `catch_up`
-   *  is { total, done } while a catch-up runs, else null. */
+  /** GET /health → { status, review_model?, catch_up?, archive_days? } (no auth).
+   *  `review_model` is `reachable`, `unreachable` or `off` when the server reports
+   *  it; `catch_up` is { total, done } while a catch-up runs, else null;
+   *  `archive_days` is how long an archived memory is kept (0: for good). */
   async health() {
     const res = await request('GET', '/health', { auth: false })
     return res.data

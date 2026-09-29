@@ -38,6 +38,11 @@ DUPLICATE_THRESHOLD = 0.92
 # top ranks from crushing everything below them.
 RRF_K = 60
 
+# The rules whose reject archives the memory: 2, a diary line, and 4, what
+# git already holds or should hold. Neither is worth keeping in view, and a
+# restore brings one back when the model was wrong.
+ARCHIVE_RULES = (2, 4)
+
 
 def _since_days_window(n: int) -> tuple[datetime, None]:
     """Rolling window: everything from the start of the day N days ago through now
@@ -121,7 +126,17 @@ def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> 
         "supersedes": m.supersedes,
         # The newest memory that supersedes this one; the rows come newest first.
         "superseded_by": m.superseded_by_rows[0].id if m.superseded_by_rows else None,
+        "archived_at": (m.archived_at.isoformat(sep=" ", timespec="seconds")
+                        if m.archived_at else None),
     }
+
+
+def _archived_cond(archived: bool = False):
+    """The WHERE clause that keeps a read to the live memories, or with
+    `archived=True` to the archived ones only. Every listing, search and
+    count goes through it, so an archived memory shows only where it is
+    asked for; a read by id (`get`) does not, and still returns it."""
+    return Memory.archived_at.is_not(None) if archived else Memory.archived_at.is_(None)
 
 
 def _current_only(stmt):
@@ -187,11 +202,12 @@ def _reference(model: str | None, project: str | None):
     """The candidates the review paths compare with: the verified memories
     of `project` (no project matches no project) with a vector from `model`.
     A memory the model has not checked, or has flagged, is never used as
-    reference."""
+    reference, and neither is an archived one."""
     return (
         _candidates(model)
         .where(Memory.project.is_not_distinct_from(project))
         .where(Memory.review_status == VERIFIED)
+        .where(_archived_cond())
     )
 
 
@@ -256,15 +272,16 @@ async def find_duplicate(session, embedder, content, project) -> tuple[int, floa
 
 async def query(session, *, since_days=None, since=None, until=None, project=None,
                 agent=None, tag=None, mtype=None, status=None, current=False,
-                limit=None) -> list[dict]:
+                archived=False, limit=None) -> list[dict]:
     """The timeline, newest first, narrowed by the filters. `status` keeps to
     one review status (`unverified`, `verified` or `flagged`); `current`
-    hides the memories a newer one supersedes."""
+    hides the memories a newer one supersedes. Archived memories are left
+    out; `archived=True` lists only them."""
     _check_status(status)
     if since_days is not None:
         since, until = _since_days_window(since_days)
 
-    stmt = select(Memory).options(*_LOAD)
+    stmt = select(Memory).options(*_LOAD).where(_archived_cond(archived))
     if status:
         stmt = stmt.where(Memory.review_status == status)
     if current:
@@ -288,9 +305,12 @@ async def query(session, *, since_days=None, since=None, until=None, project=Non
     return [_dump(m) for m in rows]
 
 
-def _search_filters(stmt, *, project=None, agent=None, since=None, tag=None, current=False):
+def _search_filters(stmt, *, project=None, agent=None, since=None, tag=None, current=False,
+                    archived=False):
     """The WHERE clauses every search mode shares. `current` hides the
-    memories a newer one supersedes."""
+    memories a newer one supersedes. Archived memories are left out;
+    `archived=True` keeps to them."""
+    stmt = stmt.where(_archived_cond(archived))
     if current:
         stmt = _current_only(stmt)
     if project:
@@ -305,7 +325,7 @@ def _search_filters(stmt, *, project=None, agent=None, since=None, tag=None, cur
 
 
 async def search(session, text, *, project=None, agent=None, since=None, tag=None,
-                 current=False, limit=None) -> list[dict]:
+                 current=False, archived=False, limit=None) -> list[dict]:
     """Keyword search: rows whose words match `text`, best ts_rank first. Each
     row carries its rank as `score` and a highlighted `snippet`. `current`
     hides the memories a newer one supersedes."""
@@ -319,7 +339,7 @@ async def search(session, text, *, project=None, agent=None, since=None, tag=Non
         .where(Memory.content_tsv.op("@@")(tsquery))
     )
     stmt = _search_filters(stmt, project=project, agent=agent, since=since, tag=tag,
-                           current=current)
+                           current=current, archived=archived)
     stmt = stmt.order_by(rank.desc())
     if limit:
         stmt = stmt.limit(int(limit))
@@ -328,7 +348,8 @@ async def search(session, text, *, project=None, agent=None, since=None, tag=Non
 
 
 async def search_semantic(session, embedder: Embedder, text, *, project=None, agent=None,
-                          since=None, tag=None, current=False, limit=None) -> list[dict]:
+                          since=None, tag=None, current=False, archived=False,
+                          limit=None) -> list[dict]:
     """Search by meaning: rows closest to `text` in vector space, best first.
 
     Takes the same filters as `search`, but only rows that have a vector can
@@ -338,13 +359,15 @@ async def search_semantic(session, embedder: Embedder, text, *, project=None, ag
     broken by id, newest first. `limit` of 0 or None means all rows. Each
     row carries the cosine as `score`; `snippet` is None, since there are no
     matched words to highlight."""
-    filters = dict(project=project, agent=agent, since=since, tag=tag, current=current)
+    filters = dict(project=project, agent=agent, since=since, tag=tag, current=current,
+                   archived=archived)
     scored = await _scored_ids(session, embedder, text, filters, limit)
     return await _load_scored(session, scored)
 
 
 async def search_hybrid(session, embedder: Embedder, text, *, project=None, agent=None,
-                        since=None, tag=None, current=False, limit=None) -> list[dict]:
+                        since=None, tag=None, current=False, archived=False,
+                        limit=None) -> list[dict]:
     """Search by words and by meaning at once, fused by rank.
 
     Runs `search` and the scoring step of `search_semantic` with the same
@@ -359,7 +382,8 @@ async def search_hybrid(session, embedder: Embedder, text, *, project=None, agen
     Best fused score first, ties broken by id, newest first. `limit` of 0 or
     None means all rows. `score` is the fused score; `snippet` comes from the
     keyword hit when there is one, else None."""
-    filters = dict(project=project, agent=agent, since=since, tag=tag, current=current)
+    filters = dict(project=project, agent=agent, since=since, tag=tag, current=current,
+                   archived=archived)
     by_words = await search(session, text, **filters, limit=0)
     by_meaning = await _scored_ids(session, embedder, text, filters, 0)
 
@@ -414,6 +438,10 @@ async def update(session, mid, *, content=None, project=None, mtype=None,
         m.review_status = UNVERIFIED
         m.reviews.clear()
         m.supersedes = None
+        # An archived memory whose text is fixed is live again: the verdict
+        # that archived it was about the old text, and the catch-up never
+        # picks an archived memory, so it would stay unverified for good.
+        m.archived_at = None
         changes.append("content")
     if project is not None:
         m.project = project or None
@@ -464,6 +492,7 @@ async def list_tags(session) -> list[dict]:
     stmt = (
         select(Tag.name, count.label("count"), Tag.description)
         .join(Tag.memories)
+        .where(_archived_cond())
         .group_by(Tag.id, Tag.name, Tag.description)
         .order_by(count.desc(), Tag.name)
     )
@@ -474,7 +503,7 @@ async def list_projects(session) -> list[dict]:
     count = func.count()
     stmt = (
         select(Memory.project, count.label("count"))
-        .where(Memory.project.is_not(None))
+        .where(Memory.project.is_not(None), _archived_cond())
         .group_by(Memory.project)
         .order_by(count.desc())
     )
@@ -485,6 +514,7 @@ async def list_agents(session) -> list[dict]:
     count = func.count()
     stmt = (
         select(Memory.agent, count.label("count"))
+        .where(_archived_cond())
         .group_by(Memory.agent)
         .order_by(count.desc())
     )
@@ -492,45 +522,55 @@ async def list_agents(session) -> list[dict]:
 
 
 async def stats(session) -> dict:
+    """The counts of the live memories; archived ones count only in
+    `archived`."""
+    live = _archived_cond()
+
     async def scalar(stmt):
         return (await session.execute(stmt)).scalar()
 
     return {
-        "total": await scalar(select(func.count(Memory.id))),
-        "agents": await scalar(select(func.count(func.distinct(Memory.agent)))),
+        "total": await scalar(select(func.count(Memory.id)).where(live)),
+        "agents": await scalar(select(func.count(func.distinct(Memory.agent))).where(live)),
         "projects": await scalar(
-            select(func.count(func.distinct(Memory.project))).where(Memory.project.is_not(None))
+            select(func.count(func.distinct(Memory.project)))
+            .where(Memory.project.is_not(None), live)
         ),
         "tags": await scalar(select(func.count(Tag.id))),
         "today": await scalar(
-            select(func.count(Memory.id)).where(func.date(Memory.timestamp) == func.current_date())
+            select(func.count(Memory.id))
+            .where(func.date(Memory.timestamp) == func.current_date(), live)
         ),
         "week": await scalar(
-            select(func.count(Memory.id)).where(Memory.timestamp >= func.current_date() - 7)
+            select(func.count(Memory.id)).where(Memory.timestamp >= func.current_date() - 7, live)
         ),
         "oldest": await _ts(session, func.min(Memory.timestamp)),
         "newest": await _ts(session, func.max(Memory.timestamp)),
+        "archived": await scalar(select(func.count(Memory.id)).where(_archived_cond(True))),
     }
 
 
 async def _ts(session, agg):
-    val = (await session.execute(select(agg))).scalar()
+    val = (await session.execute(select(agg).where(_archived_cond()))).scalar()
     return val.isoformat(sep=" ", timespec="seconds") if val else None
 
 
 # ---- dashboard: unified list + tag management (D1) ------------------------
 async def list_memories(session, *, q=None, tags=(), project=None, agent=None, mtype=None,
-                        status=None, current=False, since_days=None, since=None, until=None,
-                        order="date_desc", limit=100, offset=0) -> tuple[list[dict], int]:
+                        status=None, current=False, archived=False, since_days=None,
+                        since=None, until=None, order="date_desc", limit=100,
+                        offset=0) -> tuple[list[dict], int]:
     """The one list endpoint: full-text (`q`) + multi-tag + filters + order +
     pagination. `status` keeps to one review status; `current` hides the
-    memories a newer one supersedes. `limit=0` means no limit.
+    memories a newer one supersedes. Archived memories are left out;
+    `archived=True` lists only them, and `order="archived_desc"` sorts them
+    by when they were archived. `limit=0` means no limit.
     Returns (items, total) where total ignores limit/offset."""
     _check_status(status)
     if since_days is not None:
         since, until = _since_days_window(since_days)
 
-    conds = []
+    conds = [_archived_cond(archived)]
     if status:
         conds.append(Memory.review_status == status)
     if current:
@@ -565,9 +605,10 @@ async def list_memories(session, *, q=None, tags=(), project=None, agent=None, m
         rows = (await session.execute(stmt)).all()
         items = [_dump(m, snippet=s) for m, s in rows]
     else:
-        # order = "<field>_<asc|desc>"; field ∈ date/agent/project/type/id.
+        # order = "<field>_<asc|desc>"; field ∈ date/agent/project/type/id/archived.
         cols = {"date": Memory.timestamp, "agent": Memory.agent,
-                "project": Memory.project, "type": Memory.type, "id": Memory.id}
+                "project": Memory.project, "type": Memory.type, "id": Memory.id,
+                "archived": Memory.archived_at}
         field, _, direction = (order or "date_desc").rpartition("_")
         col = cols.get(field, Memory.timestamp)
         ordered = col.asc() if direction == "asc" else col.desc()
@@ -739,7 +780,7 @@ def _newest_reviews():
     return aliased(MemoryReview, newest)
 
 
-def _flagged_filters(stmt, *, project=None, verdict=None, status=None):
+def _flagged_filters(stmt, *, project=None, verdict=None, status=None, archived=False):
     """The WHERE clauses of a review listing, and the alias of the review row
     they join (see `_newest_reviews`), as `(stmt, review)`. Without `status`:
     joined to the newest review row and kept to the flagged verdicts (or only
@@ -747,12 +788,14 @@ def _flagged_filters(stmt, *, project=None, verdict=None, status=None):
     (an outer join, so unverified memories, which have no row, are listed
     too), and to `verdict` when given. `project` narrows either. A `verdict`
     that is not one of the flagged ones, or a `status` that is not one of
-    `STATUSES`, is a caller's error."""
+    `STATUSES`, is a caller's error. Archived memories are left out;
+    `archived=True` keeps to them."""
     if verdict is not None and verdict not in FLAGGED_VERDICTS:
         raise ValueError(f"verdict must be one of {', '.join(FLAGGED_VERDICTS)} (got {verdict!r})")
     _check_status(status)
     review = _newest_reviews()
     on = review.memory_id == Memory.id
+    stmt = stmt.where(_archived_cond(archived))
     if status is None:
         wanted = FLAGGED_VERDICTS if verdict is None else (verdict,)
         stmt = stmt.join(review, on).where(review.verdict.in_(wanted))
@@ -765,15 +808,17 @@ def _flagged_filters(stmt, *, project=None, verdict=None, status=None):
     return stmt, review
 
 
-async def flagged(session, *, project=None, verdict=None, status=None, limit=None) -> list[dict]:
+async def flagged(session, *, project=None, verdict=None, status=None, archived=False,
+                  limit=None) -> list[dict]:
     """The memories the review flagged: those whose newest review says reject
     or rewrite, or only `verdict` when given, newest review first (ties:
     newest memory first, then by id). With `status`, the memories with that
     review status instead (`unverified` ones have no review, so they come
     newest memory first). Same shape as `query`, the review included.
-    `project` narrows to one project. `limit` of 0 or None means all."""
+    `project` narrows to one project. Archived memories are left out;
+    `archived=True` keeps to them. `limit` of 0 or None means all."""
     stmt, review = _flagged_filters(select(Memory).options(*_LOAD), project=project,
-                                    verdict=verdict, status=status)
+                                    verdict=verdict, status=status, archived=archived)
     stmt = stmt.order_by(review.created_at.desc().nulls_last(),
                          Memory.timestamp.desc(), Memory.id.desc())
     if limit:
@@ -782,10 +827,11 @@ async def flagged(session, *, project=None, verdict=None, status=None, limit=Non
     return [_dump(m) for m in rows]
 
 
-async def count_flagged(session, *, project=None, verdict=None, status=None) -> int:
+async def count_flagged(session, *, project=None, verdict=None, status=None,
+                        archived=False) -> int:
     """How many memories `flagged` would list with the same filters and no limit."""
     stmt, _ = _flagged_filters(select(func.count(Memory.id)), project=project,
-                               verdict=verdict, status=status)
+                               verdict=verdict, status=status, archived=archived)
     return (await session.execute(stmt)).scalar()
 
 
@@ -794,10 +840,10 @@ async def unverified_ids(session, *, limit=None) -> list[int]:
     by id): the memories the model has not checked yet, written while it was
     off or when it gave no answer. This is the order the catch-up reviews
     them in, so that each one is verified before the next is compared.
-    `limit` of 0 or None means all."""
+    An archived memory is never picked. `limit` of 0 or None means all."""
     stmt = (
         select(Memory.id)
-        .where(Memory.review_status == UNVERIFIED)
+        .where(Memory.review_status == UNVERIFIED, _archived_cond())
         .order_by(Memory.timestamp.asc(), Memory.id.asc())
     )
     if limit:
@@ -812,19 +858,40 @@ async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
     `flagged` for a reject or rewrite) and its `supersedes` link from
     `verdict.supersedes` (None clears an earlier link), and return the API
     view of the review. Both follow the newest row, which this one now is.
-    `model` names the model that gave it. Raises `LookupError` when there
-    is no such memory, or when the verdict names a memory to supersede that
-    does not exist, and `ValueError` when it names the memory itself."""
+    `model` names the model that gave it.
+
+    Two verdicts also archive a memory (see `archive`). A reject under one
+    of `ARCHIVE_RULES` archives the memory itself. A merge, a rewrite with
+    `duplicate_of`, archives that older memory, and the newer one gets its
+    `supersedes` link pointing at it when the verdict set none. A reversal,
+    an approve with `supersedes`, archives nothing: both stay in view.
+
+    Raises `LookupError` when there is no such memory, or when the verdict
+    names a memory to supersede or to merge into that does not exist, and
+    `ValueError` when it names the memory itself."""
     memory = await session.get(Memory, mid)
     if memory is None:
         raise LookupError(f"Memory #{mid} not found")
-    if verdict.supersedes is not None:
-        if verdict.supersedes == mid:
+    merge = verdict.duplicate_of if verdict.verdict == "rewrite" else None
+    merged_into = None
+    for other in (verdict.supersedes, merge):
+        if other is None:
+            continue
+        if other == mid:
             raise ValueError(f"Memory #{mid} cannot supersede itself")
-        if await session.get(Memory, verdict.supersedes) is None:
-            raise LookupError(f"Memory #{verdict.supersedes} not found")
+        found = await session.get(Memory, other)
+        if found is None:
+            raise LookupError(f"Memory #{other} not found")
+        if other == merge:
+            merged_into = found
     memory.review_status = status_for(verdict.verdict)
     memory.supersedes = verdict.supersedes
+    if merged_into is not None:
+        merged_into.archived_at = merged_into.archived_at or _now()
+        if memory.supersedes is None:
+            memory.supersedes = merged_into.id
+    if verdict.verdict == "reject" and verdict.rule in ARCHIVE_RULES:
+        memory.archived_at = memory.archived_at or _now()
     row = MemoryReview(memory_id=mid, verdict=verdict.verdict, rule=verdict.rule,
                        reason=verdict.reason, rewrite=verdict.rewrite,
                        duplicate_of=verdict.duplicate_of, tags=list(verdict.tags) or None,
@@ -869,6 +936,7 @@ async def tags_for_review(session, embedder: Embedder | None, content: str,
     stmt = (
         select(Tag.name, Tag.embedding, Tag.embedding_model)
         .join(Tag.memories)
+        .where(_archived_cond())
         .group_by(Tag.id)
         .order_by(count.desc(), Tag.name)
     )
@@ -883,6 +951,54 @@ async def tags_for_review(session, embedder: Embedder | None, content: str,
               if vec is not None and stored_model == model]
     scored.sort(key=lambda pair: (-pair[0], pair[1]))
     return [name for _, name in scored[:limit]]
+
+
+# ---- archive: what the review put out of view --------------------------------
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+async def archive(session, mid: int) -> bool | None:
+    """Archive memory `mid`: stamp `archived_at` with now, which hides it
+    from every listing, search and count, and from the reference set. True
+    when it was archived now, False when it already was (the first stamp
+    stays, so the days left do not start over), None when there is no
+    such memory."""
+    memory = await session.get(Memory, mid)
+    if memory is None:
+        return None
+    if memory.archived_at is not None:
+        return False
+    memory.archived_at = _now()
+    await session.flush()
+    return True
+
+
+async def restore(session, mid: int) -> bool | None:
+    """Bring memory `mid` back into view: clear `archived_at`. Its status
+    and its reviews stay as they are. True when it was archived, False when
+    it was not (nothing changes), None when there is no such memory."""
+    memory = await session.get(Memory, mid)
+    if memory is None:
+        return None
+    if memory.archived_at is None:
+        return False
+    memory.archived_at = None
+    await session.flush()
+    return True
+
+
+async def delete_archived(session, days: float, now: datetime | None = None) -> int:
+    """Delete the memories archived more than `days` days before `now`
+    (the current time when None), with their tags links and reviews, and
+    return how many went. `days` of 0 or less deletes nothing: an archive
+    kept for good."""
+    if days <= 0:
+        return 0
+    cutoff = (now or _now()) - timedelta(days=days)
+    res = await session.execute(
+        sql_delete(Memory).where(Memory.archived_at.is_not(None), Memory.archived_at < cutoff))
+    return res.rowcount or 0
 
 
 # ---- reindex: fill in missing or stale vectors -----------------------------

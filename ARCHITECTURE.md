@@ -78,6 +78,7 @@ erDiagram
         text embedding_model
         text review_status "unverified, verified, flagged"
         bigint supersedes FK "older memory this one replaces"
+        timestamptz archived_at "set by the review, null while live"
     }
     memory_reviews {
         bigint id PK
@@ -216,7 +217,7 @@ A memory found both ways always outranks one found one way at the same rank.
 
 ```mermaid
 flowchart TD
-    T[tick, every AGENT_MEMORY_REVIEW_POLL s] --> R{model answers<br/>GET /api/tags?}
+    T[tick, every AGENT_MEMORY_REVIEW_POLL s] --> X[delete memories archived<br/>over AGENT_MEMORY_ARCHIVE_DAYS ago] --> R{model answers<br/>GET /api/tags?}
     R -- no --> U[health: unreachable] --> T
     R -- yes --> L{catch-up<br/>already running?}
     L -- yes --> T
@@ -349,7 +350,11 @@ CREATE TABLE memories (
     -- model's verdict and never from a request. Both rows stay; the old one
     -- reads as superseded by the newest row that points at it. Cleared when
     -- the old memory is deleted.
-    supersedes      BIGINT REFERENCES memories(id) ON DELETE SET NULL
+    supersedes      BIGINT REFERENCES memories(id) ON DELETE SET NULL,
+    -- When the review archived the row (a reject under rule 2 or 4, or the older
+    -- memory of a merge), NULL while it is live. Hidden from every listing and
+    -- from the reference set; the poll deletes it after AGENT_MEMORY_ARCHIVE_DAYS.
+    archived_at     TIMESTAMPTZ
 );
 CREATE INDEX idx_content_tsv ON memories USING gin (content_tsv);
 CREATE INDEX ix_memories_timestamp ON memories (timestamp);
@@ -358,6 +363,7 @@ CREATE INDEX ix_memories_project   ON memories (project);
 CREATE INDEX ix_memories_type      ON memories (type);
 CREATE INDEX ix_memories_review_status ON memories (review_status);
 CREATE INDEX ix_memories_supersedes ON memories (supersedes);
+CREATE INDEX ix_memories_archived_at ON memories (archived_at);
 
 -- Canonical tags: case-insensitive-unique name + a required descriptor.
 CREATE TABLE tags (
@@ -597,6 +603,23 @@ have the same length.
   content sets the memory back to `unverified` and deletes its review rows and its
   `supersedes` link (every verdict was about the old text), so the next catch-up reads
   it again; a change of tags, project or type alone keeps all three.
+
+**The archive.** `set_review` archives a memory (`archived_at`, schema above) on two
+verdicts: a `reject` whose rule is in `ARCHIVE_RULES` (2, a diary line; 4, what git holds),
+which archives the memory itself, and a merge (a `rewrite` with `duplicate_of`), which
+archives that older memory and gives the newer one `supersedes` pointing at it when the
+verdict set no link. A reversal (an approve with `supersedes`) archives nothing. Every
+listing, search mode, count, `/projects`, `/agents`, `/tags`, `/stats` and the reference
+set (`_reference`, so `find_duplicate` and `_nearest`; `unverified_ids`; the tags offered)
+go through `_archived_cond`, which keeps to live rows, or with `archived=true` on the list
+routes to archived rows only. A read by id still returns one. `POST /memories/{id}/restore`
+clears the stamp; new content from `update` clears it too, since the catch-up never picks
+an archived memory and the new text needs its check. Each poll tick first deletes the
+memories archived more than `AGENT_MEMORY_ARCHIVE_DAYS` days ago (`delete_archived`,
+default 30, 0 or less keeps them), whether or not the model answers, with one log line
+when it deletes any. The poll runs only while the review is on, and only the review
+archives. There is no action log: the review history already holds each verdict and its
+reason.
 
 Before a check goes live, `scripts/replay_write_checks.py` runs the duplicate check and
 the warnings over a copy of the database in write order and prints what each would

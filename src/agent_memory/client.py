@@ -186,39 +186,45 @@ class ApiClient:
         return data["id"], data.get("warnings") or []
 
     def query(self, *, since_days=None, since=None, until=None, project=None,
-              agent=None, tag=None, mtype=None, status=None, current=False, limit=None):
+              agent=None, tag=None, mtype=None, status=None, current=False,
+              archived=False, limit=None):
         """Rows only. `status` keeps to one review status ("unverified",
         "verified" or "flagged"; None for all). `current=True` hides the
-        memories a newer one supersedes. `limit=0` returns everything;
+        memories a newer one supersedes. Archived memories are left out;
+        `archived=True` lists only them. `limit=0` returns everything;
         None uses the server default."""
         rows, _ = self.query_with_total(
             since_days=since_days, since=since, until=until, project=project,
-            agent=agent, tag=tag, mtype=mtype, status=status, current=current, limit=limit)
+            agent=agent, tag=tag, mtype=mtype, status=status, current=current,
+            archived=archived, limit=limit)
         return rows
 
     def query_with_total(self, *, since_days=None, since=None, until=None, project=None,
                          agent=None, tag=None, mtype=None, status=None, current=False,
-                         limit=None):
+                         archived=False, limit=None):
         """(rows, total): total is the match count ignoring the limit."""
         _, headers, data = self._request("GET", "/memories", params={
             "since_days": since_days, "since": since, "until": until,
             "project": project, "agent": agent, "tag": tag, "type": mtype,
-            "status": status, "current": "true" if current else None, "limit": limit,
+            "status": status, "current": "true" if current else None,
+            "archived": "true" if archived else None, "limit": limit,
         })
         rows = data or []
         total = int((headers or {}).get("X-Total-Count") or len(rows))
         return rows, total
 
     def search(self, text, *, project=None, agent=None, since=None, tag=None, limit=None,
-               mode=None, current=False):
+               mode=None, current=False, archived=False):
         """Rows with a `snippet` and a `score`. `mode` is "keyword", "semantic"
         or "hybrid"; None leaves it out, so the server picks its default
         (keyword). `current=True` hides the memories a newer one supersedes.
-        A mode the server cannot serve raises `ApiRefused`."""
+        `archived=True` searches only the archived memories, which are left
+        out otherwise. A mode the server cannot serve raises `ApiRefused`."""
         _, data = self._call("GET", "/memories/search", params={
             "q": text, "project": project, "agent": agent,
             "since": since, "tag": tag, "limit": limit, "mode": mode,
             "current": "true" if current else None,
+            "archived": "true" if archived else None,
         })
         return data or []
 
@@ -232,6 +238,13 @@ class ApiClient:
         that has not been reviewed; None when there is no such memory."""
         status, data = self._call("GET", f"/memories/{mid}/reviews")
         return None if status == 404 else (data or [])
+
+    def restore(self, mid):
+        """Bring an archived memory back into view. True when it was
+        archived, False when it was not (nothing changed), None when there
+        is no such memory."""
+        status, data = self._call("POST", f"/memories/{mid}/restore")
+        return None if status == 404 else bool(data["restored"])
 
     def update(self, mid, *, content=None, project=None, mtype=None,
                set_tags=None, add_tags=None, remove_tags=None):
@@ -278,20 +291,23 @@ class ApiClient:
         _, data = self._call("POST", "/admin/reindex")
         return data
 
-    def flagged(self, project=None, verdict=None, status=None, limit=None):
+    def flagged(self, project=None, verdict=None, status=None, limit=None, archived=False):
         """The memories the review flagged, newest review first, each with its
         `review`. `verdict` is "reject" or "rewrite"; None lists both. With
         `status` ("unverified", "verified" or "flagged") the memories with
-        that review status instead. `limit=0` returns everything; None uses
-        the server default."""
+        that review status instead. Archived memories are left out;
+        `archived=True` lists only them. `limit=0` returns everything; None
+        uses the server default."""
         rows, _ = self.flagged_with_total(project=project, verdict=verdict, status=status,
-                                          limit=limit)
+                                          limit=limit, archived=archived)
         return rows
 
-    def flagged_with_total(self, project=None, verdict=None, status=None, limit=None):
+    def flagged_with_total(self, project=None, verdict=None, status=None, limit=None,
+                           archived=False):
         """(rows, total): total is the match count ignoring the limit."""
         _, headers, data = self._request("GET", "/memories/flagged", params={
             "project": project, "verdict": verdict, "status": status, "limit": limit,
+            "archived": "true" if archived else None,
         })
         rows = data or []
         total = int((headers or {}).get("X-Total-Count") or len(rows))
