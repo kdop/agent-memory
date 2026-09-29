@@ -78,11 +78,16 @@ memory add "<content>" --agent=<you> --project=<name> --type=<type> \
   exit code is 3. Update that memory instead. Use `--force` only when the new entry is
   a deliberate separate record, for example a reversal of a decision.
 - **Review:** a `review:` line under a memory (on `show`, `query` or `search`) is a
-  model's verdict on it against the rules above: `reject` names the rule it breaks,
-  `rewrite` adds a suggested text under `suggested:`. When the server is set to refuse
-  what the model rejects, a refused `add` prints the rule and the suggestion, stores
-  nothing and exits with code 4. When the verdict is right, fix the entry and add it
-  again. When you believe the entry is right as written, ask the user and pass `--force`
+  model's verdict on it against the rules above: `reject` names the rule it breaks
+  (anything git holds or a project's own files should hold is rule 4); `improve` says
+  the entry is worth keeping but needs one thing: `reason` (the why, for a decision,
+  lesson or constraint only), `clarity`, `detail` or `scope`; `rewrite` is only for a
+  repeat that adds more, with the merged text under `suggested:`. When the server is
+  set to refuse, a refused `add` prints the verdict, stores nothing and exits with
+  code 4; an `improve` prints "Low value memory, retry with more context or skip" and
+  what is missing: add it and try again, or drop the entry. When the verdict is
+  right, fix the entry and add it again; fixing a stored one with `memory update`
+  puts it back to unverified for the model to check again. When you believe the entry is right as written, ask the user and pass `--force`
   only when the user says yes; never on your own. The header line of every memory says its status (`unverified` until
   the model has checked it, `verified` when it approved, `flagged` when it did not), and
   only verified memories count as reference when a new entry is checked. A memory that

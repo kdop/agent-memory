@@ -59,6 +59,8 @@ REJECT = Verdict("reject", 1, "It will not matter in a later session.", None, No
 ARCHIVING = Verdict("reject", 2, "A diary line: it says what was done, not why.", None, None)
 REWRITE = Verdict("rewrite", 3, "Say why.", "Chose Postgres,\nbecause of X.", None,
                   ["database", "search"])
+IMPROVE = Verdict("improve", 3, "needs reason: Say why the store moved.", None, None,
+                  needs="reason")
 
 
 class FakeEmbedder:

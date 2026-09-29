@@ -1,9 +1,9 @@
 """Verdict quality with the real model: the prompt measured, not felt.
 
 The review prompt's checklist was tuned by hand to one model. This file runs
-the 30 entries in `tests/data/verdict_set.json` through `OllamaReviewer` with
+the entries in `tests/data/verdict_set.json` through `OllamaReviewer` with
 the neighbours and the offered tags from the file, grades each answer against
-the expected verdict, rule, `duplicate_of` and `supersedes`, and prints one
+the expected verdict, rule, `needs`, `duplicate_of` and `supersedes`, and prints one
 table: case, passed of total, and each miss with what the model said. The
 overall pass rate must stay at or above the `floor` stored in the file. Raise
 the floor when the prompt improves; a change to the wording or the model that
@@ -24,16 +24,21 @@ from pathlib import Path
 import pytest
 
 from agent_memory.server import review as review_mod
-from agent_memory.server.review import RULES, VERDICTS, OllamaReviewer
+from agent_memory.server.review import NEEDS, RULES, VERDICTS, OllamaReviewer
 from test_review import _real_server
 
 VERDICT_SET_PATH = Path(__file__).resolve().parent / "data" / "verdict_set.json"
 
 CASES = (
-    "clean-decision", "clean-lesson", "clean-preference", "diary", "git-fact", "no-why",
-    "exact-repeat", "reworded-repeat", "reversal", "partial-repeat-more",
+    "clean-decision", "clean-lesson", "clean-preference", "no-why-exempt", "constraint",
+    "diary", "git-fact", "belongs-in-git", "improve-reason", "improve-clarity",
+    "improve-detail", "improve-scope", "exact-repeat", "reworded-repeat", "reversal",
+    "partial-repeat-more",
 )
-ENTRY_COUNT = 30
+ENTRY_COUNT = 45
+# Each need has at least this many improve cases that expect it.
+PER_NEED_MIN = 2
+CONSTRAINT_MIN = 3
 PER_CASE_MIN = 2
 
 
@@ -42,7 +47,8 @@ def load_verdict_set(path=VERDICT_SET_PATH):
 
     Returns `(entries, tags, floor)`. Each entry has `case` (one of `CASES`),
     `memory`, `neighbours` (each with an id and `review_status` verified) and
-    `expected` with `verdict`, `rule`, `duplicate_of` and `supersedes`. A bad
+    `expected` with `verdict`, `rule`, `needs` (one of `NEEDS` for an
+    improve, else null), `duplicate_of` and `supersedes`. A bad
     entry is a data error, so it raises rather than letting the test score
     against nothing."""
     with open(path, encoding="utf-8") as f:
@@ -66,6 +72,9 @@ def load_verdict_set(path=VERDICT_SET_PATH):
             raise ValueError(f"entry {n} expects an unknown verdict {x['verdict']!r}")
         if x["rule"] is not None and x["rule"] not in rule_numbers:
             raise ValueError(f"entry {n} expects an unknown rule {x['rule']!r}")
+        if (x["verdict"] == "improve") != (x["needs"] is not None) or \
+                (x["needs"] is not None and x["needs"] not in NEEDS):
+            raise ValueError(f"entry {n} expects needs {x['needs']!r} with {x['verdict']}")
         for key in ("duplicate_of", "supersedes"):
             if not isinstance(x[key], bool):
                 raise ValueError(f"entry {n} expected.{key} must be true or false")
@@ -79,8 +88,8 @@ def load_verdict_set(path=VERDICT_SET_PATH):
 def grade(expected: dict, verdict) -> list[str]:
     """What is wrong with the model's answer, as short lines; empty when it
     matches. The verdict must match; the rule must match when the file gives
-    a number; `duplicate_of` and `supersedes` must be set when the file says
-    true and unset when it says false."""
+    a number; `needs` must match; `duplicate_of` and `supersedes` must be set
+    when the file says true and unset when it says false."""
     if verdict is None:
         return ["no usable answer from the model"]
     wrong = []
@@ -88,6 +97,8 @@ def grade(expected: dict, verdict) -> list[str]:
         wrong.append(f"verdict {verdict.verdict}, expected {expected['verdict']}")
     if expected["rule"] is not None and verdict.rule != expected["rule"]:
         wrong.append(f"rule {verdict.rule}, expected {expected['rule']}")
+    if verdict.needs != expected["needs"]:
+        wrong.append(f"needs {verdict.needs}, expected {expected['needs']}")
     for key in ("duplicate_of", "supersedes"):
         got = getattr(verdict, key)
         if expected[key] and got is None:
@@ -103,6 +114,9 @@ def test_verdict_set_is_well_formed():
     assert tags and all(isinstance(t, str) and t for t in tags)
     counts = {case: sum(1 for e in entries if e["case"] == case) for case in CASES}
     assert all(n >= PER_CASE_MIN for n in counts.values()), counts
+    assert counts["constraint"] >= CONSTRAINT_MIN
+    needs = [e["expected"]["needs"] for e in entries if e["expected"]["verdict"] == "improve"]
+    assert all(needs.count(need) >= PER_NEED_MIN for need in NEEDS), needs
 
 
 @pytest.mark.review

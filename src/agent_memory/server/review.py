@@ -3,18 +3,22 @@
 The model sees the five rules from the memory skill, the new memory, the
 five memories closest to it in the same project, and the ten existing tags
 closest to it in meaning. It answers approve, reject (with the rule the entry
-breaks) or rewrite (with better text and the tags from that list that fit it).
-The verdict is stored next to the memory and shown with it. Two cases look
+breaks), improve (with what the entry needs: see `NEEDS`) or rewrite. The
+verdict is stored next to the memory and shown with it. Two cases look
 at the neighbours: an entry that reverses or replaces one is approved with
 `supersedes` set to that id, which the server stores on the new memory as a
 link (both memories stay); an entry that repeats one and adds to it gets a
 rewrite with the merged text and `duplicate_of` that id, for the writer to
-apply to the old memory. The model never changes a stored memory.
+apply to the old memory. That merge is the only verdict with suggested
+text. The model never changes a stored memory. A plain approve is followed
+by a second, short question (`GAP_PROMPT`), which turns it into an improve
+when the entry leans on something it never gives.
 
 In `flag` mode it is advice only: nothing is refused or changed because of
 it, and the write never waits for it. In `refuse` mode the model reads the
-entry before it is stored, and a reject or rewrite verdict refuses the write
-(HTTP 422 with the verdict and the suggestion); `force=true` stores it anyway.
+entry before it is stored, and any verdict but approve refuses the write
+(HTTP 422 with the verdict, and the merged text for a rewrite); `force=true`
+stores it anyway.
 In both modes a model that does not answer never blocks a write: the memory
 is stored and one log line says the review did not run.
 
@@ -74,19 +78,32 @@ RULES: tuple[tuple[int, str], ...] = (
         "one markdown file per ISO week named `<year>_<week>.md` (for example `2026_39.md`)."),
 )
 
-VERDICTS = ("approve", "reject", "rewrite")
+VERDICTS = ("approve", "reject", "improve", "rewrite")
+
+# What an `improve` verdict says the entry lacks: its why (rule 3, for a
+# decision, lesson or constraint), words a later reader can follow, the fact
+# needed to act on it (a number, a name), or where it holds.
+NEEDS = ("reason", "clarity", "detail", "scope")
+
+# The types rule 3 (the why) holds for. A preference, a note or an entry with
+# no type never needs a why.
+WHY_TYPES = ("decision", "lesson", "constraint")
+
+# The message a refused `improve` starts with, before what is missing.
+LOW_VALUE = "Low value memory, retry with more context or skip"
 
 # What a memory's `review_status` says about the model's check of it:
 # `unverified` (not checked yet, or the model gave no answer), `verified`
-# (approved) or `flagged` (rejected, or a rewrite was suggested). Only
-# verified memories serve as reference when another memory is checked.
+# (approved) or `flagged` (rejected, told to improve, or a merge was
+# suggested). Only verified memories serve as reference when another memory
+# is checked.
 STATUSES = ("unverified", "verified", "flagged")
 UNVERIFIED, VERIFIED, FLAGGED = STATUSES
 
 
 def status_for(verdict: str) -> str:
     """The status a memory gets when `verdict` is stored for it: approve
-    gives `verified`, reject or rewrite gives `flagged`."""
+    gives `verified`, reject, improve or rewrite gives `flagged`."""
     if verdict not in VERDICTS:
         raise ValueError(f"verdict must be one of {', '.join(VERDICTS)} (got {verdict!r})")
     return VERIFIED if verdict == "approve" else FLAGGED
@@ -94,7 +111,7 @@ def status_for(verdict: str) -> str:
 
 # The values AGENT_MEMORY_REVIEW may take. `off` means no model is asked;
 # `flag` stores the verdict after the write; `refuse` refuses a write the
-# model rejects or wants rewritten.
+# model does not approve.
 MODES = ("off", "flag", "refuse")
 # The names the modes had before: accepted for one release, with one log
 # line saying which name to use now.
@@ -106,8 +123,11 @@ class Verdict:
     """What the model said about one memory.
 
     `verdict` is one of `VERDICTS`. `rule` is the number of the rule the entry
-    breaks or falls short of (None for an approve). `reason` is one sentence.
-    `rewrite` is the suggested text when the verdict is `rewrite`, else None.
+    breaks or falls short of (None for an approve). `reason` is one sentence;
+    for an improve it starts with `needs <what>: ` (see `improve_reason`), so
+    the stored text says what is missing without a column of its own.
+    `needs` is that word, one of `NEEDS`, for an improve, else None.
+    `rewrite` is the merged text when the verdict is `rewrite`, else None.
     `duplicate_of` is the id of the listed neighbour this entry repeats, when
     the verdict is a reject for that reason, or the listed neighbour this
     entry repeats and adds to, when the verdict is a rewrite with the merged
@@ -124,9 +144,36 @@ class Verdict:
     duplicate_of: int | None
     tags: list[str] = field(default_factory=list)
     supersedes: int | None = None
+    needs: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+def improve_reason(needs: str, line: str) -> str:
+    """The `reason` of an improve verdict: `needs <what>: <line>`. The review
+    table has no column for `needs`, so it lives in the reason text, and
+    `needs_of` reads it back."""
+    return f"needs {needs}: {line}"
+
+
+def needs_of(verdict: str, reason: str | None) -> str | None:
+    """What an improve verdict says the entry needs, read from its stored
+    `reason` (see `improve_reason`); None for any other verdict, or a reason
+    not in that form."""
+    if verdict != "improve" or not reason or not reason.startswith("needs "):
+        return None
+    word = reason[len("needs "):].split(":", 1)[0].strip()
+    return word if word in NEEDS else None
+
+
+def refusal_message(verdict: Verdict) -> str | None:
+    """The message a refused improve gives the writer: `LOW_VALUE`, then what
+    is missing. None for any other verdict."""
+    if verdict.verdict != "improve":
+        return None
+    missing = verdict.reason[:1].upper() + verdict.reason[1:]
+    return f"{LOW_VALUE}. {missing}"
 
 
 class Reviewer:
@@ -189,11 +236,30 @@ class OllamaReviewer(Reviewer):
             log.warning("review of memory %s failed: %s at %s: %s",
                         _label(memory), self.model_name, self.url, _cause(e))
             return None
-        verdict = parse_verdict(text, [n["id"] for n in neighbours], list(tags))
+        verdict = parse_verdict(text, [n["id"] for n in neighbours], list(tags),
+                                entry_type=memory.get("type"))
         if verdict is None:
             log.warning("review of memory %s failed: %s gave no usable JSON: %.200s",
                         _label(memory), self.model_name, text)
+            return None
+        if verdict.verdict == "approve" and verdict.supersedes is None:
+            return self._check_gap(memory, verdict)
         return verdict
+
+    def _check_gap(self, memory: dict, approve: Verdict) -> Verdict:
+        """The second question, asked only of a plain approve: does the entry
+        lean on something it never gives (see `GAP_PROMPT`)? An improve when
+        it does; the approve as it was when it does not, or when the model
+        gives no usable answer (one log line), since the entry passed the
+        rules and a missing second answer must not flag it."""
+        try:
+            text = self._chat(self.gap_request_body(memory))
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            log.warning("gap check of memory %s failed: %s at %s: %s",
+                        _label(memory), self.model_name, self.url, _cause(e))
+            return approve
+        gap = parse_gap(text, memory.get("content", ""))
+        return gap if gap is not None else approve
 
     def reachable(self) -> bool:
         """Whether the Ollama server answers now: one `GET /api/tags`, which
@@ -227,6 +293,12 @@ class OllamaReviewer(Reviewer):
             "options": {"num_ctx": 8192, "temperature": 0},
         }
 
+    def gap_request_body(self, memory: dict) -> dict:
+        """The JSON sent to `/api/chat` for the gap check: the entry's type
+        and text only, with the same settings as `request_body`."""
+        user = f"type: {memory.get('type') or 'none'}\ncontent: {memory.get('content', '')}"
+        return self.chat_body(GAP_PROMPT, user)
+
     def _chat(self, body: dict) -> str:
         """POST the body and return the text of the model's message."""
         req = urllib.request.Request(
@@ -259,8 +331,12 @@ def _cause(e: Exception) -> str:
 # them it judged first and made up a reason to fit. Two more rules, both learned
 # from the verdict set (tests/data/verdict_set.json): an example never carries an
 # id (the model copies it), and never shares a subject with a test entry (the model
-# borrows the example's reason for an entry on the same subject). Measure a change
-# here with tests/test_verdict_quality.py before keeping it.
+# borrows the example's reason for an entry on the same subject). The project-fact
+# step has an example of its kind on another subject: without it the model approved
+# a plain "the API is a FastAPI app on Postgres" note. The `step` key after the lead
+# keys makes it name the step before the verdict: without it, once `improve` was on
+# the list, it answered improve or rewrite for plain repeats. Measure a change here
+# with tests/test_verdict_quality.py before keeping it.
 SYSTEM_PROMPT = (
     "You review entries that AI agents write to a shared memory. Memory is for what "
     "will still matter in a later session. The rules:\n"
@@ -268,11 +344,14 @@ SYSTEM_PROMPT = (
     + "\n\n"
     "You get one new entry, up to five existing entries from the same project, and a "
     "list of existing tag names. Answer with one JSON object and nothing else, with "
-    "exactly these nine keys, in this order:\n"
+    "exactly these eleven keys, in this order:\n"
     '{"why": "<the words of the new entry that give its reason, or \\"\\">", '
     '"new_facts": "<what the new entry adds to the closest listed entry, or \\"\\">", '
+    '"step": <the number of the first step below that applies>, '
     '"supersedes": <id or null>, "duplicate_of": <id or null>, '
-    '"verdict": "approve" | "reject" | "rewrite", "rule": <number or null>, '
+    '"verdict": "approve" | "reject" | "rewrite" | "improve", '
+    '"needs": <"reason" for improve, else null>, '
+    '"rule": <number or null>, '
     '"reason": "<one sentence>", "rewrite": "<text>" or null, '
     '"tags": [<names from the list only>]}\n'
     "why: copy the words of the new entry that give the reason or the cause, in any "
@@ -294,19 +373,20 @@ SYSTEM_PROMPT = (
     "duplicate_of: the id of the listed entry the new entry repeats, with or without "
     "more; null when it repeats none. Never set both supersedes and duplicate_of.\n"
     "\n"
-    "Go through these steps in order and stop at the first that applies:\n"
-    "1. Out of date. supersedes is set: the new entry reverses or replaces what a listed "
-    "existing entry says, with a why. Answer approve, supersedes that entry's id, "
+    "Go through these steps in order and stop at the first that applies. Write its "
+    "number as step, then give the verdict that step names.\n"
+    "1. Out of date. The new entry reverses or replaces what a listed existing entry "
+    "says, with a why. Answer approve, supersedes that entry's id, "
     "everything else null and tags []. Example: the listed entry says 'Kept the weekly "
     "report as a PDF because the board reads it on paper' and the new entry says 'Moved "
     "the weekly report to a web page because the board now reads it on phones': "
     "approve, supersedes that entry's id.\n"
-    '2. Repeat. duplicate_of is set and new_facts is "": the new entry says the same as '
-    "a listed existing entry, word for word or in other words, and nothing more. Reject, "
+    '2. Repeat. new_facts is "" and the new entry says the same as a listed existing '
+    "entry, word for word or in other words, and nothing more. Reject, "
     "duplicate_of that entry's id, rule null, rewrite null. A repeat is never approved "
     "and never rewritten.\n"
-    '3. Repeat with more. duplicate_of is set and new_facts is not "": the new entry says '
-    "what a listed existing entry says and adds something to it. Rewrite, with one merged "
+    '3. Repeat with more. new_facts is not "" and the new entry says what a listed '
+    "existing entry says and adds something to it. Rewrite, with one merged "
     "text that keeps the listed entry's words and adds the new part, duplicate_of that "
     "entry's id, and rule null. Example: the listed entry says 'Cache entries expire after "
     "an hour because prices change hourly' and the new entry says 'Cache entries expire "
@@ -320,20 +400,63 @@ SYSTEM_PROMPT = (
     "file, function or setting that was moved, renamed or changed, a commit-shaped "
     "sentence (added X to Y, raised the timeout from 5 to 10). Reject, rule 4. Such a "
     "fact is true and durable and still does not belong here.\n"
-    '6. No why. why is "": the entry states what was decided, chosen, learned or must '
-    "be done, but not why. Reject, rule 3, however sensible the choice looks. Never add "
-    "a why yourself.\n"
-    "7. Otherwise the entry states the what and the why: approve, everything else null "
-    "and tags [].\n"
+    "6. Project fact. The new entry describes how the project is made, as anyone can "
+    "read it in the code: its framework, its database, its services, where a file, a "
+    "module or a setting lives. It belongs in the project's own files, which git "
+    "tracks. Reject, rule 4. An entry that weighs a choice and says why it was made is "
+    "a decision, not a project fact. Example: 'The billing service is a Django app on "
+    "MySQL.' is a project fact; 'Billing runs on MySQL because the team already runs "
+    "it for the shop.' is a decision.\n"
+    "7. No why. Only for the types decision, lesson and constraint; skip this step for "
+    'any other type. why is "": the entry states what was decided, learned or must be '
+    "done, but not why. Improve, needs reason, rule 3, however sensible the choice "
+    "looks. Never add a why yourself.\n"
+    "8. Otherwise approve, everything else null and tags [].\n"
     "\n"
-    "- rule is the number of the rule a rejected entry breaks; null for a repeat, an "
-    "approve or a rewrite.\n"
+    "- needs is set for improve only, else null.\n"
+    "- rule is the number of the rule a rejected or improved entry breaks; null for a "
+    "repeat, an approve or a rewrite.\n"
     "- rewrite is the merged text from step 3, else null. tags go with a rewrite only: "
     "the names from the offered list that fit the new text, most fitting first, at most "
     "five; never a name that is not on the list, and [] when none fits.\n"
     "- Ids are numbers, not strings.\n"
     "- A short entry is fine when it follows the rules. Do not reject for length.\n"
     "- reason is one plain sentence a person can act on."
+)
+
+
+# The gap check: a second, short question asked only when the checklist above
+# approves. The model does not find a missing value or an unclear word inside
+# the long checklist (it approves nearly every such entry there), but finds most
+# of them when asked on their own. It copies the phrase first, names its kind
+# from the phrase's form, and only then says whether a reader would have to ask
+# someone: without that last key it flagged every entry that had a phrase at all.
+GAP_PROMPT = (
+    "You check one entry from a shared memory. Someone will act on it months later, "
+    "with only the entry in front of them. Answer with one JSON object and nothing "
+    "else, with these keys in this order: "
+    '{"vague": "<a short phrase copied from the entry, or \\"\\">", '
+    '"kind": "clarity" | "detail" | "scope" | null, '
+    '"kept_to": "<words copied from the entry, or \\"\\">", "gap": "yes" | "no"}.\n'
+    "vague: when the entry states a rule with never, always, any, every or all, copy "
+    "that rule. Otherwise copy, word for word, the one short phrase of the entry that "
+    'a reader would most likely have to ask about. "" when there is none.\n'
+    "kind: from the form of that phrase. scope: a rule with never, always, any, every "
+    "or all. detail: a quantity or a point in time (an amount, a size, a limit, a "
+    "count, a time, a date, a deadline). clarity: any other phrase. null when vague "
+    'is "".\n'
+    "kept_to: for kind scope only: copy the words of the rule itself that limit it to "
+    "one place, service, system or kind of thing (from the staging server, in the "
+    "mobile app, for card payments). The case the rule came from is not a limit, nor "
+    'is the thing the rule is about. "" when the rule has no such words, and "" for '
+    "any other kind.\n"
+    'gap: "yes" only when the reader cannot act without asking someone:\n'
+    "- clarity or detail: the phrase leans on something known only outside the entry "
+    "(an earlier talk, a past session, a test run, what someone asked for or agreed, "
+    "what another party set) and the entry never gives it. A name, a figure the entry "
+    "gives, or a common word is no gap.\n"
+    '- scope: kept_to is "" and the rule covers more than the case the entry tells of.\n'
+    'Otherwise "no".'
 )
 
 
@@ -348,6 +471,9 @@ def user_prompt(memory: dict, neighbours: list[dict], tags: list[str] = ()) -> s
     """The new memory, its neighbours and the tags on offer, laid out for the
     model. `tags` are the only names the model may suggest for a rewrite."""
     parts = ["New entry:\n" + _entry(memory)]
+    if memory.get("type") not in WHY_TYPES:
+        parts.append(f"Rule 3 does not hold for this entry: its type is "
+                     f"{memory.get('type') or 'none'}, so it needs no why. Skip the No why step.")
     if neighbours:
         listed = "\n\n".join(_entry(n) for n in neighbours)
         parts.append(f"Existing entries in the same project, closest in meaning first:\n{listed}")
@@ -363,15 +489,30 @@ def user_prompt(memory: dict, neighbours: list[dict], tags: list[str] = ()) -> s
 
 # ---- the answer ------------------------------------------------------------
 def parse_verdict(text: str, neighbour_ids: list[int] | None = None,
-                  offered_tags: list[str] | None = None) -> Verdict | None:
+                  offered_tags: list[str] | None = None,
+                  entry_type: str | None = None) -> Verdict | None:
     """Turn the model's answer into a `Verdict`, or None when it is not the
     expected shape.
 
     Bad JSON, a missing key, a verdict outside `VERDICTS`, a rule number that
     is not one of the rules, or a `duplicate_of` or `supersedes` that names
-    an entry the model was not shown all count as no answer. The caller
-    stores nothing then. Keys the prompt asks for on top of these (`why`,
-    `new_facts`) are ignored.
+    an entry the model was not shown all count as no answer. So do an
+    improve whose `needs` is not one of `NEEDS`, and a rewrite that is not a
+    merge (no `duplicate_of`, or no text): suggested text comes only from
+    the two memories of a merge. The caller stores nothing then. Keys the
+    prompt asks for on top of these (`why`, `new_facts`) are ignored.
+
+    An improve's reason is stored as `needs <what>: <line>` (see
+    `improve_reason`) and `needs` is kept on the verdict; any other verdict
+    has `needs` None, whatever the model put there. Only a rewrite keeps
+    its `rewrite` text.
+
+    Two of the checklist's steps follow from what the model already wrote,
+    so they are applied here rather than trusted to its verdict: a rewrite
+    of a listed entry with `new_facts` "" is a plain repeat, so a reject;
+    and an improve for a missing why on an entry whose type is given as
+    `entry_type` and is not one of `WHY_TYPES` is an approve, since rule 3
+    does not hold for it.
 
     `tags` may be left out (then it is empty) but must be a list of strings
     when present. Only a rewrite keeps its tags, and only the names in
@@ -397,6 +538,28 @@ def parse_verdict(text: str, neighbour_ids: list[int] | None = None,
         return None
     if rewrite is not None and not isinstance(rewrite, str):
         return None
+    needs = data.get("needs")
+    if verdict == "improve":
+        if needs not in NEEDS:
+            return None
+        line = reason.strip()
+        # The model sometimes writes the prefix itself; keep it once.
+        if needs_of("improve", line) == needs:
+            line = line.split(":", 1)[1].strip() or line
+        reason = improve_reason(needs, line)
+    else:
+        needs = None
+    if verdict == "rewrite" and duplicate_of is not None and data.get("new_facts") == "":
+        verdict, reason = "reject", reason.strip()
+    if (verdict == "improve" and needs == "reason" and entry_type is not None
+            and entry_type not in WHY_TYPES):
+        verdict, needs, rule = "approve", None, None
+        reason = f"A {entry_type} needs no why."
+    if verdict == "rewrite":
+        if duplicate_of is None or not (rewrite or "").strip():
+            return None
+    else:
+        rewrite = None
     supersedes = data.get("supersedes")
     for ref in (duplicate_of, supersedes):
         if ref is not None:
@@ -410,7 +573,31 @@ def parse_verdict(text: str, neighbour_ids: list[int] | None = None,
     tags = _keep_offered(raw_tags, offered_tags) if verdict == "rewrite" else []
     return Verdict(verdict=verdict, rule=rule, reason=reason.strip(),
                    rewrite=rewrite, duplicate_of=duplicate_of, tags=tags,
-                   supersedes=supersedes)
+                   supersedes=supersedes, needs=needs)
+
+
+def parse_gap(text: str, content: str) -> Verdict | None:
+    """Turn the gap check's answer into an improve verdict, or None when it
+    finds no gap or is not the expected shape. A gap counts only when the
+    phrase is copied from `content` (case and spaces aside): a phrase the
+    model made up names nothing a writer can fix."""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("gap") != "yes":
+        return None
+    vague, kind = data.get("vague"), data.get("kind")
+    if kind not in ("clarity", "detail", "scope") or not isinstance(vague, str):
+        return None
+    phrase = " ".join(vague.split()).strip(" .")
+    if not phrase or phrase.lower() not in " ".join(content.split()).lower():
+        return None
+    line = {"clarity": f'"{phrase}" is not said in the entry; name what it means.',
+            "detail": f'"{phrase}" is not given in the entry; write the value.',
+            "scope": f'"{phrase}" does not say where it holds; name the part it is for.'}
+    return Verdict(verdict="improve", rule=None, reason=improve_reason(kind, line[kind]),
+                   rewrite=None, duplicate_of=None, needs=kind)
 
 
 def _keep_offered(names: list[str], offered: list[str] | None) -> list[str]:

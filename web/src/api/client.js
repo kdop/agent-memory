@@ -120,7 +120,7 @@ export const api = {
    * GET /memories/flagged — the memories the review flagged, newest review first.
    * @param {object} p
    * @param {string} [p.project]
-   * @param {'reject'|'rewrite'} [p.verdict]  only that verdict
+   * @param {'reject'|'improve'|'rewrite'} [p.verdict]  only that verdict
    * @param {'unverified'|'verified'|'flagged'} [p.status]  that status instead
    * @param {boolean} [p.archived]  true lists only the archived memories
    * @param {number} [p.limit=100]  0 = all

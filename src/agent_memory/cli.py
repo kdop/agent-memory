@@ -131,6 +131,12 @@ def add_memory(args, client):
     except ReviewRefused as e:
         # The review model said no, and nothing was stored. The suggestion is
         # printed the way `show` prints a stored one. Exit 4: 3 is a duplicate.
+        if e.verdict == "improve":
+            # The server's own line: low value, then what is missing.
+            print(f"✗ {e.message or e.explanation}")
+            print("Add what is missing and add it again, skip it, or pass --force "
+                  "to store it as written.")
+            sys.exit(4)
         print(f"✗ Review: {_verdict_head(e.verdict, e.rule, e.duplicate_of)}: {e.explanation}")
         if e.verdict == "rewrite":
             _print_suggestion(e.rewrite, e.tags)
@@ -494,7 +500,8 @@ def main():
     query_parser.add_argument(
         "--status", choices=REVIEW_STATUSES,
         help="Only memories with this review status: unverified (the model has not "
-             "checked it), verified (approved) or flagged (rejected or a rewrite suggested)")
+             "checked it), verified (approved) or flagged (rejected, told to improve, or a "
+             "merge suggested)")
     query_parser.add_argument(
         "--current", action="store_true",
         help="Hide the memories a newer one supersedes (those whose header says "
@@ -587,15 +594,15 @@ def main():
 
     review_parser = subparsers.add_parser(
         "review",
-        help="List the memories the review model flagged (reject or rewrite), newest first",
+        help="List the memories the review model flagged (reject, improve or rewrite), newest first",
         description="List the memories the review model flagged: those whose verdict is "
-                    "reject or rewrite, newest review first, each with its verdict and "
+                    "reject, improve or rewrite, newest review first, each with its verdict and "
                     "reason. With --status, list the memories with that review status "
                     "instead (--status unverified: the ones the model has not checked "
                     "yet). With --catch-up, ask the server to review the unverified "
                     "memories, oldest first (written while the model was off).")
     review_parser.add_argument("--project", help="Only this project")
-    review_parser.add_argument("--verdict", choices=["reject", "rewrite"],
+    review_parser.add_argument("--verdict", choices=["reject", "improve", "rewrite"],
                                help="Only this verdict (default: both)")
     review_parser.add_argument(
         "--status", choices=REVIEW_STATUSES,

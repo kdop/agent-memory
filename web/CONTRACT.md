@@ -36,13 +36,14 @@ and validates it on login by calling `GET /tags`.
 
 // ReviewOut — what the review model said about the memory
 {
-  "verdict": "rewrite",                         // approve | reject | rewrite
+  "verdict": "rewrite",                         // approve | reject | improve | rewrite
   "rule": 3,                                    // the rule it breaks; null for approve
   "reason": "…",                                // one sentence
-  "rewrite": "…",                               // suggested text; only for rewrite, else null
+  "rewrite": "…",                               // merged text; only for rewrite, else null
   "duplicate_of": 40,                           // the memory this one repeats, or null
   "tags": ["auth"],                             // suggested tags; empty unless rewrite
-  "supersedes": 12                              // same value as the memory's supersedes
+  "supersedes": 12,                             // same value as the memory's supersedes
+  "needs": null                                 // improve only: reason | clarity | detail | scope
 }
 
 // TagCount
@@ -96,7 +97,7 @@ The dashboard sends `keyword` mode to `GET /memories?q=` (it has pages and every
 and the other two modes here.
 
 ### `GET /memories/flagged` — what the review flagged
-Query params: `project`, `verdict` = `reject`|`rewrite` (only that verdict), `status`
+Query params: `project`, `verdict` = `reject`|`improve`|`rewrite` (only that verdict), `status`
 (that review status instead of the flagged verdicts, so `status=unverified` lists what
 the model has not read yet), `archived` (bool, only the archived memories), `limit`
 (default 100, 0 = all).

@@ -8,7 +8,9 @@ a new tag's descriptor to its own name).
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from .review import needs_of
 
 # The only allowed memory `type` values. Anything else — a typo, a lazy default like
 # the old "code", a one-off like "feedback"/"reference" — is rejected at the API
@@ -75,6 +77,15 @@ class ReviewOut(BaseModel):
     # The memory this one reverses or replaces, when the model said so. The
     # same value as the memory's own `supersedes`.
     supersedes: int | None = None
+    # What an improve says the entry lacks: reason, clarity, detail or scope.
+    # Not a column: read from the stored reason, `needs <what>: <line>`.
+    needs: str | None = None
+
+    @model_validator(mode="after")
+    def _needs_from_reason(self):
+        if self.needs is None:
+            self.needs = needs_of(self.verdict, self.reason)
+        return self
 
 
 class ReviewEntry(BaseModel):
@@ -90,6 +101,14 @@ class ReviewEntry(BaseModel):
     rewrite: str | None = None
     duplicate_of: int | None = None
     tags: list[str] = []
+    # As on `ReviewOut`: read from the reason of an improve.
+    needs: str | None = None
+
+    @model_validator(mode="after")
+    def _needs_from_reason(self):
+        if self.needs is None:
+            self.needs = needs_of(self.verdict, self.reason)
+        return self
 
 
 class MemoryOut(BaseModel):
@@ -108,7 +127,8 @@ class MemoryOut(BaseModel):
     # always None when review is off.
     review: ReviewOut | None = None
     # Whether the model has checked this memory: `unverified` until a verdict
-    # is stored, then `verified` (approve) or `flagged` (reject or rewrite).
+    # is stored, then `verified` (approve) or `flagged` (reject, improve or
+    # rewrite).
     review_status: str = "unverified"
     # The older memory this one reverses or replaces, set from the model's
     # verdict, never from a request; and the newest memory that supersedes

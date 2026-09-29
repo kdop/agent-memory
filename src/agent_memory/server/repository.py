@@ -27,6 +27,7 @@ from .review import (
     UNVERIFIED,
     VERIFIED,
     Verdict,
+    needs_of,
     status_for,
 )
 from . import tag_review as tr
@@ -112,7 +113,8 @@ def _dump_review(r: MemoryReview | None, supersedes: int | None = None) -> dict 
         return None
     return {"verdict": r.verdict, "rule": r.rule, "reason": r.reason,
             "rewrite": r.rewrite, "duplicate_of": r.duplicate_of,
-            "tags": list(r.tags or []), "supersedes": supersedes}
+            "tags": list(r.tags or []), "supersedes": supersedes,
+            "needs": needs_of(r.verdict, r.reason)}
 
 
 def _dump_history(r: MemoryReview) -> dict:
@@ -122,7 +124,7 @@ def _dump_history(r: MemoryReview) -> dict:
     return {"created_at": r.created_at.isoformat(sep=" ", timespec="seconds"),
             "verdict": r.verdict, "rule": r.rule, "reason": r.reason,
             "rewrite": r.rewrite, "duplicate_of": r.duplicate_of,
-            "tags": list(r.tags or [])}
+            "tags": list(r.tags or []), "needs": needs_of(r.verdict, r.reason)}
 
 
 def _dump(m: Memory, snippet: str | None = None, score: float | None = None) -> dict:
@@ -858,7 +860,7 @@ async def _nearest(session, vector, model, project, exclude_id=None) -> list[dic
 
 # The verdicts that mark a memory as flagged: the model said no, or said
 # it should be written differently. An approve is not a flag.
-FLAGGED_VERDICTS = ("reject", "rewrite")
+FLAGGED_VERDICTS = ("reject", "improve", "rewrite")
 
 
 def _newest_reviews():
@@ -906,8 +908,8 @@ def _flagged_filters(stmt, *, project=None, verdict=None, status=None, archived=
 
 async def flagged(session, *, project=None, verdict=None, status=None, archived=False,
                   limit=None) -> list[dict]:
-    """The memories the review flagged: those whose newest review says reject
-    or rewrite, or only `verdict` when given, newest review first (ties:
+    """The memories the review flagged: those whose newest review says reject,
+    improve or rewrite, or only `verdict` when given, newest review first (ties:
     newest memory first, then by id). With `status`, the memories with that
     review status instead (`unverified` ones have no review, so they come
     newest memory first). Same shape as `query`, the review included.
@@ -951,7 +953,7 @@ async def set_review(session, mid: int, verdict: Verdict, model: str) -> dict:
     """Store `verdict` as a new review row of memory `mid`, keeping every
     earlier one (a verdict is part of the timeline and is never rewritten),
     set the memory's `review_status` from it (`verified` for an approve,
-    `flagged` for a reject or rewrite) and its `supersedes` link from
+    `flagged` for a reject, improve or rewrite) and its `supersedes` link from
     `verdict.supersedes` (None clears an earlier link), and return the API
     view of the review. Both follow the newest row, which this one now is.
     `model` names the model that gave it.

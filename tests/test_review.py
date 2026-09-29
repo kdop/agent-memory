@@ -69,6 +69,7 @@ from agent_memory.server.schemas import MemoryOut, ReviewOut, TagIn
 from conftest import (
     APPROVE,
     ARCHIVING,
+    IMPROVE,
     REJECT,
     REWRITE,
     App,
@@ -120,9 +121,19 @@ def test_system_prompt_lists_the_rules_the_keys_and_the_two_cases():
     prompt = review_mod.SYSTEM_PROMPT
     for n, rule in RULES:
         assert f"{n}. {rule}" in prompt
-    assert "exactly these nine keys" in prompt
-    for key in ("verdict", "rule", "reason", "rewrite", "duplicate_of"):
+    assert "exactly these eleven keys" in prompt
+    for key in ("why", "new_facts", "step", "verdict", "needs", "rule", "reason", "rewrite",
+                "duplicate_of"):
         assert f'"{key}"' in prompt
+    # The lead keys come first; needs follows the verdict.
+    assert prompt.index('"why"') < prompt.index('"new_facts"') < prompt.index('"verdict"')
+    assert prompt.index('"verdict"') < prompt.index('"needs"') < prompt.index('"rule"')
+    assert '"approve" | "reject" | "rewrite" | "improve"' in prompt
+    # The why is asked of three types only; a missing one is improve, not reject.
+    assert "Only for the types decision, lesson and constraint" in prompt
+    assert "Improve, needs reason, rule 3" in prompt
+    # What belongs in the project's own files is a rule 4 reject.
+    assert "6. Project fact." in prompt and "which git tracks. Reject, rule 4." in prompt
     assert '"tags": [<names from the list only>]' in prompt
     assert "never a name that is not on the list" in prompt
     assert '"supersedes": <id or null>' in prompt
@@ -188,11 +199,13 @@ def _answer(**changes):
 
 
 def test_verdict_shape_and_defaults():
-    v = parse_verdict(_answer(verdict="rewrite", rule=3, rewrite="better text"))
-    assert v == Verdict("rewrite", 3, "diary", "better text", None)
-    assert v.as_dict() == {"verdict": "rewrite", "rule": 3, "reason": "diary",
-                           "rewrite": "better text", "duplicate_of": None, "tags": [],
-                           "supersedes": None}
+    v = parse_verdict(_answer(verdict="rewrite", rule=None, rewrite="merged", duplicate_of=3))
+    assert v == Verdict("rewrite", None, "diary", "merged", 3)
+    assert v.as_dict() == {"verdict": "rewrite", "rule": None, "reason": "diary",
+                           "rewrite": "merged", "duplicate_of": 3, "tags": [],
+                           "supersedes": None, "needs": None}
+    assert ReviewOut(verdict="improve", reason="needs detail: give it.").needs == "detail"
+    assert ReviewOut(verdict="reject", reason="needs detail: give it.").needs is None
     assert MemoryOut(id=1).review_status == "unverified"
     assert MemoryOut(id=1).supersedes is None and MemoryOut(id=1).superseded_by is None
     assert ReviewOut(verdict="approve").supersedes is None
@@ -216,9 +229,9 @@ def test_verdict_shape_and_defaults():
              tags=["db", "made-up"]), {"neighbour_ids": [3], "offered_tags": ["db"]},
      Verdict("rewrite", None, "diary", "old plus new", 3, ["db"])),
     # Tags: only offered names, in the offered spelling, once each.
-    (_answer(verdict="rewrite", rule=3, rewrite="better",
+    (_answer(verdict="rewrite", rule=None, rewrite="better", duplicate_of=3,
              tags=["Search", "made-up", "database", " search ", "database"]),
-     {"offered_tags": OFFERED}, Verdict("rewrite", 3, "diary", "better", None,
+     {"offered_tags": OFFERED}, Verdict("rewrite", None, "diary", "better", 3,
                                         ["search", "database"])),
     # No tags unless the verdict is rewrite.
     (_answer(tags=["database"]), {"offered_tags": OFFERED},
@@ -226,13 +239,36 @@ def test_verdict_shape_and_defaults():
     (_answer(verdict="approve", rule=None, tags=["database"]), {"offered_tags": OFFERED},
      Verdict("approve", None, "diary", None, None)),
     # An empty offer keeps nothing; no offer keeps the names as given.
-    (_answer(verdict="rewrite", rule=3, rewrite="b", tags=["database"]), {"offered_tags": []},
-     Verdict("rewrite", 3, "diary", "b", None)),
-    (_answer(verdict="rewrite", rule=3, rewrite="b", tags=["a", "A", " b "]), {},
-     Verdict("rewrite", 3, "diary", "b", None, ["a", "b"])),
+    (_answer(verdict="rewrite", rule=None, rewrite="b", duplicate_of=3, tags=["database"]),
+     {"offered_tags": []}, Verdict("rewrite", None, "diary", "b", 3)),
+    (_answer(verdict="rewrite", rule=None, rewrite="b", duplicate_of=3,
+             tags=["a", "A", " b "]), {}, Verdict("rewrite", None, "diary", "b", 3, ["a", "b"])),
     # A missing or null tags key is empty.
-    (_answer(verdict="rewrite", rule=3, rewrite="b", tags=None), {"offered_tags": OFFERED},
-     Verdict("rewrite", 3, "diary", "b", None)),
+    (_answer(verdict="rewrite", rule=None, rewrite="b", duplicate_of=3, tags=None),
+     {"offered_tags": OFFERED}, Verdict("rewrite", None, "diary", "b", 3)),
+    # improve: `needs` is kept and put in front of the reason, once.
+    (_answer(verdict="improve", rule=3, needs="reason", reason="Say why."), {},
+     Verdict("improve", 3, "needs reason: Say why.", None, None, needs="reason")),
+    (_answer(verdict="improve", rule=None, needs="scope", reason="needs scope: Which part?"),
+     {}, Verdict("improve", None, "needs scope: Which part?", None, None, needs="scope")),
+    # Only a merge carries text; `needs` goes with improve only.
+    (_answer(verdict="improve", rule=None, needs="detail", reason="x", rewrite="text"), {},
+     Verdict("improve", None, "needs detail: x", None, None, needs="detail")),
+    (_answer(rewrite="suggested", needs="clarity"), {},
+     Verdict("reject", 2, "diary", None, None)),
+    # A rewrite of a listed entry that adds nothing (new_facts "") is a repeat.
+    (_answer(verdict="rewrite", rule=None, rewrite="same", duplicate_of=3, new_facts="",
+             tags=["database"]), {"neighbour_ids": [3], "offered_tags": OFFERED},
+     Verdict("reject", None, "diary", None, 3)),
+    (_answer(verdict="rewrite", rule=None, rewrite="more", duplicate_of=3, new_facts="a size"),
+     {"neighbour_ids": [3]}, Verdict("rewrite", None, "diary", "more", 3)),
+    # A missing why is no fault in a preference, a note or an untyped entry.
+    *[(_answer(verdict="improve", rule=3, needs="reason"), {"entry_type": t},
+       Verdict("approve", None, f"A {t} needs no why.", None, None))
+      for t in ("preference", "note")],
+    *[(_answer(verdict="improve", rule=3, needs="reason"), {"entry_type": t},
+       Verdict("improve", 3, "needs reason: diary", None, None, needs="reason"))
+      for t in ("decision", "lesson", "constraint")],
 ])
 def test_parse_verdict_reads_a_good_answer(answer, kwargs, expected):
     assert parse_verdict(answer, **kwargs) == expected
@@ -258,8 +294,15 @@ def test_parse_verdict_reads_a_good_answer(answer, kwargs, expected):
     _answer(verdict="approve", rule=None, supersedes=7),                 # the entry itself
     *[_answer(verdict="approve", rule=None, supersedes=v)
       for v in ("4", True, 4.0, [4], {"id": 4})],
-    *[_answer(verdict="rewrite", rule=3, rewrite="better", tags=t)
+    *[_answer(verdict="rewrite", rule=None, rewrite="better", duplicate_of=3, tags=t)
       for t in ("database", 5, [1, 2], ["database", None], {"a": 1})],
+    # A rewrite that is not a merge, or a merge with no text.
+    _answer(verdict="rewrite", rule=3, rewrite="better"),
+    _answer(verdict="rewrite", rule=None, rewrite=None, duplicate_of=3),
+    _answer(verdict="rewrite", rule=None, rewrite="  ", duplicate_of=3),
+    # An improve without a need from the fixed list.
+    _answer(verdict="improve", rule=3),
+    *[_answer(verdict="improve", rule=None, needs=n) for n in (None, "why", "Reason", 3)],
 ])
 def test_parse_verdict_rejects_a_bad_answer(text):
     assert parse_verdict(text, neighbour_ids=[3, 4], offered_tags=OFFERED) is None
@@ -273,8 +316,10 @@ def test_the_statuses_and_the_status_of_each_verdict():
     # a Literal: neither copy may drift.
     assert REVIEW_STATUSES == STATUSES
     assert get_args(ReviewStatus) == STATUSES
-    assert [status_for(v) for v in ("approve", "reject", "rewrite")] == [
-        "verified", "flagged", "flagged"]
+    assert review_mod.VERDICTS == ("approve", "reject", "improve", "rewrite")
+    assert review_mod.NEEDS == ("reason", "clarity", "detail", "scope")
+    assert [status_for(v) for v in ("approve", "reject", "improve", "rewrite")] == [
+        "verified", "flagged", "flagged", "flagged"]
     with pytest.raises(ValueError, match="maybe"):
         status_for("maybe")
     assert review_mod.MODES == ("off", "flag", "refuse")
@@ -396,11 +441,12 @@ def _fake_urlopen(monkeypatch, reply=None, raise_=None):
 
 
 def test_ollama_reviewer_posts_to_api_chat_and_returns_the_verdict(monkeypatch):
-    seen = _fake_urlopen(monkeypatch, reply=_answer(verdict="rewrite", rule=3, rewrite="better",
+    seen = _fake_urlopen(monkeypatch, reply=_answer(verdict="rewrite", rule=None,
+                                                    rewrite="better", duplicate_of=3,
                                                     tags=["made-up", "config"]))
     r = OllamaReviewer("http://ollama:11434/", "qwen3:14b", timeout=12)
-    assert r.review(MEMORY, NEIGHBOURS, OFFERED) == Verdict("rewrite", 3, "diary", "better",
-                                                            None, ["config"])
+    assert r.review(MEMORY, NEIGHBOURS, OFFERED) == Verdict("rewrite", None, "diary", "better",
+                                                            3, ["config"])
     assert (seen["url"], seen["method"], seen["timeout"]) == (
         "http://ollama:11434/api/chat", "POST", 12)
     assert seen["body"] == r.request_body(MEMORY, NEIGHBOURS, OFFERED)
@@ -425,6 +471,108 @@ def test_ollama_reviewer_without_a_usable_answer_gives_none_and_one_log_line(
 def test_ollama_reviewer_keeps_a_supersedes_of_a_listed_neighbour(monkeypatch):
     _fake_urlopen(monkeypatch, reply=_answer(verdict="approve", rule=None, supersedes=3))
     assert OllamaReviewer("http://ollama:11434").review(MEMORY, NEIGHBOURS).supersedes == 3
+
+
+def _replies(monkeypatch, *replies):
+    """urlopen answering each /api/chat call with the next reply in turn; an
+    exception in the list is raised instead. Returns the bodies it was sent."""
+    bodies, queue = [], list(replies)
+
+    def urlopen(req, timeout=None):
+        bodies.append(json.loads(req.data.decode("utf-8")))
+        reply = queue.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        payload = {"message": {"role": "assistant", "content": reply}, "done": True}
+        return _Response(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    return bodies
+
+
+APPROVE_ANSWER = _answer(verdict="approve", rule=None, reason="Fine.")
+DECISION = {"id": 9, "project": "alpha", "type": "decision", "tags": [],
+            "content": "The pool is set to the size the load test showed, because "
+                       "smaller pools queued at peak."}
+
+
+def _gap(vague, kind, gap="yes"):
+    return json.dumps({"vague": vague, "kind": kind, "kept_to": "", "gap": gap})
+
+
+def test_gap_prompt_asks_for_the_phrase_its_kind_and_the_gap():
+    prompt = review_mod.GAP_PROMPT
+    for key in ('"vague"', '"kind"', '"kept_to"', '"gap"'):
+        assert key in prompt
+    assert prompt.index('"vague"') < prompt.index('"kind"') < prompt.index('"gap"')
+    body = OllamaReviewer("http://ollama:11434", "qwen3:14b").gap_request_body(DECISION)
+    assert body["messages"][0]["content"] == prompt
+    assert body["messages"][1]["content"] == f"type: decision\ncontent: {DECISION['content']}"
+    assert (body["format"], body["think"], body["options"]["temperature"]) == ("json", False, 0)
+
+
+@pytest.mark.parametrize("answer, expected", [
+    (_gap("the size the load test showed", "detail"), "detail"),
+    (_gap("The  pool is set", "clarity"), "clarity"),          # spaces and case aside
+    (_gap("smaller pools queued at peak.", "scope"), "scope"),
+    (_gap("the size the load test showed", "detail", gap="no"), None),
+    (_gap("a phrase the entry never had", "detail"), None),   # made up: no gap
+    (_gap("", "detail"), None),
+    (_gap("the size", "reason"), None),                         # not a gap kind
+    (_gap("the size", None), None),
+    ("not json", None),
+    ("[1]", None),
+])
+def test_parse_gap(answer, expected):
+    v = review_mod.parse_gap(answer, DECISION["content"])
+    if expected is None:
+        assert v is None
+    else:
+        assert (v.verdict, v.needs, v.rule, v.rewrite) == ("improve", expected, None, None)
+        assert v.reason.startswith(f"needs {expected}: ")
+        assert review_mod.needs_of("improve", v.reason) == expected
+
+
+def test_a_plain_approve_is_checked_for_a_gap(monkeypatch):
+    bodies = _replies(monkeypatch, APPROVE_ANSWER, _gap("the size the load test showed", "detail"))
+    v = OllamaReviewer("http://ollama:11434").review(DECISION, [])
+    assert (v.verdict, v.needs) == ("improve", "detail")
+    assert v.reason == ('needs detail: "the size the load test showed" is not given in the '
+                        "entry; write the value.")
+    assert [b["messages"][0]["content"] for b in bodies] == [review_mod.SYSTEM_PROMPT,
+                                                             review_mod.GAP_PROMPT]
+
+
+@pytest.mark.parametrize("second", [
+    _gap("", None, gap="no"), "not json", urllib.error.URLError("down"), TimeoutError(),
+])
+def test_no_gap_or_no_answer_keeps_the_approve(monkeypatch, caplog, second):
+    _replies(monkeypatch, APPROVE_ANSWER, second)
+    with caplog.at_level(logging.WARNING, logger="agent_memory.server.review"):
+        v = OllamaReviewer("http://ollama:11434").review(DECISION, [])
+    assert v == Verdict("approve", None, "Fine.", None, None)
+    if isinstance(second, Exception):
+        assert any("gap check of memory #9 failed" in m for m in _messages(caplog))
+
+
+@pytest.mark.parametrize("first", [
+    _answer(),                                                       # a reject
+    _answer(verdict="improve", rule=3, needs="reason"),
+    _answer(verdict="approve", rule=None, supersedes=3),             # a reversal
+])
+def test_only_a_plain_approve_gets_the_second_question(monkeypatch, first):
+    bodies = _replies(monkeypatch, first)
+    v = OllamaReviewer("http://ollama:11434").review(DECISION, NEIGHBOURS)
+    assert v is not None and len(bodies) == 1
+
+
+def test_the_refusal_message():
+    assert review_mod.LOW_VALUE == "Low value memory, retry with more context or skip"
+    assert review_mod.refusal_message(IMPROVE) == (
+        "Low value memory, retry with more context or skip. "
+        "Needs reason: Say why the store moved.")
+    for v in (APPROVE, REJECT, REWRITE, MERGE):
+        assert review_mod.refusal_message(v) is None
 
 
 def test_reachable_asks_api_tags_with_a_two_second_timeout(monkeypatch):
@@ -471,7 +619,7 @@ async def test_flag_mode_stores_the_verdict_and_every_read_shows_it():
 
 
 @pytest.mark.parametrize("verdict, status", [
-    (APPROVE, "verified"), (REJECT, "flagged"), (REWRITE, "flagged"),
+    (APPROVE, "verified"), (REJECT, "flagged"), (REWRITE, "flagged"), (IMPROVE, "flagged"),
 ])
 async def test_each_verdict_gives_its_status(verdict, status):
     async with App(reviewer=FakeReviewer(verdict)) as a:
@@ -648,7 +796,7 @@ async def test_a_re_review_adds_a_row_and_every_read_shows_the_newest():
         history = (await a.client.get(f"/memories/{mid}/reviews")).json()
         assert [r["verdict"] for r in history] == ["approve", "rewrite", "reject"]
         assert set(history[0]) == {"created_at", "verdict", "rule", "reason", "rewrite",
-                                   "duplicate_of", "tags"}
+                                   "duplicate_of", "tags", "needs"}
         assert all(re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\+\d{2}:\d{2})?",
                                 r["created_at"]) for r in history)
         assert history[1]["rewrite"] == REWRITE.rewrite and history[1]["tags"] == REWRITE.tags
@@ -746,7 +894,8 @@ def _refusal(verdict):
     return {"detail": {
         "reason": "review", "verdict": verdict.verdict, "rule": verdict.rule,
         "explanation": verdict.reason, "rewrite": verdict.rewrite,
-        "tags": list(verdict.tags), "duplicate_of": verdict.duplicate_of}}
+        "tags": list(verdict.tags), "duplicate_of": verdict.duplicate_of,
+        "needs": verdict.needs, "message": review_mod.refusal_message(verdict)}}
 
 
 async def test_refuse_mode_refuses_a_reject_or_a_rewrite_and_stores_nothing():
@@ -754,13 +903,15 @@ async def test_refuse_mode_refuses_a_reject_or_a_rewrite_and_stores_nothing():
     async with App(reviewer=fake, review_mode="refuse") as a:
         assert a.app.state.review_mode == "refuse"
         assert await a.add("the original") == 1
-        for verdict in (REJECT, REWRITE, REPEAT, MERGE):
+        for verdict in (REJECT, IMPROVE, REWRITE, REPEAT, MERGE):
             fake.verdict = verdict
             resp = await a.post("Spent the afternoon tidying.", type="note", tags=["work-log"])
             assert resp.status_code == 422
             assert resp.json() == _refusal(verdict)
         assert await a.ids() == [1]
     assert await review_rows() == [(1, "approve", "fake-reviewer")]
+    assert _refusal(IMPROVE)["detail"]["needs"] == "reason"
+    assert _refusal(IMPROVE)["detail"]["message"].startswith(review_mod.LOW_VALUE)
     # The model saw the entry as the writer sent it, with no id yet, and the
     # verified original as its neighbour, found before the write.
     memory, neighbours, tags = fake.calls[-1]
@@ -1169,6 +1320,8 @@ async def test_the_flagged_route():
         resp = await a.client.get("/memories/flagged", params={"verdict": "rewrite"})
         assert [r["id"] for r in resp.json()] == [ids["rewrite"]]
         assert resp.headers["X-Total-Count"] == "1"
+        resp = await a.client.get("/memories/flagged", params={"verdict": "improve"})
+        assert resp.json() == [] and resp.headers["X-Total-Count"] == "0"
         resp = await a.client.get("/memories/flagged", params={"project": "alpha",
                                                                 "verdict": "reject"})
         assert [r["id"] for r in resp.json()] == [ids["new_reject"], ids["old_reject"]]
@@ -1863,5 +2016,29 @@ async def test_real_model_links_a_reversal_and_merges_a_partial_repeat():
     assert rb["review"]["duplicate_of"] == old_b
     merged = rb["review"]["rewrite"] or ""
     assert "postgres" in merged.lower() and "pool" in merged.lower()
-    assert rb["content"] == partial and rb["supersedes"] is None
-    assert old_b_row["content"] == postgres and old_b_row["superseded_by"] is None
+    # The merge archives the older memory and links the newer one to it (#101);
+    # neither text is changed.
+    assert rb["content"] == partial and rb["supersedes"] == old_b
+    assert old_b_row["content"] == postgres and old_b_row["superseded_by"] == new_b
+    assert old_b_row["archived_at"] is not None and ra["archived_at"] is None
+
+
+async def test_an_improve_is_flagged_listed_and_carries_its_need():
+    from agent_memory.client import FLAGGED_VERDICTS
+    async with App(reviewer=FakeReviewer(IMPROVE)) as a:
+        mid = await a.add("Moved the store to Postgres.", type="decision")
+        row = await a.get(mid)
+        assert row["review_status"] == "flagged"
+        assert row["review"]["needs"] == "reason"
+        assert row["review"]["reason"] == IMPROVE.reason
+        listed = (await a.client.get("/memories/flagged", params={"verdict": "improve"})).json()
+        assert [r["id"] for r in listed] == [mid]
+        history = (await a.client.get(f"/memories/{mid}/reviews")).json()
+        assert history[0]["needs"] == "reason"
+    # The copies of the flagging verdicts cannot drift.
+    flagging = tuple(v for v in review_mod.VERDICTS if v != "approve")
+    assert repo.FLAGGED_VERDICTS == FLAGGED_VERDICTS == flagging
+    async with App() as a:
+        for verdict in flagging:
+            resp = await a.client.get("/memories/flagged", params={"verdict": verdict})
+            assert resp.status_code == 200

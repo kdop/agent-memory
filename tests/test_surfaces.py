@@ -36,6 +36,7 @@ from agent_memory.server.review import Verdict
 from conftest import (
     APPROVE,
     ARCHIVING,
+    IMPROVE,
     AUTH,
     REJECT,
     REWRITE,
@@ -485,6 +486,10 @@ def test_cli_in_refuse_mode(reviewing):
         (REWRITE, ["✗ Review: rewrite, rule 3: Say why.", "suggested:", "    Chose Postgres,",
                    "    because of X.", "suggested tags: database, search",
                    "Fix the entry, or pass --force to store it as written."]),
+        (IMPROVE, ["✗ Low value memory, retry with more context or skip. "
+                   "Needs reason: Say why the store moved.",
+                   "Add what is missing and add it again, skip it, or pass --force to store "
+                   "it as written."]),
         (MERGE, ["✗ Review: rewrite, duplicate of #1: Repeats #1 and adds the pool size.",
                  "suggested:", f"    {MERGED}", "suggested tags: database",
                  "Apply it with 'memory update 1' instead of adding."]),
@@ -623,7 +628,7 @@ async def test_mcp_flagged_and_the_history(url):
         assert data["memory"]["review"] == REWRITE.as_dict()
         assert [r["verdict"] for r in data["reviews"]] == ["rewrite", "reject", "approve"]
         assert set(data["reviews"][0]) == {"created_at", "verdict", "rule", "reason",
-                                           "rewrite", "duplicate_of", "tags"}
+                                           "rewrite", "duplicate_of", "tags", "needs"}
         assert await call("memory_show", id=999, reviews=True) == {"memory": None,
                                                                   "reviews": None}
 
@@ -668,12 +673,20 @@ async def test_mcp_add_in_refuse_mode_returns_the_review_error(reviewing):
         assert await call("memory_add", content="Spent the afternoon tidying.", project="p") == {
             "error": "review", "verdict": "reject", "rule": 1,
             "explanation": "It will not matter in a later session.",
+            "needs": None, "message": None, "rewrite": None, "tags": [], "duplicate_of": None}
+        reviewing.fake.verdict = IMPROVE
+        assert await call("memory_add", content="Moved the store.", project="p") == {
+            "error": "review", "verdict": "improve", "rule": 3,
+            "explanation": "needs reason: Say why the store moved.", "needs": "reason",
+            "message": "Low value memory, retry with more context or skip. "
+                       "Needs reason: Say why the store moved.",
             "rewrite": None, "tags": [], "duplicate_of": None}
         reviewing.fake.verdict = MERGE
         out = await call("memory_add", content=MERGED, project="p")
         assert out == {"error": "review", "verdict": "rewrite", "rule": None,
-                       "explanation": "Repeats #1 and adds the pool size.", "rewrite": MERGED,
-                       "tags": ["database"], "duplicate_of": 1}
+                       "explanation": "Repeats #1 and adds the pool size.", "needs": None,
+                       "message": None, "rewrite": MERGED, "tags": ["database"],
+                       "duplicate_of": 1}
         # The writer applies a merge with the update tool, on the old memory.
         assert await call("memory_update", id=1, content=MERGED) == {"found": True,
                                                                     "changes": ["content"]}
@@ -814,6 +827,15 @@ def test_the_client_errors(live_server, reviewing):
     assert (e.verdict, e.rule, e.explanation, e.rewrite, e.tags, e.duplicate_of) == (
         "rewrite", None, "Repeats #1 and adds the pool size.", MERGED, ["database"], 1)
     assert str(e) == "review: rewrite: Repeats #1 and adds the pool size."
+    assert (e.needs, e.message) == (None, None)
+    reviewing.fake.verdict = IMPROVE
+    with pytest.raises(ReviewRefused) as refused:
+        rapi.add("Moved the store.", "tester", "p", [], "decision")
+    e = refused.value
+    assert (e.verdict, e.rule, e.needs) == ("improve", 3, "reason")
+    assert str(e) == e.message == ("Low value memory, retry with more context or skip. "
+                                   "Needs reason: Say why the store moved.")
+    reviewing.fake.verdict = MERGE
     # force skips the review on the client side too; the review runs after.
     assert rapi.add(MERGED, "tester", "p", [], "decision", force=True) == 3
     wait_until(lambda: asyncio.run(statuses())[2] == (3, "flagged"))

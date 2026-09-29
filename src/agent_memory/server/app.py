@@ -26,7 +26,7 @@ from .auth import require_token
 from .checks import warnings_for
 from .db import make_engine, make_sessionmaker
 from .embedding import Embedder, make_embedder
-from .review import Reviewer, Verdict, make_reviewer
+from .review import Reviewer, Verdict, make_reviewer, refusal_message
 from .review import review_mode as review_mode_from_env
 from .review import review_poll as review_poll_from_env
 from .tag_review import TagReviewer, make_tag_reviewer
@@ -139,12 +139,15 @@ def _mode_for(reviewer: Reviewer | None, wanted: str | None) -> str:
 
 
 def _refusal(verdict: Verdict) -> dict:
-    """The `detail` of the 422 a review in refuse mode answers with. `explanation`
-    is the model's reason; `rewrite` and `tags` carry the suggestion when the
-    verdict is a rewrite (None and [] for a reject)."""
+    """The `detail` of the 422 a review in refuse mode answers with. For an
+    improve, `needs` says what the entry lacks and `message` is the line to
+    show the writer (see `review.refusal_message`); both are None otherwise.
+    `explanation` is the model's reason; `rewrite` and `tags` carry the merged
+    text when the verdict is a rewrite (None and [] otherwise)."""
     return {"reason": "review", "verdict": verdict.verdict, "rule": verdict.rule,
             "explanation": verdict.reason, "rewrite": verdict.rewrite,
-            "tags": list(verdict.tags), "duplicate_of": verdict.duplicate_of}
+            "tags": list(verdict.tags), "duplicate_of": verdict.duplicate_of,
+            "needs": verdict.needs, "message": refusal_message(verdict)}
 
 
 async def _refuse_duplicate(session: AsyncSession, embedder: Embedder | None,
@@ -560,8 +563,8 @@ def create_app(
                                          "when the review model would refuse the entry")):
         # A memory that already exists in this project is refused, not stored
         # twice (`_refuse_duplicate`). In refuse mode the model then reads
-        # the entry, and a reject or rewrite refuses it with the verdict and
-        # the suggestion. `force=true` skips both checks. A model that gives
+        # the entry, and any verdict but approve refuses it with the verdict
+        # (and the merged text of a rewrite). `force=true` skips both checks. A model that gives
         # no answer refuses nothing.
         verdict = None
         refusing = _has_model(reviewer) and mode == "refuse" and not force
@@ -681,14 +684,14 @@ def create_app(
         response: Response,
         session: AsyncSession = SessionDep,
         project: str | None = None,
-        verdict: Literal["reject", "rewrite"] | None = None,
+        verdict: Literal["reject", "improve", "rewrite"] | None = None,
         status: ReviewStatus | None = None,
         archived: bool = Query(
             default=False,
             description="List only the archived memories, which are hidden otherwise"),
         limit: int = Query(default=100, ge=0, description="0 = no limit"),
     ):
-        """The memories the review flagged (verdict reject or rewrite, or only
+        """The memories the review flagged (verdict reject, improve or rewrite, or only
         `verdict`), newest review first, each with its review. With `status`,
         the memories with that review status instead, so `status=unverified`
         lists what the model has not checked yet. Archived memories are left
