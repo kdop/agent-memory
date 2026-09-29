@@ -1,6 +1,6 @@
 import { watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useMemoriesStore, SEARCH_MODES, REVIEW_STATUSES } from '@/stores/memories'
+import { useMemoriesStore, SEARCH_MODES, REVIEW_STATUSES, MEMORY_TYPES } from '@/stores/memories'
 
 // Two-way sync between the memories view-state and the URL query string, so
 // copy/paste + refresh restores the exact view (requirement 1e).
@@ -11,6 +11,7 @@ import { useMemoriesStore, SEARCH_MODES, REVIEW_STATUSES } from '@/stores/memori
 //   tags    → memories.tags    (comma-joined tag names, OR-combined)
 //   agent   → memories.agent   (exact agent filter; omitted when empty)
 //   project → memories.project (exact project filter; omitted when empty)
+//   type    → memories.type    (memory type filter; omitted when empty)
 //   status  → memories.status  (review status filter; omitted when empty)
 //   current → memories.current ('1' hides superseded memories; omitted when off)
 //   order   → memories.order   ('<field>_<asc|desc>'; omitted when default)
@@ -27,6 +28,7 @@ function stateToQuery(store) {
   if (store.tags.length) query.tags = store.tags.join(',')
   if (store.agent) query.agent = store.agent
   if (store.project) query.project = store.project
+  if (store.type) query.type = store.type
   if (store.status) query.status = store.status
   if (store.current) query.current = '1'
   if (store.order && store.order !== DEFAULTS.order) query.order = store.order
@@ -43,6 +45,7 @@ function queryToState(store, query) {
     : []
   store.agent = typeof query.agent === 'string' ? query.agent : ''
   store.project = typeof query.project === 'string' ? query.project : ''
+  store.type = MEMORY_TYPES.includes(query.type) ? query.type : ''
   store.status = REVIEW_STATUSES.includes(query.status) ? query.status : ''
   store.current = query.current === '1' || query.current === 'true'
   store.order = typeof query.order === 'string' && query.order ? query.order : DEFAULTS.order
@@ -79,7 +82,7 @@ export function useUrlSync() {
 
   // State → URL: push view-state changes into route.query (replace, no history spam).
   watch(
-    () => [store.q, store.mode, store.tags, store.agent, store.project, store.status,
+    () => [store.q, store.mode, store.tags, store.agent, store.project, store.type, store.status,
           store.current, store.order, store.offset, store.limit],
     () => {
       if (applyingFromUrl) return

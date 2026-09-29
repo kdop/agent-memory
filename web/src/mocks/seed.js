@@ -17,7 +17,7 @@ function makeRng(seed) {
 
 const AGENTS = ['alpha', 'beta']
 const PROJECTS = ['agent-memory', 'web-app', null]
-const TYPES = ['decision', 'lesson', 'note', 'preference']
+const TYPES = ['constraint', 'decision', 'lesson', 'note', 'preference']
 
 // ~40 tags, each with a description.
 const TAG_DEFS = [

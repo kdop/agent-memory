@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 # The only allowed memory `type` values. Anything else — a typo, a lazy default like
 # the old "code", a one-off like "feedback"/"reference" — is rejected at the API
 # boundary rather than silently accepted, so the classification stays meaningful.
-ALLOWED_MEMORY_TYPES = {"decision", "lesson", "note", "preference"}
+ALLOWED_MEMORY_TYPES = {"constraint", "decision", "lesson", "note", "preference"}
 
 
 def _validate_memory_type(v: str | None) -> str | None:

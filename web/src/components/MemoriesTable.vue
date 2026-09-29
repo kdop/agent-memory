@@ -24,7 +24,7 @@
 //   • review → POST /admin/review/{id}, then reload that one row.
 import { computed, ref } from 'vue'
 import { useQuasar } from 'quasar'
-import { useMemoriesStore } from '@/stores/memories'
+import { useMemoriesStore, TYPE_COLOR } from '@/stores/memories'
 import { api } from '@/api/client'
 import MemoryEditDialog from './MemoryEditDialog.vue'
 
@@ -119,7 +119,11 @@ function patchRow(id, fields) {
   if (row) Object.assign(row, fields)
 }
 
-// ---- status / review ----------------------------------------------------
+// ---- type / status / review ---------------------------------------------
+function typeColor(type) {
+  return TYPE_COLOR[type] || 'grey-6'
+}
+
 const STATUS_COLOR = { unverified: 'grey-6', verified: 'positive', flagged: 'warning' }
 function statusColor(status) {
   return STATUS_COLOR[status] || 'grey-6'
@@ -293,6 +297,16 @@ function confirmDelete(row) {
       <q-btn color="primary" icon="add" no-caps label="New memory" @click="openCreate" />
     </template>
 
+    <!-- Type: a filled red badge for a constraint (a hard rule), an outline
+         badge for the other types, a dash for none -->
+    <template #body-cell-type="props">
+      <q-td :props="props">
+        <q-badge v-if="props.row.type" :color="typeColor(props.row.type)" :label="props.row.type"
+                 :outline="props.row.type !== 'constraint'" class="mem-type" />
+        <span v-else>—</span>
+      </q-td>
+    </template>
+
     <!-- Status: unverified (grey), verified (green), flagged (amber) -->
     <template #body-cell-status="props">
       <q-td :props="props">
@@ -417,7 +431,8 @@ function confirmDelete(row) {
   padding: 0 2px;
   border-radius: 2px;
 }
-.mem-status {
+.mem-status,
+.mem-type {
   text-transform: lowercase;
 }
 .mem-links .mem-link + .mem-link {

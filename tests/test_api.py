@@ -71,10 +71,18 @@ async def test_a_bad_add_is_422(body):
 
 async def test_the_allowed_types_and_a_bad_type_on_update():
     async with App() as a:
-        for t in ("decision", "lesson", "note", "preference"):
-            await a.add("x", type=t)
+        for t in ("constraint", "decision", "lesson", "note", "preference"):
+            mid = await a.add("x", type=t)
+            assert (await a.get(mid))["type"] == t
+        assert [m["id"] for m in (await a.client.get(
+            "/memories", params={"type": "constraint"})).json()] == [1]
+        resp = await a.client.patch("/memories/2", json={"type": "constraint"})
+        assert resp.status_code == 200 and (await a.get(2))["type"] == "constraint"
         resp = await a.client.patch("/memories/1", json={"type": "reference"})
         assert resp.status_code == 422
+        resp = await a.client.post("/memories", json={"content": "x", "agent": "t",
+                                                      "type": "rule"})
+        assert resp.status_code == 422 and "constraint" in resp.text
 
 
 # ── add, get, update, delete ─────────────────────────────────────────────────

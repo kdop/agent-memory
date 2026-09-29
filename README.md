@@ -58,9 +58,12 @@ memory search "why we picked the database" --mode hybrid          # both lists, 
 ```
 
 Memories are attributed per agent (`--agent`), scoped by `--project`, classified by
-`--type` (`decision | lesson | note | preference`), and tagged for retrieval. Tags are
-structured objects — `--tags` takes a **JSON array** of `{"name", "description"}`, and a
-new tag with no description defaults to its own name. Full command reference:
+`--type` (`constraint | decision | lesson | note | preference`), and tagged for
+retrieval. The type says how binding a memory is: a `constraint` is a hard rule, a
+`preference` a soft one, a `decision` a settled choice, a `lesson` a past cause and
+effect, a `note` plain reference (the skill spells out how an agent acts on each). Tags
+are structured objects — `--tags` takes a **JSON array** of `{"name", "description"}`,
+and a new tag with no description defaults to its own name. Full command reference:
 `memory --help`.
 
 **Search** has three modes, `--mode keyword|semantic|hybrid`. `keyword` (the default)
@@ -89,8 +92,8 @@ tool returns `{"error": "duplicate", "existing_id": <id>, "score": <score>}`. Up
 the existing memory, or pass `--force` when the new one is meant as a separate record.
 A server without the model has no vectors to compare, so it never refuses. Three
 warnings can print after the id, one per line: `warning: short` (under 40 characters),
-`warning: no-project` (no `--project`), and `warning: no-reasoning` (a `decision` or
-`lesson` with no word that says why, such as "because" or "rejected"). Warnings never
+`warning: no-project` (no `--project`), and `warning: no-reasoning` (a `decision`,
+`lesson` or `constraint` with no word that says why, such as "because" or "rejected"). Warnings never
 block; the memory is stored either way.
 
 **Review by a model.** The server can also have a model read each new memory and judge
